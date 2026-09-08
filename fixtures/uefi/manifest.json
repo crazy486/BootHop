@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "research_date": "2026-09-08",
+  "status": "BLOCKED",
+  "production_identity_contract_approved": false,
+  "real_samples": [],
+  "synthetic_samples": [],
+  "update_pairs": [],
+  "approved_identity_transformations": [],
+  "required_sample_fields": [
+    "id", "path", "capture_time", "capture_os", "capture_os_version",
+    "target_os_evidence", "firmware_vendor", "firmware_model", "firmware_version",
+    "variable_name", "variable_guid", "format", "variable_attributes",
+    "original_sha256", "published_sha256", "anonymization_method",
+    "anonymization_mapping_id", "provenance", "authorization_reference"
+  ],
+  "accepted_capture_formats": ["linux-efivarfs-with-le-u32-attributes", "win32-payload-plus-out-attributes"],
+  "required_update_pair_fields": [
+    "pair_id", "before_sample_id", "after_sample_id", "same_machine_evidence",
+    "same_target_evidence", "component", "version_before", "version_after",
+    "update_event_time", "anonymization_consistency_evidence", "observed_field_changes"
+  ],
+  "missing_evidence": [
+    "real_windows_boot_entry", "real_linux_boot_entry",
+    "windows_normal_update_before_after", "linux_normal_update_before_after",
+    "positive_and_negative_evidence_for_each_identity_transformation",
+    "windows_native_api_capture"
+  ],
+  "blocked_dependent_tasks": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  "notes": "Empty arrays are intentional. No host firmware variables were read. No synthetic fixture is evidence of a real update. See docs/research/identity.md for proposed read-only collection scope."
+}
