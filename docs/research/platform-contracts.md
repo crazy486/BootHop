@@ -24,7 +24,7 @@ Linux 选定系统总线 `org.freedesktop.login1`、对象 `/org/freedesktop/log
 
 v255 文档明确 privileged caller 在 flags=0 时可能忽略 inhibitors，flags=1 要求检查。v257 起普通 block 锁默认约束 privileged caller，flag 1 继续覆盖 weak 锁；v261 文档保留此约定。检查 v257 文档发现 SKIP_INHIBITORS 的正文十六进制示例与位定义不一致，BootHop 不使用该标志；只取三版本一致的 ROOT_CHECK=1。[v257 文档](https://raw.githubusercontent.com/systemd/systemd/v257/man/org.freedesktop.login1.xml)、[v261 文档](https://raw.githubusercontent.com/systemd/systemd/v261/man/org.freedesktop.login1.xml)。
 
-block/weak-block 的拒绝和 delay 锁等待必须分别验收；delay 受 logind 的 `InhibitDelayMaxUSec` 上限约束，不承诺无限等待或所有桌面应用均注册锁。`ListInhibitors`/`CanReboot` 只能作诊断，读取与请求之间有竞态，不能替代实际方法的检查。收到方法成功回复才是 Accepted；明确 error reply 是 Rejected；D-Bus 断连/超时/系统离线且未取得明确回复是 Unknown。`PrepareForShutdown` 信号不是本次请求的唯一关联成功证据。[systemd inhibitor 说明](https://systemd.io/INHIBITOR_LOCKS/)。
+block/block-weak 的拒绝和 delay 锁等待必须分别验收；delay 受 logind 的 `InhibitDelayMaxUSec` 上限约束，不承诺无限等待或所有桌面应用均注册锁。`ListInhibitors`/`CanReboot` 只能作诊断，读取与请求之间有竞态，不能替代实际方法的检查。收到方法成功回复才是 Accepted；明确 error reply 是 Rejected；D-Bus 断连/超时/系统离线且未取得明确回复是 Unknown。`PrepareForShutdown` 信号不是本次请求的唯一关联成功证据。[systemd inhibitor 说明](https://systemd.io/INHIBITOR_LOCKS/)。
 
 发布 gate：Ubuntu 255 与实际 Arch 261 均须以 root helper 请求验证 block 不被绕过、delay 正常等待、261 weak 锁被检查；同时测试 Windows 标准用户 UAC/同用户提升/不同管理员凭据、应用阻止、多会话。当前这些测试全部未运行。如实际行为不符合要求，阻止发布并返回设计审阅；官方文档核对不替代运行结果。
 
