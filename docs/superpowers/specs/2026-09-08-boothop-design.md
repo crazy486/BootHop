@@ -119,6 +119,12 @@ GUI 验收覆盖 Windows 11、Linux Wayland/X11、中文及其他 Unicode、启�
 
 ## 官方参考
 
+### Task 1 技术附录（2026-09-08，研究门槛未通过）
+
+Windows MVP 发现范围收敛为 BootOrder 引用编号，补充 BootCurrent/BootNext 引用编号；不包含未引用的孤立 Boot####，不声称穷尽固件所有条目。不使用未文档化枚举 API 或扫描 65536 个编号。Linux 可读取 efivarfs 中严格匹配的全局 Boot#### 并标明引用状态。详见 `docs/research/platform-contracts.md`。
+
+官方研究提出 Windows 使用非强制 `InitiateSystemShutdownExW`、Linux systemd>=255 使用 `RebootWithFlags(uint64 1)` 的契约；具体会话/inhibitor 行为仍待独立授权验收。身份算法和自动归类白名单未冻结，真实样本及正常更新前后证据均缺失，Task 1 为 BLOCKED，不能据官方研究文档放行后续实现。详见 `docs/research/identity.md`、`docs/research/support-matrix.md` 与 `fixtures/uefi/manifest.json`。
+
 - UEFI Boot Manager：https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html
 - Windows 读取：https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfirmwareenvironmentvariableexw
 - Windows 写入：https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setfirmwareenvironmentvariableexw
