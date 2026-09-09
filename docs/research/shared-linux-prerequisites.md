@@ -98,9 +98,11 @@ Description仅供显示：合法UTF-16改名不影响identity；空描述允许�
 | 操作锁 | `/var/lib/boothop/operation.lock`，root:root 0600普通文件；固定持久inode，不随记录原子替换、不unlink；`flock(LOCK_EX|LOCK_NB)`，EWOULDBLOCK→Busy |
 | efivarfs | 固定`/sys/firmware/efi/efivars`，目录FD验证真实efivarfs类型；仅既有全局GUID及严格Boot四位大写十六进制白名单与BootOrder/BootCurrent/BootNext；固定相对名，不接收任意路径 |
 
-记录和锁通过受验证的父目录FD、no-follow打开并检查owner/mode/type/link-count；FD带CLOEXEC，锁FD保留至整次inspect/configure/switch及安全收尾结束，所有错误路径释放。锁只协调BootHop，不保护外部固件并发。首次configure可创建安全目录/锁，不能把权限错误当未配置；独立诊断不得伪造Missing。锁位置属内部实现，不提供用户可选项。
+installer预建root:root 0700的BootHop目录和root:root 0600的固定持久operation.lock；安装/升级验证并保留既有有效锁inode，不unlink/替换正在使用的锁，不预写目标记录。inspect/configure/switch均只打开既有安装目录与锁，不带创建标志、不静默repair/chmod/chown安装布局。缺目录或缺锁是安装环境错误（保留open/lock阶段与errno），不是RecordState::Missing；仅布局与锁验证成功后的targets.json明确NotFound才是未配置。初装inspect因此可持锁读取Missing记录；布局损坏提示检查安装，不自动重新configure。
 
-save流程：锁内重新load并拒绝未知版本/组件/损坏；完整序列化<=1 MiB；同目录独占新建0600临时普通文件、完整写入并fsync；同目录原子rename替换目标，再fsync父目录。rename前失败保留旧记录；rename成功后目录fsync失败不能承诺旧文件还在，返回存储IO错误且不自动重试configure，重新inspect确认记录。只清理本次已确认的私有临时文件，不删除原记录或锁文件。rename提供名字替换原子性，不等于持久化或固件事务。[Linux man-pages rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html)、[fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)（2026-09-10核对）。
+记录和锁通过受验证的父目录FD、no-follow打开并检查owner/mode/type/link-count；FD带CLOEXEC，锁FD保留至整次inspect/configure/switch及安全收尾结束，所有错误路径释放。锁只协调BootHop，不保护外部固件并发；位置属内部实现，不提供用户可选项。configure只可在有效布局内创建本次临时记录并原子保存，不负责创建或修复目录/锁。
+
+save流程：锁内重新load并拒绝未知版本/组件/损坏；完整序列化<=1 MiB；同目录独占新建0600临时普通文件、完整写入并fsync；同目录原子rename替换目标，再fsync父目录。rename前失败（含临时文件fsync）返回PlatformIo并保留旧记录；rename成功后目录fsync失败必须返回独立 `Error::StoreDurabilityUnknown { raw_code: i32 }`，不能承诺旧文件还在，不自动重试configure/恢复，用户可主动inspect确认当前可见记录但不冒充已证明持久化。只清理本次已确认的私有临时文件，不删除原记录或锁文件。rename提供名字替换原子性，不等于持久化或固件事务。[Linux man-pages rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html)、[fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)（2026-09-10核对）。
 
 ### 3.2 efivarfs读取、BootNext及错误
 
@@ -126,6 +128,8 @@ BootNext与BootCurrent必须**总长6字节**（4字节attributes+2字节u16 LE�
 
 普通IO错误统一新增窄载体 `Error::PlatformIo { operation: String, raw_code: i32 }`：operation仅允许`open/read/write/metadata/lock/fsync/rename/ipc/reboot`，不得携带变量内容/任意路径；其他安全分类沿用MalformedLoadOption、MalformedDevicePath、UnsupportedFormat、ResourceLimit、Busy、IdentityMismatch及记录错误。目标缺失作为独立失败诊断而非UnsupportedRecord/Missing配置；具体阶段随现有Report/Stage返回。底层errno取失败后立即值，不将底层IO成功推成最终OS成功。[open(2)](https://man7.org/linux/man-pages/man2/open.2.html)、[read(2)](https://man7.org/linux/man-pages/man2/read.2.html)（2026-09-10核对；错误映射为产品策略）。
 
+StoreDurabilityUnknown是上述普通PlatformIo的明确例外：store.save→execute返回Err时保留该variant和raw_code，Report若转成诊断也必须保留该类别/码而非泛化为fsync失败；WireResponse.result的Err完整序列化/反序列化为同一Error，不改协议版本1或绕开64 KiB预算。GUI映射独立 `UiState::StoreDurabilityUnknown`，不能映射Unconfigured/Configured/UnsupportedRecord或重启UnknownResult，不宣称保存成功/旧记录保留，不自动保存、恢复、重试或触发switch。提示“配置已替换，但持久化结果未知。请先检查当前配置，勿重复保存。”
+
 ### 3.3 IPC、授权与正常重启
 
 共享协议版本1、u32 LE长度前缀+UTF-8 JSON：请求总帧<=65,536字节，响应总帧<=65,536字节，**前缀计入**；一次操作所有响应帧（含阶段）与stderr合计<=65,536字节。超限ResourceLimit，不输出截断列表作为完整inspect，不为大description/identity另开通道。Report仅必要显示/状态/阶段；不发送原始OptionalData/完整identity或默认公开digest。可信记录的1 MiB限制不是IPC扩容。
@@ -140,8 +144,9 @@ logind固定系统总线/org/freedesktop/login1/Manager `RebootWithFlags(uint64 
 
 | 功能 | 待实施正例 | 待实施拒绝/故障用例 |
 |---|---|---|
-| 记录目录/原子保存 | `secure_store_roundtrip` | `writable_parent_symlink_hardlink_rejected`、`unknown_record_not_overwritten`、`temp_fsync_failure_preserves_old`、`rename_then_dir_fsync_failure_not_claimed_rollback` |
-| 固定锁 | `operation_lock_held_through_flow` | `busy_lock_has_no_firmware_mutation`、`lock_fd_released_on_error`、`record_replace_does_not_replace_lock_inode` |
+| 记录目录/原子保存 | `secure_store_roundtrip` | `writable_parent_symlink_hardlink_rejected`、`unknown_record_not_overwritten`、`temp_fsync_platform_io_preserves_old`、`post_rename_dir_fsync_store_durability_unknown` |
+| 安装布局/固定锁 | `installer_precreates_layout_first_inspect_reports_missing_record`、`operation_lock_held_through_flow` | `missing_lock_is_environment_error_not_missing_record`、`configure_does_not_repair_install_layout`、`upgrade_preserves_lock_inode`、`busy_lock_has_no_firmware_mutation`、`lock_fd_released_on_error`、`record_replace_does_not_replace_lock_inode` |
+| 持久化错误端到端 | `store_durability_unknown_error_wire_roundtrip` | `flow_report_preserves_store_durability_unknown`、`gui_store_unknown_not_success_or_missing`、`store_unknown_no_auto_retry_restore_or_switch` |
 | Linux变量 | `efivar_prefix_and_payload_separate`、`boot_next_exact_six_bytes` | §3.2全部errno/长度测试；`bootorder_empty_not_auto_target`、`enumerated_target_disappears_fails` |
 | 单次BootNext写 | `absent_next_write_then_verify`、`same_next_skip_write_still_verify` | `conflicting_next_stops`、`next_write_short_no_replay_no_reboot`、`readback_mismatch_no_reboot`、`aba_does_not_authorize_restore` |
 | 资源计数域 | `single_payload_record_ipc_budgets_are_distinct` | `enumeration_raw_aggregate_limit_no_partial_success`、`allocation_failure_is_resource_limit` |
