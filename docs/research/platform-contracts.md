@@ -2,6 +2,8 @@
 
 首次访问日期2026-09-08；证据/产品约束更新2026-09-09。Task 1 状态 BLOCKED，原因见 [identity](identity.md)。本文固定实现候选的API、输入边界和失败语义。此后controller经用户授权，已在Arch普通权限下完成一次私有只读采集；这只验证当前变量可读取和本地解析，不等于生产平台实现或固件启动行为验收。未运行提权、Windows固件API、UEFI写入或重启测试；生产实现仍须等研究门槛放行。
 
+2026-09-10调度：[Linux-first修订](../superpowers/specs/2026-09-10-linux-first-amendment.md) 待独立审查通过后按1S/1L/1W放行，替代旧Windows证据全局阻塞。本文Linux契约的完整性/fake清单归1L（PENDING_REVIEW），Windows原生实证归1W（BLOCKED）；后者不阻前置充分的Core/Linux，但阻Windows存储/adapter/UAC/namedpipe/reboot/GUI集成/packaging及最终跨平台声明。1L前置审查不要求提前触发真实写入/重启，真实验收须另行授权。
+
 ## UEFI 访问与发现范围
 
 全局变量 GUID 为 `8be4df61-93ca-11d2-aa0d-00e098032b8c`。BootNext/BootCurrent 的值恰为小端 u16，BootOrder 为长度为偶数的 u16 数组。Windows 得到的 payload 不含 efivarfs 属性前缀；Linux 文件前四字节单独解析。读取设置和请求启动是不同证据阶段。[UEFI 2.10 §3](https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html)、[efivarfs 文档](https://docs.kernel.org/filesystems/efivarfs.html)。
@@ -54,10 +56,10 @@ Windows SetFirmwareEnvironmentVariableExW 与 Linux efivarfs 均无已核实 com
 
 | 项目 | 无额外实机操作可确认的依据 | 仍未完成的验证 |
 |---|---|---|
-| UEFI/efivarfs读取与属性分离 | 官方格式已核对；私有Arch采集8个raw文件哈希/两次内容一致，2个真实项有用户OS标签 | Windows原生API out attributes/payload；生产reader错误分支 |
+| UEFI/efivarfs读取与属性分离 | 官方格式已核对；私有Arch采集8个raw文件哈希/两次内容一致，2个真实项有用户OS标签 | 1L生产reader错误/fake清单核对；Windows原生API out attributes/payload另归1W |
 | Windows发现 | 固定BootOrder并集BootCurrent/BootNext引用范围与孤立项限制，公开读取API契约已明确 | Windows实际发现和权限；不承诺完整枚举 |
 | 正常重启 | Win32非强制参数/异步返回及logind255/261 flag1依据已核对 | 应用阻止、root block/block-weak/delay、UAC不同账户和多会话实验 |
 | IPC/存储 | 固定helper、权限保护、对端核验API、Unknown语义；按已批准64KiB对齐 | Windows具体token访问权、管道ACL及两平台端到端集成 |
-| identity消费 | 私有样本支持外层观察；内部仍opaque，已批准全部OptionalData（含空）完整长度+SHA-256严格组件 | 完整结构字段契约/正反验证和Windows原生只读API证据仍为Task1 gate；内部解码与更新配对只约束未来放宽，公开原文不要求 |
+| identity消费 | 私有样本支持外层观察；内部仍opaque，已批准全部OptionalData（含空）完整长度+SHA-256严格组件 | 1S完整结构字段/正反依据仍阻identity；1W只阻Windows分支，不混作共享gate；内部解码与配对只约束未来放宽，公开原文不要求 |
 
-本轮没有执行表中待完成的操作，也没有把需要Windows主机/更新事件的缺口改写为已验证。下一步仍由研究门槛决定，不因平台文档已收敛而开始生产实现。
+本轮没有执行表中待完成操作，也未把Windows主机/更新事件缺口改成已验证。下一步按Linux-first审查和各子门槛决定；contract/fake不算Windows实证，Linux开发包不算最终跨平台发布。Task1整体未完成不能替代各分支具体状态。

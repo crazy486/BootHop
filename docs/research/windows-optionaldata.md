@@ -1,6 +1,6 @@
 # Windows OptionalData：已观察布局与未证实语义
 
-核对日期：2026-09-09。Task 1 状态 **BLOCKED**。本页只公开通用结构与证据等级，不包含私有启动项编号、描述、设备路径、GUID、完整参数或原始字节。研究仅使用经授权取得的本地副本和公开官方资料，没有再次读取固件、操作Windows、提权或更改引导器。
+核对日期：2026-09-09；2026-09-10仅同步Linux-first门槛。Task1整体 **BLOCKED**，不是全平台统一停工状态：1S约束共享身份，1L约束Linux，1W实证只阻Windows分支及最终跨平台声明；修订审查通过后按各自前置放行。本页只公开通用结构与证据等级，不包含私有启动项编号、描述、设备路径、GUID、完整参数或原始字节。历史研究使用授权副本与官方资料；本轮无采样、Windows操作、提权或引导器修改。
 
 ## 可确认的事实
 
@@ -40,7 +40,7 @@ Windows私有副本按 EFI_LOAD_OPTION 的description终止符与FilePathListLen
 
 任意长度/摘要或结构化identity变化均在BootNext修改及重启前停止，不自动保存/跟随编号/configure。用户必须主动重新选择并确认OS，经正常UAC/polkit授权后由configure建立新基线；正常未变化切换无额外确认。未知组件与普通失配区分，不提供普通configure恢复入口。
 
-完整精确策略已获批准，但没有新增宽松变换或自动归类规则。`WINDOWS`标记、UTF-16、GUID形状、用户标签、连续两次相同均只支持有限观测。未来若要语义归一化或容忍更新变化，须另定版本、取得正式依据/正反证据/自然更新配对并批准；配对不再阻止MVP strict exact。完整结构字段契约和Windows原生只读API证据仍为Task1缺口。
+完整精确策略已获批准，但没有新增宽松变换或自动归类规则。`WINDOWS`标记、UTF-16、GUID形状、用户标签、连续两次相同均只支持有限观测。未来若要语义归一化或容忍更新变化，须另定版本、取得正式依据/正反证据/自然更新配对并批准；配对不再阻止MVP strict exact。完整结构字段契约是1S缺口；Windows原生只读API是1W缺口，不能用后者阻止前置已满足的共享/Linux实现，也不能从前者或fake通过宣称Windows可用。
 
 ## 证据状态
 
@@ -52,7 +52,7 @@ Windows私有副本按 EFI_LOAD_OPTION 的description终止符与FilePathListLen
 | Windows OptionalData正式字段语义与更新稳定性 | 未完成，opaque；strict exact不要求解码 |
 | OpaqueExactV1完整精确策略 | 已用户批准；不等于完整生产identity契约完成 |
 | 同目标正常更新前后Windows/Arch配对 | 各0组；仅未来放宽/归一化gate，不阻MVP strict exact；本轮无采集/更新 |
-| 完整结构字段契约、支持规则和正反验证 | 未完成；Task1门槛仍有效 |
-| Windows原生GetFirmwareEnvironmentVariableExW权限/out attributes/payload/错误语义 | 未完成，Task1实施前硬gate；Arch副本不替代，需另获只读授权；无法安全观察的错误明确限制并fake覆盖 |
+| 完整结构字段契约、支持规则和正反验证 | 1S未完成，阻identity消费者；1S.parse验证表可独立放行纯parser |
+| Windows原生GetFirmwareEnvironmentVariableExW权限/out attributes/payload/错误语义 | 1W未完成，阻Windows分支和最终跨平台声明，不阻自身前置已满足的Core/Linux；Arch副本不替代，需另获只读授权；安全不可观察错误明确限制并fake覆盖 |
 | UAC/会话/正常重启与BootNext写入实测 | 未完成，属于后续单独授权验收，不为补只读gate执行 |
 | 公开、匿名化审阅后的真实fixture及回归样本 | 尚未发布，不是MVP硬gate；私有真实证据有效，普通CI用synthetic |

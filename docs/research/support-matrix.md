@@ -2,6 +2,8 @@
 
 首次核对日期2026-09-08；私有样本/用户语义证据更新2026-09-09。所有“支持”均为拟发布范围。已完成一次经授权的Arch普通权限只读采集，取得用户确认的Arch Linux/Windows11启动项各1项；双向重启、Windows API与GUI验收尚未执行，Task1仍BLOCKED。不得将样本或主机包版本记录当固件兼容认证。
 
+2026-09-10 [Linux-first修订](../superpowers/specs/2026-09-10-linux-first-amendment.md) 已条件授权，待独立审查后按分支继续：1S共享字段仍未通过，1S.parse和1L待独立审查，1W实证缺失仅阻Windows分支/最终跨平台声明。全部实施项PENDING；Linux开发构建可在其自身前置通过后推进，不要求1W，也不宣称Windows可用或双向验收完成。
+
 | 环境 | 地位与架构 | 已知实际版本 / 缺口 | 验收范围 |
 |---|---|---|---|
 | Windows 11 | 主要实机，x86-64 / x86_64-pc-windows-msvc | 用户确认其真实启动项语义；原始项由Arch读取。具体版本、build、固件未知；未在Windows运行API | UAC 双账户情形、MSI 安装/卸载/ACL、应用阻止重启、中文/Unicode/高 DPI、实际进 Arch |
@@ -41,11 +43,16 @@ WiX7 官方文档要求显式 EULA 接受并有维护费条款，发布者需按
 
 | 层级 | 必须覆盖 | 本次状态 |
 |---|---|---|
-| 研究/夹具（MVP硬gate） | 私有真实Windows/Linux项；完整结构字段/支持范围/独立验证及正反依据；Windows原生只读API权限/out attributes/payload/错误语义 | 私有真实项各1个、OS已确认；opaque完整精确策略已批准，完整结构字段契约及Windows原生API实证仍缺，Task1 BLOCKED；安全不可观察的错误需明确限制并fake覆盖 |
+| 1S共享前置 | 私有真实项；结构字段/支持范围/独立验证/序列化和正反依据 | BLOCKED：结构字段未冻结，opaque已批准不自动完成1S；阻Task3及消费者 |
+| 1S.parse纯解析前置 | 头/description/路径长度与节点/终止/OptionalData边界验证表 | PENDING_REVIEW：表独立通过可放行2，不等待完整identity或1W |
+| 1L Linux前置 | efivarfs/存储锁/pkexec/IPC/logind契约及fake验证清单 | PENDING_REVIEW：官方与Arch依据已有，须完整性审查；不提前执行真实写入/重启 |
+| 1W Windows前置 | 原生只读API实际读取/权限/out attributes/payload/错误语义 | BLOCKED：无原生实证；仅阻6W/8/9W/10W/11W及最终跨平台声明，fake/Arch不替代；安全不可观察错误明确限制 |
 | 未来放宽研究（非MVP硬gate） | 正常更新配对、OptionalData语义及允许变化/归一化的依据 | 配对各0、内部仍opaque；不阻MVP strict exact，不以本修订批准任何宽松变换 |
 | 可选公开夹具（非MVP硬gate） | 匿名化及逐字段隐私审查 | 公开fixture为0；私有真实样本可支持研究，普通CI用synthetic，不提交原文 |
 | 纯测试 | parser边界、opaque含空SHA-256/完整摘要往返/逐字节变化拒绝、未知非UTF-16可登记、未知设备路径仍拒绝、未知记录/组件/算法禁止覆盖、主动重新确认、helper篡改参数、阶段Unknown、超限/断连、ABA恢复拒绝 | 未开始，禁止访问宿主固件；不得将synthetic变体当自然更新 |
 | 包与 GUI | 两端目录保护；普通用户不能改记录/helper；中文/其他 Unicode、缩放、高 DPI；Arch Wayland、Ubuntu Wayland/X11、Windows | 未开始 |
+| 11L Linux开发交付 | Linux构建/开发包、隔离CI和明确未验收标签 | PENDING；自身前置通过可推进，非最终发布，不以未实施Windows成功stub占位 |
+| 11W / 最终跨平台交付 | Windows包/CI；两分支与全部子门槛通过；另行授权的双向BootNext/重启、BootOrder及GUI/安装实测 | PENDING；Windows证据缺失及真实验收未执行，不能从Linux成功推出完成 |
 | inhibitor/应用阻止 | systemd255 root+block/delay、261 root+block/weak/delay，Windows 未保存应用和 UAC 不同账户 | 未执行，需独立显式授权 |
 | UEFI VM 和实机 | 双向 switch；BootNext 冲突/存在/丢失；比较每次 BootOrder 前后；分别记录 API、读回、重启接受、人工 OS 观察 | 未执行，需独立显式授权；BootOrder 变化即失败 |
 

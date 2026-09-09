@@ -1,7 +1,10 @@
 {
   "schema_version": 1,
   "research_date": "2026-09-09",
+  "workflow_revision_date": "2026-09-10",
   "status": "BLOCKED",
+  "status_scope": "aggregate_task_1_not_a_blanket_platform_execution_gate",
+  "linux_first_revision_review": "PENDING",
   "opaque_exact_strategy_approved": true,
   "production_identity_contract_approved": false,
   "approved_optional_data_strategy": {
@@ -59,6 +62,29 @@
     "windows_normal_update_before_after", "linux_normal_update_before_after"
   ],
   "unpublished_public_fixtures_are_mvp_blocker": false,
-  "blocked_dependent_tasks": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  "notes": "Initial research had no samples. An authorized Arch read-only capture was later retained privately and labeled by the user. Empty real_samples means zero published fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published here. The user-approved 2026-09-09 opaque amendment supersedes blanket rejection of unknown OptionalData and the normal-update-pair MVP gate. Strict exact comparison includes empty data and does not relax structural, device-path or attribute validation. Two repeated reads are not an update pair. OptionalData internal semantics remain opaque. Full structural identity and Windows native read-only API evidence remain incomplete; safely unobservable errors must state limits and use fake coverage. Task 1 remains BLOCKED; no new firmware operation is authorized."
+  "prerequisites": {
+    "1S": {"status": "BLOCKED", "scope": "shared_identity_contract", "missing": ["complete_structural_field_support_validation_and_serialization_contract", "positive_negative_validation_basis"]},
+    "1S.parse": {"status": "PENDING_REVIEW", "scope": "independent_bounded_uefi_parser_validation_table"},
+    "1L": {"status": "PENDING_REVIEW", "scope": "linux_contract_completeness_and_fake_validation_checklist"},
+    "1W": {"status": "BLOCKED", "scope": "windows_native_read_only_api_evidence", "missing": ["actual_read_privilege_out_attributes_payload_error_evidence"], "blocks": ["6W", "8", "9W", "10W", "11W", "cross_platform_acceptance"]}
+  },
+  "implementation_tasks": {
+    "2": {"status": "PENDING", "requires": ["1S.parse"]},
+    "3": {"status": "PENDING", "requires": ["2", "1S"]},
+    "4": {"status": "PENDING", "requires": ["3"]},
+    "5": {"status": "PENDING", "requires": ["4"]},
+    "6L": {"status": "PENDING", "requires": ["5", "1L"]},
+    "7": {"status": "PENDING", "requires": ["6L"]},
+    "9L": {"status": "PENDING", "requires": ["5", "6L", "7"]},
+    "10L": {"status": "PENDING", "requires": ["9L"]},
+    "11L": {"status": "PENDING", "requires": ["10L"]},
+    "6W": {"status": "PENDING", "requires": ["5", "6L", "1W"]},
+    "8": {"status": "PENDING", "requires": ["6W", "1W"]},
+    "9W": {"status": "PENDING", "requires": ["8", "9L", "1W"]},
+    "10W": {"status": "PENDING", "requires": ["9W", "10L", "1W"]},
+    "11W": {"status": "PENDING", "requires": ["10W", "11L", "1W"]}
+  },
+  "all_implementation_tasks_also_require": ["linux_first_revision_review_passed"],
+  "cross_platform_acceptance": {"status": "PENDING", "requires": ["11L", "11W", "1S", "1L", "1W", "separately_authorized_real_firmware_reboot_gui_install_acceptance"]},
+  "notes": "Initial research had no samples. An authorized Arch read-only capture was later retained privately and labeled by the user. Empty real_samples means zero public fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published here. The approved opaque amendment supersedes blanket unknown-OptionalData rejection and the update-pair MVP gate; strict exact including empty remains unchanged. The conditionally authorized 2026-09-10 Linux-first revision, pending review, replaces the Windows-evidence blanket execution gate with 1S/1S.parse/1L/1W dependencies. 1S remains incomplete; parser may proceed only after its independent validation table passes. 1W blocks only Windows tasks and final cross-platform claims; contract/fake/Linux success is not Windows evidence. No success stubs. Task 1 aggregate remains BLOCKED; no new system operation is authorized."
 }

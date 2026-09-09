@@ -1,6 +1,8 @@
 # UEFI identity 研究契约（Task 1，BLOCKED）
 
-首次官方核对日期：2026-09-08；证据更新：2026-09-09。初稿时无真实样本；此后经用户授权，在Arch普通权限下采集了2个真实启动项的私有副本，用户分别确认为Arch Linux与Windows 11。两次连续读取一致，正常更新配对数仍为0，公开真实fixture仍为0。[已用户批准的opaque修订](../superpowers/specs/2026-09-09-opaque-identity-amendment.md) 已替代初稿的非空未知OptionalData一律拒绝及更新配对MVP硬gate；完整精确组件已批准，不意味着结构化identity完整契约已验收。私有真实样本可支持研究，公开原文不是MVP门槛。完整结构字段契约和Windows原生只读API证据仍缺失，Task1为BLOCKED；manifest只记录非敏感计数与门槛。
+首次官方核对日期：2026-09-08；样本证据更新：2026-09-09。初稿无样本，后经授权在Arch普通权限取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同，更新配对0、公开fixture0。[opaque修订](../superpowers/specs/2026-09-09-opaque-identity-amendment.md) 已批准完整精确组件，不意味着完整结构契约验收；公开原文和更新配对不是MVP gate。2026-09-10 [Linux-first修订](../superpowers/specs/2026-09-10-linux-first-amendment.md) 待独立审查通过后分层放行：1S结构字段仍未冻结、1S.parse与1L待独立审查，1W Windows原生证据缺失只阻Windows分支及最终跨平台声明。Task1整体BLOCKED，但不以1W代替Core/Linux自身前置。manifest记录非敏感计数与各子门槛。
+
+本表属于1S；具体未决项见Linux-first修订§2，不在调度修订中冻结。1S.parse先完成固定头、description、路径长度/节点/终止及OptionalData剩余字节的有界验证表，独立审查后可供Task2；未知节点可解析不等于身份支持。Task3必须等本表完整归属、验证/正反依据及序列化契约通过1S。1W未通过不阻这些规范与既有Arch样本研究。
 
 ## 来源和解释边界
 

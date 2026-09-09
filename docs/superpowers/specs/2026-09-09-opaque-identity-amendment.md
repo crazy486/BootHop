@@ -4,6 +4,8 @@
 
 独立审查结果：规格符合，设计质量 Approved；未发现 Critical、Important 或 Minor 问题。其后用户明确批准全部修订。
 
+2026-09-10调度补充：[Linux-first修订](2026-09-10-linux-first-amendment.md) 待独立审查通过后替代本文§4中Windows实证阻全部实施的旧范围，仅将其保留为1W/Windows分支及最终跨平台声明硬gate；不改变本文已批准的opaque身份规则。
+
 ## 评估与推荐
 
 推荐采用结构化 canonical identity + opaque OptionalData 完整内容指纹。BootHop 的目标是确认当前启动配置与用户授权登记的目标一致，而非验证任意引导器参数的内部语义。将“不能解释参数”一律等同于“无法登记已有目标”，超出了这一目标；此前的拒绝策略是产品保守选择，并非 UEFI 对 OptionalData 的结构要求。
@@ -59,12 +61,12 @@ opaque失配后用户必须主动进入重新配置，并重新确认目标OS语
 | OptionalData完整内部语义 | opaque exact模式不要求理解；仍明确标为未解释 |
 | Windows/Arch正常更新前后对照 | 不再是MVP strict exact-match实施硬门槛；保留为未来允许变化、归一化或降低误失效的研究证据 |
 | 结构化字段的任何新宽松变换 | 仍须明确格式依据和正反测试；不能借本修订自动放宽 |
-| Windows原生firmware API实机验证 | 仍是Task1实施前硬门槛：需Windows实际GetFirmwareEnvironmentVariableExW、权限、out attributes、payload与错误语义证据；Arch采样不能替代 |
+| Windows原生firmware API实机验证 | 需Windows实际GetFirmwareEnvironmentVariableExW、权限、out attributes、payload与错误语义证据，Arch采样不能替代；Linux-first修订审查通过后归1W，只阻Windows实施分支和最终跨平台声明，不阻自身前置已满足的Core/Linux |
 | 固件写入/BootNext/重启真实验收 | 单独授权的后续验收，仍不能被普通测试触发；本修订不授权执行 |
 
 Windows前置门槛限于单独获授权的只读原生API验证；不会为了补齐门槛执行SetFirmwareEnvironmentVariableExW、重启或主动制造系统变化。无法安全观察的错误分支明确记录限制，以fake覆盖，不能伪装实机证据。
 
-本轮仅同步已批准文档，不发起Windows读取或申请系统权限。修订已获批，但Task1不能直接标完成；仍需完整结构字段契约和剩余Windows证据。
+本轮仅同步文档，不发起Windows读取或申请系统权限。opaque修订已获批，Task1不能直接标完成；当前结构字段缺口归1S、Linux契约核对归1L、Windows原生缺口归1W，按Linux-first修订分别审查放行。
 
 ## 5. 验证要求（全部普通测试使用fake或本地夹具）
 
