@@ -52,7 +52,7 @@ Windows私有副本按 EFI_LOAD_OPTION 的description终止符与FilePathListLen
 | Windows OptionalData正式字段语义与更新稳定性 | 未完成，opaque；strict exact不要求解码 |
 | OpaqueExactV1完整精确策略 | 已用户批准；不等于完整生产identity契约完成 |
 | 同目标正常更新前后Windows/Arch配对 | 各0组；仅未来放宽/归一化gate，不阻MVP strict exact；本轮无采集/更新 |
-| 完整结构字段契约、支持规则和正反验证 | 1S未完成，阻identity消费者；1S.parse验证表可独立放行纯parser |
+| 完整结构字段契约、支持规则和正反验证 | 已按授权保守范围收敛，1S/1S.parse READY_FOR_REVIEW；测试名不是执行结果，须审查后放行对应任务，见shared-linux-prerequisites |
 | Windows原生GetFirmwareEnvironmentVariableExW权限/out attributes/payload/错误语义 | 1W未完成，阻Windows分支和最终跨平台声明，不阻自身前置已满足的Core/Linux；Arch副本不替代，需另获只读授权；安全不可观察错误明确限制并fake覆盖 |
 | UAC/会话/正常重启与BootNext写入实测 | 未完成，属于后续单独授权验收，不为补只读gate执行 |
 | 公开、匿名化审阅后的真实fixture及回归样本 | 尚未发布，不是MVP硬gate；私有真实证据有效，普通CI用synthetic |

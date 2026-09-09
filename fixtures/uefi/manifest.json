@@ -4,7 +4,8 @@
   "workflow_revision_date": "2026-09-10",
   "status": "BLOCKED",
   "status_scope": "aggregate_task_1_not_a_blanket_platform_execution_gate",
-  "linux_first_revision_review": "PENDING",
+  "linux_first_revision_review": "APPROVED",
+  "shared_linux_review_artifact": "docs/research/shared-linux-prerequisites.md",
   "opaque_exact_strategy_approved": true,
   "production_identity_contract_approved": false,
   "approved_optional_data_strategy": {
@@ -53,8 +54,7 @@
     "update_event_time", "anonymization_consistency_evidence", "observed_field_changes"
   ],
   "missing_evidence": [
-    "complete_structured_identity_field_contract_and_validation_basis",
-    "positive_and_negative_tests_for_supported_structural_rules",
+    "independent_review_of_shared_parser_identity_linux_contracts",
     "windows_native_firmware_api_actual_read_privilege_out_attributes_payload_error_evidence"
   ],
   "future_relaxation_research_gaps_not_mvp_gates": [
@@ -63,9 +63,9 @@
   ],
   "unpublished_public_fixtures_are_mvp_blocker": false,
   "prerequisites": {
-    "1S": {"status": "BLOCKED", "scope": "shared_identity_contract", "missing": ["complete_structural_field_support_validation_and_serialization_contract", "positive_negative_validation_basis"]},
-    "1S.parse": {"status": "PENDING_REVIEW", "scope": "independent_bounded_uefi_parser_validation_table"},
-    "1L": {"status": "PENDING_REVIEW", "scope": "linux_contract_completeness_and_fake_validation_checklist"},
+    "1S": {"status": "READY_FOR_REVIEW", "scope": "shared_identity_contract", "artifact_section": "2", "remaining": ["independent_review"], "synthetic_tests_implemented": false},
+    "1S.parse": {"status": "READY_FOR_REVIEW", "scope": "independent_bounded_uefi_parser_validation_table", "artifact_section": "1", "remaining": ["independent_review"], "synthetic_tests_implemented": false},
+    "1L": {"status": "READY_FOR_REVIEW", "scope": "linux_contract_completeness_and_fake_validation_checklist", "artifact_section": "3", "remaining": ["independent_review"], "synthetic_tests_implemented": false, "real_write_reboot_integration_acceptance": "PENDING"},
     "1W": {"status": "BLOCKED", "scope": "windows_native_read_only_api_evidence", "missing": ["actual_read_privilege_out_attributes_payload_error_evidence"], "blocks": ["6W", "8", "9W", "10W", "11W", "cross_platform_acceptance"]}
   },
   "implementation_tasks": {
@@ -86,5 +86,5 @@
   },
   "all_implementation_tasks_also_require": ["linux_first_revision_review_passed"],
   "cross_platform_acceptance": {"status": "PENDING", "requires": ["11L", "11W", "1S", "1L", "1W", "separately_authorized_real_firmware_reboot_gui_install_acceptance"]},
-  "notes": "Initial research had no samples. An authorized Arch read-only capture was later retained privately and labeled by the user. Empty real_samples means zero public fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published here. The approved opaque amendment supersedes blanket unknown-OptionalData rejection and the update-pair MVP gate; strict exact including empty remains unchanged. The conditionally authorized 2026-09-10 Linux-first revision, pending review, replaces the Windows-evidence blanket execution gate with 1S/1S.parse/1L/1W dependencies. 1S remains incomplete; parser may proceed only after its independent validation table passes. 1W blocks only Windows tasks and final cross-platform claims; contract/fake/Linux success is not Windows evidence. No success stubs. Task 1 aggregate remains BLOCKED; no new system operation is authorized."
+  "notes": "Initial research had no samples. An authorized Arch read-only capture remains private with user OS labels. Empty real_samples means zero public fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published. Opaque strict exact including empty is unchanged; update pairs are only a future-relaxation gate. Linux-first review is Approved; its conditional authorization is effective. Shared parser, conservative identity and Linux contracts are now READY_FOR_REVIEW, not passed: tests are named synthetic requirements, not implemented results. 1W still blocks Windows tasks/final cross-platform claims only; contract/fake/Linux success is not Windows evidence. All implementation tasks remain pending. Task 1 aggregate remains BLOCKED; no new system operation is authorized."
 }

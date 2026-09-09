@@ -2,7 +2,7 @@
 
 首次访问日期2026-09-08；证据/产品约束更新2026-09-09。Task 1 状态 BLOCKED，原因见 [identity](identity.md)。本文固定实现候选的API、输入边界和失败语义。此后controller经用户授权，已在Arch普通权限下完成一次私有只读采集；这只验证当前变量可读取和本地解析，不等于生产平台实现或固件启动行为验收。未运行提权、Windows固件API、UEFI写入或重启测试；生产实现仍须等研究门槛放行。
 
-2026-09-10调度：[Linux-first修订](../superpowers/specs/2026-09-10-linux-first-amendment.md) 待独立审查通过后按1S/1L/1W放行，替代旧Windows证据全局阻塞。本文Linux契约的完整性/fake清单归1L（PENDING_REVIEW），Windows原生实证归1W（BLOCKED）；后者不阻前置充分的Core/Linux，但阻Windows存储/adapter/UAC/namedpipe/reboot/GUI集成/packaging及最终跨平台声明。1L前置审查不要求提前触发真实写入/重启，真实验收须另行授权。
+2026-09-10调度：Linux-first独立审查Approved，用户条件授权生效，按1S/1L/1W放行，替代旧Windows证据全局阻塞。[共享/Linux前置契约](shared-linux-prerequisites.md) 已收敛有界解析、完整保守identity、固定对象/锁/错误/资源与fake清单；1S.parse/1S/1L均READY_FOR_REVIEW，不自行标通过。1W仍BLOCKED，仅阻Windows分支及最终跨平台声明；不提前触发真实写入/重启，真实验收另行授权。
 
 ## UEFI 访问与发现范围
 
@@ -15,6 +15,8 @@ Windows inspect 的发现范围明确为 **BootOrder 引用编号并集 BootCurr
 Linux 最低支持环境为已挂载且可访问 efivarfs、systemd 255、polkit 124 的矩阵环境；内核单独版本不是足够能力证明。路径固定 `/sys/firmware/efi/efivars`，检查文件系统类型与目录对象，拒绝 symlink/意外文件类型，读取限制、短读与变化错误明确报告。不自动 mount、不清除 immutable 标志、不创建/修复启动项。允许的将来写操作仅对 BootNext；写缓冲为小端属性 7 与两字节目标。BootNext 不存在仅能由明确 NotFound 判定。其他变量仅只读。
 
 产品限制（非规范给定值）：单变量 payload 上限 1 MiB；超过上限返回 ResourceLimit，不截断解析。BootOrder 最多由 u16 空间表达的 65536 个编号，重复编号去重但保留诊断；实际输出受 IPC 总上限约束，不能把截断结果显示成完整发现。
+
+收敛补充：单次枚举保留raw累计<=1 MiB（Linux前缀计入）；单份受保护记录<=1 MiB；IPC仍各帧/累计64 KiB。计数域独立，超限ResourceLimit且无部分完整结果。固定操作锁及rename后fsync持久化未知边界详见共享契约§3，不把原子替换承诺为失败回滚。
 
 ## 正常重启
 

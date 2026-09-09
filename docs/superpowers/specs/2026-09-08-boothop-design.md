@@ -4,7 +4,7 @@
 
 2026-09-09同步：[已用户批准的 opaque identity 修订](2026-09-09-opaque-identity-amendment.md) 生效；以下§5及门槛替代初稿对应规则。Task1仍BLOCKED，本轮仅改文档，不授权任何固件读取、写入或重启。
 
-2026-09-10调度同步：[Linux-first修订](2026-09-10-linux-first-amendment.md) 已获用户条件授权，待独立规格/质量审查通过后按分层前置继续SDD，审查前不实现。下述1S/1L/1W分层替代Windows证据阻所有任务的旧全局门槛；不改变opaque或结构有效性规则，不授权系统操作。
+2026-09-10调度同步：[Linux-first修订](2026-09-10-linux-first-amendment.md) 独立规格/质量审查Approved，用户条件授权已生效，按分层前置继续SDD。下述1S/1L/1W分层替代Windows证据阻所有任务的旧全局门槛；不改变opaque或结构有效性规则，不授权系统操作。其后共享/Linux契约按保守范围收敛为READY_FOR_REVIEW，须各子项审查后放行，不等于实施完成。
 
 ## 1. 产品与支持范围
 
@@ -49,7 +49,7 @@ BootHop 能验证启动项配置并请求一次性启动，不能证明引导器
 
 GUI 缓存只供显示，不是实时验证结果，也不是 helper 的可信依据。普通启动 GUI 不主动提权；显示已保存目标及缓存状态。执行时再提权，以真实 UEFI 和受保护记录为准。
 
-可信目标记录及其所在目录、helper 安装位置依赖管理员/root 写权限保护。记录包含格式版本、目标 OS 归类、定位编号和 canonical identity。更新使用原子替换，失败保留原记录。
+可信目标记录及其所在目录、helper安装位置依赖管理员/root写权限保护。记录包含格式版本、目标OS归类、定位编号和canonical identity，有界存储上限1 MiB（不同于64 KiB IPC）。更新使用原子替换：替换前失败保留旧记录；rename已成功但目录fsync失败则报告存储持久化未知，不能虚构旧记录仍在，不自动恢复/重试。名字替换原子性不是事务回滚保证。
 
 未知或较新的记录格式版本必须 fail closed。UnsupportedRecordVersion 与尚未配置是不同状态；inspect/configure/switch 中依赖该记录的操作必须停止。当前版本不能通过普通 configure 覆写不支持的记录，也不能把读取失败解释为记录不存在。提示“当前 BootHop 版本无法读取该配置，请使用兼容版本或升级；如需恢复，应使用未来明确的管理员恢复流程”。MVP 不新增 reset 功能。独立于记录的只读环境诊断仍可返回，但不能将未知版本显示成可首次配置状态。
 
@@ -125,7 +125,7 @@ GUI 验收覆盖 Windows 11、Linux Wayland/X11、中文及其他 Unicode、启�
 
 本文确定产品与架构，并不把尚未验证的细节视为已成立。实现计划先安排只读研究与样本核对，产出 canonical identity 字段表、正向归类规则、平台枚举/重启/IPC 方案和明确的系统版本、CPU 架构及发行包矩阵。规则不能满足本文边界时，回到设计审阅，不悄悄降低安全要求。
 
-MVP strict exact-match不再以Windows/Arch正常更新配对或OptionalData内部语义为硬门槛；配对仅是未来允许变化、归一化或降低误失效的研究门槛。现有私有真实样本可支持研究，不要求公开原文，普通CI使用synthetic。Task1拆为1S共享、1L Linux契约、1W Windows实证；完整结构字段未冻结意味着1S仍未通过，不能开始identity消费者。1S.parse有界解析验证表单独通过即可启动纯parser，无须等待其余身份归属或1W；Linux依赖1S/1L各自前置，不因1W未完而一律停工。
+MVP strict exact-match不再以Windows/Arch正常更新配对或OptionalData内部语义为硬门槛；配对仅是未来允许变化、归一化或降低误失效的研究门槛。私有真实样本可支持研究，公开原文不要求，普通CI使用synthetic。Task1拆1S共享、1L Linux契约、1W Windows实证；当前 [共享/Linux前置契约](../../research/shared-linux-prerequisites.md) 已收敛，1S.parse/1S/1L READY_FOR_REVIEW，尚未放行。1S.parse单独通过即可启动纯parser，Task3须完整1S；Linux依赖自身前置，不因1W未完一律停工。
 
 Windows原生GetFirmwareEnvironmentVariableExW实际读取、权限、out attributes、payload与错误语义证据是1W硬gate，只阻Windows存储/adapter/UAC/namedpipe/reboot/GUI集成/packaging和最终跨平台声明。Arch副本、contract/fake与交叉编译不能替代。只读实证需另获授权；无法安全观察的错误记录限制并fake覆盖，不主动制造系统变化。Task1总体保持未完成；Linux开发构建不等于Windows可用或最终双向发布，不用成功stub补Windows路径。真实BootNext/重启和GUI/安装验收仍另行授权，不属于提前实施的许可。
 
@@ -137,7 +137,7 @@ Windows原生GetFirmwareEnvironmentVariableExW实际读取、权限、out attrib
 
 Windows MVP 发现范围收敛为 BootOrder 引用编号，补充 BootCurrent/BootNext 引用编号；不包含未引用的孤立 Boot####，不声称穷尽固件所有条目。不使用未文档化枚举 API 或扫描 65536 个编号。Linux 可读取 efivarfs 中严格匹配的全局 Boot#### 并标明引用状态。详见 `docs/research/platform-contracts.md`。
 
-官方研究提出Windows非强制 `InitiateSystemShutdownExW`、Linux systemd>=255 `RebootWithFlags(uint64 1)` 契约；具体行为待独立授权验收。2026-09-09经授权在Arch取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同不是更新配对。Windows OptionalData仍opaque，当日已批准完整精确组件，替代一律拒绝及更新配对MVP gate。2026-09-10进一步将调度拆为1S/1L/1W：结构字段未冻结仍阻identity；Windows原生证据缺失只阻Windows分支及最终跨平台声明，不自动阻已经满足自身前置的Core/Linux。Task1总状态BLOCKED，各子项须独立审查放行；自动Known表仍未启用。详见研究文档、Linux-first修订及只记录非敏感计数/子门槛的manifest。
+官方研究提出Windows非强制 `InitiateSystemShutdownExW`、Linux systemd>=255 `RebootWithFlags(uint64 1)` 契约；具体行为待独立授权验收。2026-09-09经授权在Arch取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同不是更新配对。Windows OptionalData仍opaque，当日已批准完整精确组件，替代一律拒绝及更新配对MVP gate。2026-09-10调度拆1S/1L/1W；其后保守结构字段及Linux契约收敛为READY_FOR_REVIEW，未通过审查仍不得启动对应实现。1W缺失只阻Windows分支/最终跨平台声明。Task1总BLOCKED，Known启用表为空；详见shared-linux-prerequisites及manifest。
 
 - UEFI Boot Manager：https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html
 - Windows 读取：https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfirmwareenvironmentvariableexw

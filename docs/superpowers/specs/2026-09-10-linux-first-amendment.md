@@ -1,6 +1,6 @@
 # BootHop Linux-first：按证据拆分实施门槛
 
-状态：用户已条件授权此兼容方向，待独立规格/质量审查通过后生效并继续SDD；不需要再次整体批准，审查未通过前不开始生产实现。2026-09-10。本轮仅同步文档，不访问固件、不提权、不升级、不执行真实写入或重启。
+状态：独立规格/质量审查Approved，用户条件授权已生效，按分层前置继续SDD；不需要再次整体批准。2026-09-10。后续共享/Linux契约研究仍逐项待审，本页通过不自动放行它们；本轮仅文档，不访问固件、不提权、不升级、不执行真实写入或重启。
 
 审查记录：独立规格与质量审查均Approved，无缺陷；用户条件已满足，本调度修订现生效。下述各技术子门槛仍须单独通过，不能由本次审查代替。
 
@@ -20,12 +20,12 @@
 
 | 子门槛 | 必须完成并独立审查的产物 | 当前状态 |
 |---|---|---|
-| 1S：shared prerequisites | 完整结构字段/支持范围/独立验证契约，样本来源与正反验证表，opaque组件/记录版本/分类规则一致性 | BLOCKED：结构字段尚未冻结，本轮不替其作决定 |
-| 1S.parse：1S内可单独放行的纯解析契约 | 有界UEFI解析验证表，覆盖以下条目，明确每项输入边界、结果和synthetic测试名；不依赖尚未裁定的identity字段归属 | PENDING_REVIEW：未单独放行 |
-| 1L：Linux contract prerequisites | efivarfs读取/属性/错误/限制，Linux存储锁、pkexec/IPC、logind非强制重启及阶段语义的契约和fake验证清单；区分官方/Arch观察/待验收 | PENDING_REVIEW：文档依据已存在，需子门槛完整性审查 |
+| 1S：shared prerequisites | 完整结构字段/支持范围/独立验证契约，样本来源与正反验证表，opaque组件/记录版本/分类规则一致性 | READY_FOR_REVIEW：后续按用户指定保守范围收敛，见共享契约§2，尚未放行 |
+| 1S.parse：1S内可单独放行的纯解析契约 | 有界UEFI解析验证表，覆盖以下条目，明确每项输入边界、结果和synthetic测试名；不依赖identity字段归属 | READY_FOR_REVIEW：共享契约§1，未单独放行 |
+| 1L：Linux contract prerequisites | efivarfs读取/属性/错误/限制，Linux存储锁、pkexec/IPC、logind非强制重启及阶段语义的契约和fake验证清单；区分官方/Arch观察/待验收 | READY_FOR_REVIEW：共享契约§3，需子门槛完整性审查 |
 | 1W：Windows evidence | Windows实际GetFirmwareEnvironmentVariableExW读取、权限、out attributes、payload及错误语义证据；安全不可观察的错误明确限制并fake覆盖 | BLOCKED：未取得Windows原生只读实证 |
 
-1S的具体剩余项：支持设备路径节点/前缀与单实例范围；GPT标识及分区号身份归属；LBA/大小保留和独立验证；FilePath节点数量、绝对路径/编码及不做哪些规范化；description仅显示的合法性；load-option执行属性与变量attributes的独立规则；CanonicalIdentity完整字段/序列化与正反用例；自动Known规则如无充分证据保持空表、使用NeedsConfirmation。每项要有格式依据、明确支持/拒绝及验证方式；本修订不冻结这些选择，也不把自然更新配对重新设为strict exact的前提。
+调度修订时1S的具体剩余清单是：节点/前缀与单实例；GPT标识/分区号；LBA/大小；FilePath数量/绝对路径/编码/规范化；description合法性；两类attributes；完整序列化/正反用例；Known不足时空表/NeedsConfirmation。本调度修订没有冻结算法；其后用户指定保守三节点范围，现已在 [共享/Linux前置契约](../../research/shared-linux-prerequisites.md) §2逐项收敛为READY_FOR_REVIEW，不把自然更新配对重新设为strict exact前提。
 
 1S.parse验证表必须覆盖：6字节固定头的小端读取和截断；description的UTF-16终止/编码与边界；FilePathListLength有界消费；设备路径节点最小长度、溢出、终止和实例边界；剩余OptionalData完整保留、允许空和非UTF-16；解析失败不得产出有效目标。纯解析能表示未知节点不代表identity支持，目标验证仍拒绝不在白名单内的设备路径。验证表审查通过可单独启动Task2，不必等待1S其余identity决定或1W。
 

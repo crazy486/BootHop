@@ -1,8 +1,8 @@
-# UEFI identity 研究契约（Task 1，BLOCKED）
+# UEFI identity 研究契约（1S READY_FOR_REVIEW；Task1 BLOCKED）
 
-首次官方核对日期：2026-09-08；样本证据更新：2026-09-09。初稿无样本，后经授权在Arch普通权限取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同，更新配对0、公开fixture0。[opaque修订](../superpowers/specs/2026-09-09-opaque-identity-amendment.md) 已批准完整精确组件，不意味着完整结构契约验收；公开原文和更新配对不是MVP gate。2026-09-10 [Linux-first修订](../superpowers/specs/2026-09-10-linux-first-amendment.md) 待独立审查通过后分层放行：1S结构字段仍未冻结、1S.parse与1L待独立审查，1W Windows原生证据缺失只阻Windows分支及最终跨平台声明。Task1整体BLOCKED，但不以1W代替Core/Linux自身前置。manifest记录非敏感计数与各子门槛。
+首次官方核对日期2026-09-08，样本证据日期2026-09-09。初稿无样本，后经授权在Arch普通权限取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同，更新配对0、公开fixture0。opaque精确策略已批准，Linux-first独立审查Approved后用户条件授权生效。2026-09-10按用户指定的保守范围收敛本表与 [共享/Linux前置契约](shared-linux-prerequisites.md)：1S.parse/1S/1L均READY_FOR_REVIEW，不自行标通过；1W仍缺原生证据，Task1总体BLOCKED。公开原文/更新配对不是strict exact门槛，1W不代替Core/Linux自身前置。
 
-本表属于1S；具体未决项见Linux-first修订§2，不在调度修订中冻结。1S.parse先完成固定头、description、路径长度/节点/终止及OptionalData剩余字节的有界验证表，独立审查后可供Task2；未知节点可解析不等于身份支持。Task3必须等本表完整归属、验证/正反依据及序列化契约通过1S。1W未通过不阻这些规范与既有Arch样本研究。
+本表属于1S，替代先前拟定/未决的当前态表述，研究历史保留。完整字面字段/版本/序列化与测试名在共享契约§2；1S.parse验证表在§1，可独立审查后供Task2。未知节点可解析不代表identity支持；Task3必须等完整1S审查通过，本页READY不是实施完成或实机验收。
 
 ## 来源和解释边界
 
@@ -15,26 +15,26 @@
 
 ## 字段表
 
-“拟身份”表示待稳定性证据确认的 canonical 字段，不是当前可用白名单。表中测试名均为待实施验收名，没有声称已存在或已运行测试。样本列的“私有2项”只说明本机字段已观测，不说明变换已验证；OS标签来自用户确认，不来自名称或路径推断。
+表中身份归属为本次保守契约，等待独立审查而非等待自然更新；测试名均待实施，没有声称已存在/运行。样本“私有2项”只说明已观察字段，不证明普适稳定性；OS标签来自用户确认，不是名称/路径推断。
 
 | 字段 | 格式来源 | 是否身份 | 规范化方法 | 是否独立验证 | 样本 | 回归测试名 |
 |---|---|---|---|---|---|---|
 | Boot#### 编号 | UEFI §3.1.1，四位大写十六进制 UINT16 | 否，仅定位 | 解析为 u16；不追随其他编号 | 原编号存在、当前值可读 | 私有2项；缺删除对照 | `missing_original_id_stops` |
-| 节点 type/subtype/length、顺序、结束节点 | UEFI §10.3 | 拟身份：有序结构 | 按节点解析；不把未知节点原样哈希后称为支持 | 长度至少 4、无溢出、恰好消费边界；单实例且一个完整路径 | 私有2项均HD+FilePath+EndEntire；缺负例 | `truncated_node_rejected`、`extra_path_rejected` |
-| 硬件/ACPI/消息节点前缀 | UEFI §10.3 | 未决 | 不删除、不重排、不把完整路径折叠成短路径；初始候选范围暂不支持此前缀 | 未批准节点组合返回 UnsupportedFormat | 缺失 | `unknown_prefix_rejected` |
-| HD 节点分区格式/签名类型 | UEFI §10.3.5.1 | 拟身份 | 初始研究候选仅 GPT=2、GUID=2；MBR、无签名均暂拒绝 | HD 节点长 42，分区号非零、签名非零 | 私有2项均GPT/GUID；缺MBR负例 | `mbr_or_unsigned_rejected` |
-| GPT UniquePartitionGuid、分区号 | UEFI §3.1.2、§10.3.5.1 | 拟身份 | GUID 字段按 UEFI 字节布局解析成固定语义值，分区号 u32；不改 GUID 大小端含义 | 拒绝不一致/重复目标；GUID 不是磁盘 GUID | 私有2项；标识不公开，缺变化对照 | `partition_guid_change_rejected`、`partition_number_change_rejected` |
-| 分区起始 LBA、大小 | UEFI §10.3.5.1 | 未决：拟保守保留为独立字段 | 不擅自忽略移动/扩容变化；身份归属与独立验证由结构字段契约裁定；未来忽略移动/扩容差异等放宽策略才要求真实更新证据 | 非零大小、范围无溢出；无磁盘核对能力不得宣称已验证 GPT 内容 | 私有2项；无移动/扩容对照 | `partition_geometry_change_requires_review` |
-| FilePath 节点 UTF-16 路径 | UEFI §10.3.5.4 | 拟身份 | 拟支持单个绝对路径节点；保留 UTF-16 码元，不做 Unicode NFC、大小写折叠、斜杠替换、`.`/`..` 消解 | 终止符在节点内、无嵌入 NUL、有效编码；相对路径/歧义形式暂拒绝 | 私有2项均单绝对路径；路径不公开，缺变化对照 | `loader_path_change_rejected`、`invalid_utf16_path_rejected` |
-| 多 FilePath 节点拼接 | UEFI §10.3.5.4 给出分隔符合并/插入规则 | 未决 | 规范允许，BootHop 尚无正反样本；当前候选范围不允许此变换 | 暂 UnsupportedFormat，不能任意拼接字符串 | 缺失 | `split_path_not_silently_normalized` |
-| Description | UEFI §3.1.3 | 否 | 仅显示；合法改名拟不改变身份；不 trim 后用名称分类 | 检查 UTF-16 NUL 结束、边界、有效编码，显示层转义控制字符 | 私有2项；缺改名对照 | `valid_description_change_preserves_identity`、`malformed_description_rejected` |
-| EFI_LOAD_OPTION.Attributes | UEFI §3.1.3，值内 u32 | 否，独立可执行性策略 | 不整体参与 identity；拟允许 ACTIVE=1、HIDDEN=0/1、CATEGORY_BOOT=0 | 每次必须 ACTIVE；APP、保留位、FORCE_RECONNECT 暂拒绝，hidden 只影响展示 | 私有2项均为1；缺属性变化对照 | `inactive_target_rejected`、`hidden_change_preserves_identity`、`reserved_load_attribute_rejected` |
-| UEFI 变量 attributes | UEFI §3.3；Linux 前缀或 Win32 out 参数 | 否，独立存储策略 | 与上行严格不同；Boot####/BootOrder/BootNext 拟要求 NV\|BS\|RT=7；BootCurrent 为 BS\|RT=6 | 每次核对；未知认证/附加属性不静默接受 | 私有Boot项均为7；BootNext不存在；无Win32样本 | `variable_attributes_not_load_attributes`、`unexpected_variable_attributes_rejected` |
-| FilePathListLength | UEFI §3.1.3，u16 | 否，结构长度 | 与解析消费字节数相等，非身份哈希 | 校验 description、path、OptionalData 边界 | 私有2项；缺畸形对照 | `path_list_length_overflow_rejected` |
+| 节点 type/subtype/length、顺序、结束节点 | UEFI §10.3 | 是：有序完整结构 | 全部字段精确保留；不以未知节点哈希替代支持 | 恰好单元素/单实例HD+FilePath+EndEntire，长度/终止有效 | 私有2项均此结构；synthetic待实施 | `short_gpt_filepath_supported`、`extra_path_rejected` |
+| 硬件/ACPI/消息节点前缀 | UEFI §10.3 | 不支持输入 | 不删除、不重排、不折叠完整路径 | 一律UnsupportedFormat | 无需支持此范围 | `unknown_prefix_rejected` |
+| HD分区格式/签名类型 | UEFI §10.3.5.1 | 是 | GPT=2、GUID=2固定保留，拒绝MBR/无签名 | HD长度42、分区号非零、16字节签名非全零 | 私有2项GPT/GUID | `hd_all_fields_roundtrip`、`mbr_or_unsigned_rejected` |
+| GPT UniquePartitionGuid、分区号 | UEFI §3.1.2、§10.3.5.1 | 是 | 16字节UEFI原布局与u32精确比较，不变端序/转文本 | 重复canonical候选显式歧义；不声称核对实际磁盘GUID唯一 | 私有2项；标识不公开 | `partition_guid_change_rejected`、`partition_number_change_rejected` |
+| 分区起始LBA、大小 | UEFI §10.3.5.1 | 是，全部保留 | u64精确比较，不忽略移动/扩容；未来忽略差异才需更新证据 | 大小非零，start+size无溢出；不读取/验证实际GPT | 私有2项；无自然移动对照 | `partition_start_change_rejected`、`partition_size_change_rejected`、`partition_range_overflow_rejected` |
+| FilePath UTF-16路径 | UEFI §10.3.5.4 | 是 | 单绝对路径，原码元+固定NUL/节点长度；不NFC/折叠/拼接/斜杠替换 | 有效UTF-16、恰一个末尾NUL，拒绝相对、`.`/`..`、连续/末尾分隔符、仅根、正斜杠 | 私有2项单绝对路径；原路径不公开 | `absolute_unicode_path_preserved`、`loader_path_change_rejected`、`invalid_utf16_path_rejected` |
+| 多FilePath节点/多实例/多列表元素 | UEFI §10.3、§3.1.3 | 不支持输入 | 不拼接/合并任何节点 | UnsupportedFormat；通用parser可表示不等于支持 | 无需支持此范围 | `split_path_not_silently_normalized`、`multi_instance_rejected`、`extra_path_rejected` |
+| Description | UEFI §3.1.3 | 否 | 只显示；合法改名不改变身份；不以名称分类 | 有效UTF-16和NUL边界；空允许，显示转义控制字符 | 私有2项；synthetic改名待实施 | `valid_description_change_preserves_identity`、`malformed_description_rejected` |
+| EFI_LOAD_OPTION.Attributes | UEFI §3.1.3，值内u32 | 否，独立执行验证 | 仅0x1或0x9：ACTIVE必需，HIDDEN可选，CATEGORY_BOOT=0 | 每次验证，APP/保留位/FORCE_RECONNECT/未激活拒绝 | 私有2项均1 | `hidden_change_preserves_identity`、`inactive_target_rejected`、`reserved_load_attribute_rejected` |
+| UEFI变量attributes | UEFI §3.3；Linux前缀/Win32 out参数 | 否，独立存储验证 | Boot####/BootOrder/BootNext恰7，BootCurrent恰6 | 未知认证/附加位均拒绝；不混淆load属性 | 私有Boot项7；Next不存在；无Win32实证 | `variable_attributes_not_load_attributes`、`unexpected_variable_attributes_rejected` |
+| FilePathListLength | UEFI §3.1.3，u16 | 是，结构派生字段 | 显式保存，必须等于三节点长度之和；不作总哈希 | 校验description/path/OptionalData边界和记录派生一致性 | 私有2项 | `path_list_length_overflow_rejected`、`bad_digest_or_derived_length_corrupt` |
 | OptionalData 空值 | UEFI §3.1.3；已批准opaque修订§2 | 是：OpaqueExactV1 | byte_length=0 + SHA-256(empty)，完整32字节摘要；无忽略路径 | 外层边界有效；空/非空转换失配，停止switch后须主动重新确认configure | 用户确认的Arch私有样本为空；实现测试未开始 | `empty_optional_sha256_vector`、`opaque_exact_change_rejected` |
 | OptionalData 非空：Windows / Linux loader / 厂商数据 | UEFI仅定义传入加载镜像的剩余字节；已批准opaque修订§2 | 是：OpaqueExactV1 | 完整原始字节长度+SHA-256；不删NUL/尾部、不重编码/折叠/抽取子集；未知非UTF-16同样适用 | 先验证外层/设备路径/attributes；长度或摘要变化停止switch，须主动重新确认OS并授权configure；不证明内部语义安全 | Windows私有样本136字节，内部语义仍opaque；自然更新对照仅未来放宽所需 | `opaque_non_utf16_can_register`、`opaque_exact_change_rejected` |
 
-未批准新的宽松身份变换。拟允许的description改名、hidden改变仍须格式依据及结构合法正例/破坏结构或改变目标的反例；可使用明确标识的synthetic测试，不冒充自然更新。设备前缀、几何字段、路径支持/规范化与独立验证仍有未决项，因此完整CanonicalIdentity序列化尚未冻结；OptionalData组件本身已定为 `OpaqueExactV1 { algorithm: Sha256, byte_length: u64, digest: [u8; 32] }`。正常更新配对不阻MVP strict exact，只约束未来允许变化/归一化。
+本轮无宽松路径/参数变换：结构字段全部精确保存比较，description/HIDDEN仅显示但每次独立验证。完整序列化为CanonicalIdentity版本1，精确字面字段见共享契约§2.1；OptionalData逻辑组件为OpaqueExactV1。description改名/hidden变化的正反用例列在§2.2，synthetic待实施不冒充自然更新。所有契约READY_FOR_REVIEW，审查通过后才供Task3实现；更新配对仅约束未来放宽。
 
 组件种类/版本、算法、长度和完整32字节摘要须显式持久化，摘要为规范64位十六进制；未知记录/组件版本或算法fail closed且不可普通configure覆盖，损坏/错误摘要长度也拒绝、不等于Missing。configure从同一读取buffer计算结构字段与组件，switch不接受GUI摘要，任何失配不得WriteNext/Reboot/SaveRecord或自动重登记。可信记录/缓存/日志不存原始OptionalData，指纹不默认公开。相等判断依赖SHA-256抗碰撞假设，不证明语义、最终OS或相同路径二进制/BCD不变。
 
@@ -44,8 +44,8 @@ Windows非空OptionalData的官方依据、可观察布局和已批准精确策�
 
 | 输入/证据 | 当前研究结果 | 来源与反例 |
 |---|---|---|
-| 单实例短路径 HD(GPT GUID)+单绝对 FilePath+EndEntire、任意有界OptionalData（含空） | 结构候选轮廓仍待完整字段契约；OptionalData完整精确策略已批准 | UEFI §3/§10及opaque修订；未知路径不获放宽，同一GUID克隆仍不能保证最终OS |
-| 多实例、多 FilePathList 元素、网络、USB、vendor、完整未知前缀、默认回退文件 | UnsupportedFormat（暂定保守范围） | UEFI 允许多种解析路径；缺少可验证唯一目标语义 |
+| 单实例短路径HD(GPT/GUID)+单绝对FilePath+EndEntire、任意有界OptionalData（含空） | 当前支持契约，READY_FOR_REVIEW；不宣称生产已验收 | UEFI §3/§10及opaque修订；同GUID克隆仍不能保证最终OS |
+| 多实例、多FilePathList元素、网络、USB、vendor、未知前缀、仅FilePath/无明确FilePath的默认回退 | UnsupportedFormat | 规范允许不等于产品支持；不推断不受支持结构的唯一目标 |
 | `\EFI\Microsoft\Boot\bootmgfw.efi` + 已支持结构 | 将来 `Known(Windows)` 规则候选；现在 NeedsConfirmation | BCDBoot 官方目录资料；文件可被替换、BCD 可转向其他链，路径不是最终 OS 的证明 |
 | `\EFI\systemd\systemd-bootx64.efi`、GRUB、shim 名称/路径 | NeedsConfirmation | 引导管理器可提供多个 OS；不能因为 Linux 项目生产 loader 就推断其最终 OS |
 | 名称含 Linux/Arch/Ubuntu/Windows、唯一候选、不是 Windows | NeedsConfirmation | 无正向格式契约；重命名、恢复工具和其他 OS 是反例 |
