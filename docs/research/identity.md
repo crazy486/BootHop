@@ -1,8 +1,8 @@
-# UEFI identity 研究契约（1S READY_FOR_REVIEW；Task1 BLOCKED）
+# UEFI identity 研究契约（1S APPROVED；Task1 BLOCKED）
 
-首次官方核对日期2026-09-08，样本证据日期2026-09-09。初稿无样本，后经授权在Arch普通权限取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同，更新配对0、公开fixture0。opaque精确策略已批准，Linux-first独立审查Approved后用户条件授权生效。2026-09-10按用户指定的保守范围收敛本表与 [共享/Linux前置契约](shared-linux-prerequisites.md)：1S.parse/1S/1L均READY_FOR_REVIEW，不自行标通过；1W仍缺原生证据，Task1总体BLOCKED。公开原文/更新配对不是strict exact门槛，1W不代替Core/Linux自身前置。
+首次官方核对日期2026-09-08，样本证据日期2026-09-09。初稿无样本，后经授权在Arch普通权限取得2个私有真实启动项，用户确认对应Arch Linux/Windows11；两次相同，更新配对0、公开fixture0。2026-09-10按保守范围收敛本表与 [共享/Linux前置契约](shared-linux-prerequisites.md)，经独立审查1S.parse/1S APPROVED（66eaf9f）、1L APPROVED（600aa4d），替代收敛时的待审状态。1W仍缺原生证据，Task1总体BLOCKED。公开原文/更新配对不是strict exact门槛，1W不代替Core/Linux自身前置。实施进度以manifest及controller ledger为准，契约批准不代表实现或真实验收完成。
 
-本表属于1S，替代先前拟定/未决的当前态表述，研究历史保留。完整字面字段/版本/序列化与测试名在共享契约§2；1S.parse验证表在§1，可独立审查后供Task2。未知节点可解析不代表identity支持；Task3必须等完整1S审查通过，本页READY不是实施完成或实机验收。
+本表属于已批准1S，替代先前拟定/未决的当前态表述，研究历史保留。完整字面字段/版本/序列化与测试名在共享契约§2，已批准1S.parse验证表在§1供Task2。未知节点可解析不代表identity支持；Task3仍须Task2及完整1S前置，不能将本页APPROVED当作实现完成或实机验收。
 
 ## 来源和解释边界
 
@@ -34,7 +34,7 @@
 | OptionalData 空值 | UEFI §3.1.3；已批准opaque修订§2 | 是：OpaqueExactV1 | byte_length=0 + SHA-256(empty)，完整32字节摘要；无忽略路径 | 外层边界有效；空/非空转换失配，停止switch后须主动重新确认configure | 用户确认的Arch私有样本为空；实现测试未开始 | `empty_optional_sha256_vector`、`opaque_exact_change_rejected` |
 | OptionalData 非空：Windows / Linux loader / 厂商数据 | UEFI仅定义传入加载镜像的剩余字节；已批准opaque修订§2 | 是：OpaqueExactV1 | 完整原始字节长度+SHA-256；不删NUL/尾部、不重编码/折叠/抽取子集；未知非UTF-16同样适用 | 先验证外层/设备路径/attributes；长度或摘要变化停止switch，须主动重新确认OS并授权configure；不证明内部语义安全 | Windows私有样本136字节，内部语义仍opaque；自然更新对照仅未来放宽所需 | `opaque_non_utf16_can_register`、`opaque_exact_change_rejected` |
 
-本轮无宽松路径/参数变换：结构字段全部精确保存比较，description/HIDDEN仅显示但每次独立验证。完整序列化为CanonicalIdentity版本1，精确字面字段见共享契约§2.1；OptionalData逻辑组件为OpaqueExactV1。description改名/hidden变化的正反用例列在§2.2，synthetic待实施不冒充自然更新。所有契约READY_FOR_REVIEW，审查通过后才供Task3实现；更新配对仅约束未来放宽。
+本轮无宽松路径/参数变换：结构字段全部精确保存比较，description/HIDDEN仅显示但每次独立验证。完整序列化为CanonicalIdentity版本1，精确字面字段见共享契约§2.1；OptionalData逻辑组件为OpaqueExactV1。description改名/hidden变化的正反用例列在§2.2，synthetic不冒充自然更新。1S契约已APPROVED，Task3按依赖表实施及独立验证；更新配对仅约束未来放宽。
 
 组件种类/版本、算法、长度和完整32字节摘要须显式持久化，摘要为规范64位十六进制；未知记录/组件版本或算法fail closed且不可普通configure覆盖，损坏/错误摘要长度也拒绝、不等于Missing。configure从同一读取buffer计算结构字段与组件，switch不接受GUI摘要，任何失配不得WriteNext/Reboot/SaveRecord或自动重登记。可信记录/缓存/日志不存原始OptionalData，指纹不默认公开。相等判断依赖SHA-256抗碰撞假设，不证明语义、最终OS或相同路径二进制/BCD不变。
 
@@ -44,7 +44,7 @@ Windows非空OptionalData的官方依据、可观察布局和已批准精确策�
 
 | 输入/证据 | 当前研究结果 | 来源与反例 |
 |---|---|---|
-| 单实例短路径HD(GPT/GUID)+单绝对FilePath+EndEntire、任意有界OptionalData（含空） | 当前支持契约，READY_FOR_REVIEW；不宣称生产已验收 | UEFI §3/§10及opaque修订；同GUID克隆仍不能保证最终OS |
+| 单实例短路径HD(GPT/GUID)+单绝对FilePath+EndEntire、任意有界OptionalData（含空） | 支持契约APPROVED（66eaf9f）；不宣称生产已验收 | UEFI §3/§10及opaque修订；同GUID克隆仍不能保证最终OS |
 | 多实例、多FilePathList元素、网络、USB、vendor、未知前缀、仅FilePath/无明确FilePath的默认回退 | UnsupportedFormat | 规范允许不等于产品支持；不推断不受支持结构的唯一目标 |
 | `\EFI\Microsoft\Boot\bootmgfw.efi` + 已支持结构 | 将来 `Known(Windows)` 规则候选；现在 NeedsConfirmation | BCDBoot 官方目录资料；文件可被替换、BCD 可转向其他链，路径不是最终 OS 的证明 |
 | `\EFI\systemd\systemd-bootx64.efi`、GRUB、shim 名称/路径 | NeedsConfirmation | 引导管理器可提供多个 OS；不能因为 Linux 项目生产 loader 就推断其最终 OS |

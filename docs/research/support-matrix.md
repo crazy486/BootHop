@@ -2,7 +2,7 @@
 
 首次核对日期2026-09-08；私有样本/用户语义证据更新2026-09-09。所有“支持”均为拟发布范围。已完成一次经授权的Arch普通权限只读采集，取得用户确认的Arch Linux/Windows11启动项各1项；双向重启、Windows API与GUI验收尚未执行，Task1仍BLOCKED。不得将样本或主机包版本记录当固件兼容认证。
 
-2026-09-10 Linux-first独立审查Approved，用户条件授权生效。[共享/Linux前置契约](shared-linux-prerequisites.md) 已按授权保守范围收敛：1S.parse/1S/1L均READY_FOR_REVIEW，尚未独立放行；1W实证缺失仅阻Windows分支/最终跨平台声明。全部实施项PENDING；Linux开发构建可在其自身前置通过后推进，不要求1W，也不宣称Windows可用或双向验收完成。
+2026-09-10 Linux-first独立审查Approved，用户条件授权生效。[共享/Linux前置契约](shared-linux-prerequisites.md) 随后完成独立审查：1S.parse/1S APPROVED（66eaf9f），1L APPROVED（600aa4d），替代原待审状态。1W实证缺失仅阻Windows分支/最终跨平台声明；Linux可按自身前置推进。实施进度以manifest及controller ledger为准，不能从契约批准推断Windows可用或双向验收完成。
 
 | 环境 | 地位与架构 | 已知实际版本 / 缺口 | 验收范围 |
 |---|---|---|---|
@@ -43,13 +43,13 @@ WiX7 官方文档要求显式 EULA 接受并有维护费条款，发布者需按
 
 | 层级 | 必须覆盖 | 本次状态 |
 |---|---|---|
-| 1S共享前置 | 私有真实项；结构字段/支持范围/独立验证/序列化和正反依据 | READY_FOR_REVIEW：三节点GPT单绝对路径、全部结构含LBA/size精确比较、attributes独立allowlist、Known空表；Task3须审查通过 |
-| 1S.parse纯解析前置 | 头/description/路径长度与节点/终止/OptionalData边界验证表 | READY_FOR_REVIEW：共享契约§1已落盘，独立通过可放行2；synthetic测试尚未实施 |
-| 1L Linux前置 | efivarfs/存储锁/pkexec/IPC/logind契约及fake验证清单 | READY_FOR_REVIEW：共享契约§3已落盘；6字节BootNext、errno、64KiB预算明确；真实写入/重启/系统集成验收PENDING |
+| 1S共享前置 | 私有真实项；结构字段/支持范围/独立验证/序列化和正反依据 | APPROVED（66eaf9f）：三节点GPT单绝对路径、全部结构含LBA/size精确比较、attributes独立allowlist、Known空表 |
+| 1S.parse纯解析前置 | 头/description/路径长度与节点/终止/OptionalData边界验证表 | APPROVED（66eaf9f）：共享契约§1；Task2实现/测试状态独立记录 |
+| 1L Linux前置 | efivarfs/存储锁/pkexec/IPC/logind契约及fake验证清单 | APPROVED（600aa4d）：共享契约§3；6字节BootNext、errno、64KiB预算明确；真实写入/重启/系统集成验收PENDING |
 | 1W Windows前置 | 原生只读API实际读取/权限/out attributes/payload/错误语义 | BLOCKED：无原生实证；仅阻6W/8/9W/10W/11W及最终跨平台声明，fake/Arch不替代；安全不可观察错误明确限制 |
 | 未来放宽研究（非MVP硬gate） | 正常更新配对、OptionalData语义及允许变化/归一化的依据 | 配对各0、内部仍opaque；不阻MVP strict exact，不以本修订批准任何宽松变换 |
 | 可选公开夹具（非MVP硬gate） | 匿名化及逐字段隐私审查 | 公开fixture为0；私有真实样本可支持研究，普通CI用synthetic，不提交原文 |
-| 纯测试 | parser边界、opaque含空SHA-256/完整摘要往返/逐字节变化拒绝、未知非UTF-16可登记、未知设备路径仍拒绝、未知记录/组件/算法禁止覆盖、主动重新确认、helper篡改参数、阶段Unknown、超限/断连、ABA恢复拒绝 | 未开始，禁止访问宿主固件；不得将synthetic变体当自然更新 |
+| 纯测试 | parser边界、opaque含空SHA-256/完整摘要往返/逐字节变化拒绝、未知非UTF-16可登记、未知设备路径仍拒绝、未知记录/组件/算法禁止覆盖、主动重新确认、helper篡改参数、阶段Unknown、超限/断连、ABA恢复拒绝 | 各任务独立验证，最新进度见manifest/ledger；禁止访问宿主固件或将synthetic当自然更新，parser通过不代表全部测试通过 |
 | 包与 GUI | 两端目录保护；普通用户不能改记录/helper；中文/其他 Unicode、缩放、高 DPI；Arch Wayland、Ubuntu Wayland/X11、Windows | 未开始 |
 | 11L Linux开发交付 | Linux构建/开发包、隔离CI和明确未验收标签 | PENDING；自身前置通过可推进，非最终发布，不以未实施Windows成功stub占位 |
 | 11W / 最终跨平台交付 | Windows包/CI；两分支与全部子门槛通过；另行授权的双向BootNext/重启、BootOrder及GUI/安装实测 | PENDING；Windows证据缺失及真实验收未执行，不能从Linux成功推出完成 |

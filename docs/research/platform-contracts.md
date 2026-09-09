@@ -2,7 +2,7 @@
 
 首次访问日期2026-09-08；证据/产品约束更新2026-09-09。Task 1 状态 BLOCKED，原因见 [identity](identity.md)。本文固定实现候选的API、输入边界和失败语义。此后controller经用户授权，已在Arch普通权限下完成一次私有只读采集；这只验证当前变量可读取和本地解析，不等于生产平台实现或固件启动行为验收。未运行提权、Windows固件API、UEFI写入或重启测试；生产实现仍须等研究门槛放行。
 
-2026-09-10调度：Linux-first独立审查Approved，用户条件授权生效，按1S/1L/1W放行，替代旧Windows证据全局阻塞。[共享/Linux前置契约](shared-linux-prerequisites.md) 已收敛有界解析、完整保守identity、固定对象/锁/错误/资源与fake清单；1S.parse/1S/1L均READY_FOR_REVIEW，不自行标通过。1W仍BLOCKED，仅阻Windows分支及最终跨平台声明；不提前触发真实写入/重启，真实验收另行授权。
+2026-09-10调度：Linux-first独立审查Approved，用户条件授权生效，按1S/1L/1W放行，替代旧Windows证据全局阻塞。[共享/Linux前置契约](shared-linux-prerequisites.md) 随后获独立审查批准：1S.parse/1S APPROVED（66eaf9f），1L APPROVED（600aa4d），替代收敛时的待审状态。1W仍BLOCKED，仅阻Windows分支及最终跨平台声明；实施进度见manifest及controller ledger，契约审批不等于运行验证。真实写入/重启验收仍需另行授权。
 
 ## UEFI 访问与发现范围
 

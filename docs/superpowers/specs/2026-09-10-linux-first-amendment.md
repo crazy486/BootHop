@@ -1,8 +1,8 @@
 # BootHop Linux-first：按证据拆分实施门槛
 
-状态：独立规格/质量审查Approved，用户条件授权已生效，按分层前置继续SDD；不需要再次整体批准。2026-09-10。后续共享/Linux契约研究仍逐项待审，本页通过不自动放行它们；本轮仅文档，不访问固件、不提权、不升级、不执行真实写入或重启。
+状态：独立规格/质量审查Approved，用户条件授权已生效，按分层前置继续SDD；不需要再次整体批准。2026-09-10。后续技术契约已独立审查：1S.parse/1S APPROVED（66eaf9f）、1L APPROVED（600aa4d），不是由本页调度审查自动放行。本轮仅状态文档同步，不访问固件、不提权、不升级、不执行真实写入或重启。
 
-审查记录：独立规格与质量审查均Approved，无缺陷；用户条件已满足，本调度修订现生效。下述各技术子门槛仍须单独通过，不能由本次审查代替。
+审查记录：调度修订独立规格与质量审查均Approved，无缺陷；随后技术子门槛按上列证据分别批准，1W仍BLOCKED。实施/修复/测试审查进度以manifest及controller ledger为准，契约审批不能替代实现验证。
 
 ## 1. 方案与范围
 
@@ -20,12 +20,12 @@
 
 | 子门槛 | 必须完成并独立审查的产物 | 当前状态 |
 |---|---|---|
-| 1S：shared prerequisites | 完整结构字段/支持范围/独立验证契约，样本来源与正反验证表，opaque组件/记录版本/分类规则一致性 | READY_FOR_REVIEW：后续按用户指定保守范围收敛，见共享契约§2，尚未放行 |
-| 1S.parse：1S内可单独放行的纯解析契约 | 有界UEFI解析验证表，覆盖以下条目，明确每项输入边界、结果和synthetic测试名；不依赖identity字段归属 | READY_FOR_REVIEW：共享契约§1，未单独放行 |
-| 1L：Linux contract prerequisites | efivarfs读取/属性/错误/限制，Linux存储锁、pkexec/IPC、logind非强制重启及阶段语义的契约和fake验证清单；区分官方/Arch观察/待验收 | READY_FOR_REVIEW：共享契约§3，需子门槛完整性审查 |
+| 1S：shared prerequisites | 完整结构字段/支持范围/独立验证契约，样本来源与正反验证表，opaque组件/记录版本/分类规则一致性 | APPROVED（66eaf9f），共享契约§2；不等于identity实现测试通过 |
+| 1S.parse：1S内可单独放行的纯解析契约 | 有界UEFI解析验证表，覆盖以下条目，明确每项输入边界、结果和synthetic测试名；不依赖identity字段归属 | APPROVED（66eaf9f），共享契约§1；Task2实现证据独立记录 |
+| 1L：Linux contract prerequisites | efivarfs读取/属性/错误/限制，Linux存储锁、pkexec/IPC、logind非强制重启及阶段语义的契约和fake验证清单；区分官方/Arch观察/待验收 | APPROVED（600aa4d），共享契约§3；真实集成/写入/重启仍PENDING |
 | 1W：Windows evidence | Windows实际GetFirmwareEnvironmentVariableExW读取、权限、out attributes、payload及错误语义证据；安全不可观察的错误明确限制并fake覆盖 | BLOCKED：未取得Windows原生只读实证 |
 
-调度修订时1S的具体剩余清单是：节点/前缀与单实例；GPT标识/分区号；LBA/大小；FilePath数量/绝对路径/编码/规范化；description合法性；两类attributes；完整序列化/正反用例；Known不足时空表/NeedsConfirmation。本调度修订没有冻结算法；其后用户指定保守三节点范围，现已在 [共享/Linux前置契约](../../research/shared-linux-prerequisites.md) §2逐项收敛为READY_FOR_REVIEW，不把自然更新配对重新设为strict exact前提。
+调度修订时1S的具体剩余清单是：节点/前缀与单实例；GPT标识/分区号；LBA/大小；FilePath数量/绝对路径/编码/规范化；description合法性；两类attributes；完整序列化/正反用例；Known不足时空表/NeedsConfirmation。本调度修订没有冻结算法；其后用户指定保守三节点范围，在 [共享/Linux前置契约](../../research/shared-linux-prerequisites.md) §2逐项收敛并于66eaf9f获独立批准，替代历史待审状态，不把自然更新配对重新设为strict exact前提。
 
 1S.parse验证表必须覆盖：6字节固定头的小端读取和截断；description的UTF-16终止/编码与边界；FilePathListLength有界消费；设备路径节点最小长度、溢出、终止和实例边界；剩余OptionalData完整保留、允许空和非UTF-16；解析失败不得产出有效目标。纯解析能表示未知节点不代表identity支持，目标验证仍拒绝不在白名单内的设备路径。验证表审查通过可单独启动Task2，不必等待1S其余identity决定或1W。
 
@@ -33,7 +33,7 @@
 
 ## 3. 精确依赖与建议调度
 
-所有实施项状态均为PENDING，并依赖本修订审查通过；表中“完成”指相应产物与规定审查均通过，不是只有代码存在。
+本修订及上列共享/Linux契约审查均已通过；各实施项当前进度以manifest及controller ledger为准。表中“完成”仍指相应产物与规定审查均通过，不是只有代码存在，也不能从一个任务完成推断其他任务完成。
 
 | 任务 | 必需前置 | 交付边界 |
 |---|---|---|
@@ -63,6 +63,6 @@
 
 ## 5. 历史替代与验证
 
-本修订审查通过后，仅替代主规格、计划和研究材料中“Windows原生API实证阻止所有后续任务”的全局调度规则。2026-09-09 opaque修订的完整精确组件及未来放宽才需更新配对的规则保留；旧全局gate历史标为被本文替代。Task1总体仍BLOCKED；当前1S未通过仍阻identity及其消费者，不因调度调整自动完成任何子项。
+本修订仅替代主规格、计划和研究材料中“Windows原生API实证阻止所有后续任务”的全局调度规则。2026-09-09 opaque规则保留；旧全局gate历史由本文替代。Task1总体仍BLOCKED/1W缺实证；1S已按独立证据批准，identity消费者仍须满足全部任务依赖及实现审查，不由调度修订自动完成。
 
 文档自审需检查：依赖表与各任务分支一致；2依赖1S.parse而3依赖完整1S；1W不出现在Core/Linux必需前置；Windows任务均有1W且无stub成功；manifest各子门槛与aggregate状态一致；JSON/关键词/差异检查通过，无私有原始样本内容。文档TDD不适用；本轮不声称任何生产测试或平台验收完成。progress ledger由controller维护。

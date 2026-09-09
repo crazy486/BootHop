@@ -1,6 +1,6 @@
 # 共享与Linux前置契约：1S.parse / 1S / 1L
 
-日期：2026-09-10。Linux-first修订独立审查Approved，用户条件授权已生效。1S.parse/1S独立审查APPROVED（66eaf9f），1L修复后独立Spec/Quality审查APPROVED（600aa4d）。这批准的是前置文档契约，不是实施/测试或真实验收完成；Task2已由独立implementer启动（IN_PROGRESS），其他实施项仍PENDING。Task1总体仍BLOCKED，1W仍缺Windows原生只读实证。本轮仅状态记账，不读取固件、不提权、不执行写入、重启或安装。
+日期：2026-09-10。Linux-first修订独立审查Approved，用户条件授权已生效。1S.parse/1S独立审查APPROVED（66eaf9f），1L修复后独立Spec/Quality审查APPROVED（600aa4d）。这是前置文档契约的审查证据；代码任务及测试审查进度以manifest和controller ledger为准，不把契约批准当实现或真实验收完成。Task1总体仍BLOCKED，1W仍缺Windows原生只读实证。本轮仅状态记账，不读取固件、不提权、不执行写入、重启或安装。
 
 ## 1. 1S.parse：有界UEFI解析验证表（APPROVED，66eaf9f）
 
@@ -155,4 +155,4 @@ logind固定系统总线/org/freedesktop/login1/Manager `RebootWithFlags(uint64 
 | logind | `reboot_with_flags_one`、`explicit_reboot_reply_accepted` | `unsupported_logind_before_write`、`root_block_and_weak_inhibitors_reject`、`delay_wait_not_force`、`reboot_reply_lost_unknown_no_rollback` |
 | 隔离/界面 | `linux_controller_uses_fake_client` | `default_tests_never_construct_real_adapter`、`windows_not_stubbed_success`、`ordinary_open_no_helper` |
 
-flock仅advisory，不保护外部程序；选择LOCK_EX|LOCK_NB及FD生命周期依据[flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html)（Linux man-pages6.18，2026-09-10核对）。Linux桌面真实认证、root inhibitor/多会话、包安装、双向BootNext/重启/BootOrder验收均未运行且不属本次授权；fake不会解除这些真实验收要求，也不解除1W。1S.parse/1S/1L现为文档APPROVED，可按依赖表继续SDD；Task2进行中，尚无实现/测试验收完成声明。aggregate Task1及Windows实证仍未完成。
+flock仅advisory，不保护外部程序；选择LOCK_EX|LOCK_NB及FD生命周期依据[flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html)（Linux man-pages6.18，2026-09-10核对）。Linux桌面真实认证、root inhibitor/多会话、包安装、双向BootNext/重启/BootOrder验收均未运行且不属本次授权；fake不会解除这些真实验收要求，也不解除1W。1S.parse/1S/1L为文档APPROVED，实施状态以manifest/ledger为准；单个parser任务测试通过不等于完整1S/1L测试或aggregate Task1/Windows实证完成。
