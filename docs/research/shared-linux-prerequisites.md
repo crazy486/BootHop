@@ -1,8 +1,8 @@
 # 共享与Linux前置契约：1S.parse / 1S / 1L
 
-日期：2026-09-10。Linux-first修订独立审查Approved，用户条件授权已生效。本页逐节提交独立审查，不自行放行；Task1总体仍BLOCKED，1W仍缺Windows原生只读实证。本轮仅文档/已有证据研究，不读取宿主固件、不提权、不执行写入、重启或安装。
+日期：2026-09-10。Linux-first修订独立审查Approved，用户条件授权已生效。1S.parse/1S独立审查APPROVED（66eaf9f），1L修复后独立Spec/Quality审查APPROVED（600aa4d）。这批准的是前置文档契约，不是实施/测试或真实验收完成；Task2已由独立implementer启动（IN_PROGRESS），其他实施项仍PENDING。Task1总体仍BLOCKED，1W仍缺Windows原生只读实证。本轮仅状态记账，不读取固件、不提权、不执行写入、重启或安装。
 
-## 1. 1S.parse：有界UEFI解析验证表（READY_FOR_REVIEW）
+## 1. 1S.parse：有界UEFI解析验证表（APPROVED，66eaf9f）
 
 输入 `parse_load_option(&[u8]) -> Result<LoadOption, Error>` **只接收变量payload**，不含Linux的4字节变量属性前缀。最大payload沿用平台契约1 MiB（1,048,576字节），超限ResourceLimit，不截断。所有长度加法先checked，所有读取先slice边界检查；不依赖自然对齐，不用unchecked索引或指针转换。UTF-16均逐个小端u16读取；只有编码有效才用于显示，禁止以替换字符修复非法编码后继续。
 
@@ -30,7 +30,7 @@
 
 依据：[UEFI 2.11 §3.1.3](https://uefi.org/specs/UEFI/2.11/03_Boot_Manager.html)（2026-09-10核对：packed头、含NUL description、路径数组及OptionalData剩余字节）、[UEFI 2.10 §10.3](https://uefi.org/specs/UEFI/2.10/10_Protocols_Device_Path_Protocol.html)（沿用2026-09-08已核对的节点定义；本轮2.10/2.11路径网页重开失败，不冒称新全文核对）。编码严格拒绝、资源上限及目标支持范围是BootHop保守策略。现有私有2项支持HD+FilePath+EndEntire及0/136字节边界观测；正反变体仍须实施，不能由两次相同读取推出稳定性或Windows API已验证。
 
-## 2. 1S：保守目标与精确身份（READY_FOR_REVIEW）
+## 2. 1S：保守目标与精确身份（APPROVED，66eaf9f）
 
 本节依据用户已指定范围收敛，不扩大规范化：恰好一个FilePathList元素、一个实例、三个节点，顺序为HD(GPT/GUID)+单绝对FilePath+EndEntire。不接受硬件/ACPI/消息/vendor前缀、网络/USB、MBR/无签名、多实例、多路径元素、多FilePath节点、仅设备无明确文件路径或仅FilePath默认回退。未知节点即使§1可解析，也由目标验证返回UnsupportedFormat；不把未知节点哈希后当已支持。UEFI允许更广的路径，并不意味着本产品支持。
 
@@ -83,9 +83,9 @@ Description仅供显示：合法UTF-16改名不影响identity；空描述允许�
 | 记录完整字段 | `record_v1_full_width_roundtrip`、`empty_digest_roundtrip` | `unknown_record_version_stops`、`unknown_identity_component_stops`、`unknown_algorithm_stops`、`bad_digest_or_derived_length_corrupt`、`duplicate_or_unknown_record_field_rejected`、`record_over_limit` |
 | helper信任与失配 | `explicit_reconfirm_saves_new_baseline` | `gui_digest_not_trusted`、`identity_mismatch_has_no_write_reboot_save`、`unsupported_component_configure_preserves_record`、`malformed_path_even_matching_digest_rejected` |
 
-现有私有两项/用户标签支持范围选择的观察；以上正反测试从公开格式规则人工构造，仅标synthetic。缺自然更新不阻strict exact，但测试还未实现/运行，READY_FOR_REVIEW不是PASS。
+现有私有两项/用户标签支持范围选择的观察；以上正反测试从公开格式规则人工构造，仅标synthetic。缺自然更新不阻strict exact；本节APPROVED只表示共享契约审查通过，不表示这些实现测试已经通过，测试/验收状态仍独立记录。
 
-## 3. 1L：Linux实现输入契约（READY_FOR_REVIEW）
+## 3. 1L：Linux实现输入契约（APPROVED，600aa4d）
 
 详细官方选择沿用 [platform-contracts.md](platform-contracts.md)：efivarfs、systemd>=255、polkit>=124，Arch主环境/Ubuntu24.04参考。以下是实现及fake验收边界，不是执行任何系统操作的指令。真实授权代理、inhibitors、安装、BootNext与重启实验全部PENDING。
 
@@ -155,4 +155,4 @@ logind固定系统总线/org/freedesktop/login1/Manager `RebootWithFlags(uint64 
 | logind | `reboot_with_flags_one`、`explicit_reboot_reply_accepted` | `unsupported_logind_before_write`、`root_block_and_weak_inhibitors_reject`、`delay_wait_not_force`、`reboot_reply_lost_unknown_no_rollback` |
 | 隔离/界面 | `linux_controller_uses_fake_client` | `default_tests_never_construct_real_adapter`、`windows_not_stubbed_success`、`ordinary_open_no_helper` |
 
-flock仅advisory，不保护外部程序；选择LOCK_EX|LOCK_NB及FD生命周期依据[flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html)（Linux man-pages6.18，2026-09-10核对）。Linux桌面真实认证、root inhibitor/多会话、包安装、双向BootNext/重启/BootOrder验收均未运行且不属本次授权；fake不会解除这些真实验收要求，也不解除1W。1S.parse/1S/1L为文档READY_FOR_REVIEW，controller独立审查后才可置complete并按SDD启动依赖任务。
+flock仅advisory，不保护外部程序；选择LOCK_EX|LOCK_NB及FD生命周期依据[flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html)（Linux man-pages6.18，2026-09-10核对）。Linux桌面真实认证、root inhibitor/多会话、包安装、双向BootNext/重启/BootOrder验收均未运行且不属本次授权；fake不会解除这些真实验收要求，也不解除1W。1S.parse/1S/1L现为文档APPROVED，可按依赖表继续SDD；Task2进行中，尚无实现/测试验收完成声明。aggregate Task1及Windows实证仍未完成。

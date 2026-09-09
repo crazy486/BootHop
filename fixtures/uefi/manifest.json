@@ -7,7 +7,8 @@
   "linux_first_revision_review": "APPROVED",
   "shared_linux_review_artifact": "docs/research/shared-linux-prerequisites.md",
   "opaque_exact_strategy_approved": true,
-  "production_identity_contract_approved": false,
+  "production_identity_contract_approved": true,
+  "production_identity_contract_approved_scope": "shared_1S_contract_review_only_not_implementation_tests_aggregate_task_1_or_windows_evidence",
   "approved_optional_data_strategy": {
     "component": "OpaqueExactV1",
     "algorithm": "Sha256",
@@ -54,7 +55,6 @@
     "update_event_time", "anonymization_consistency_evidence", "observed_field_changes"
   ],
   "missing_evidence": [
-    "independent_review_of_shared_parser_identity_linux_contracts",
     "windows_native_firmware_api_actual_read_privilege_out_attributes_payload_error_evidence"
   ],
   "future_relaxation_research_gaps_not_mvp_gates": [
@@ -63,13 +63,13 @@
   ],
   "unpublished_public_fixtures_are_mvp_blocker": false,
   "prerequisites": {
-    "1S": {"status": "READY_FOR_REVIEW", "scope": "shared_identity_contract", "artifact_section": "2", "remaining": ["independent_review"], "synthetic_tests_implemented": false},
-    "1S.parse": {"status": "READY_FOR_REVIEW", "scope": "independent_bounded_uefi_parser_validation_table", "artifact_section": "1", "remaining": ["independent_review"], "synthetic_tests_implemented": false},
-    "1L": {"status": "READY_FOR_REVIEW", "scope": "linux_contract_completeness_and_fake_validation_checklist", "artifact_section": "3", "remaining": ["independent_review"], "synthetic_tests_implemented": false, "real_write_reboot_integration_acceptance": "PENDING"},
+    "1S": {"status": "APPROVED", "scope": "shared_identity_contract", "artifact_section": "2", "review_commit": "66eaf9f", "remaining": [], "synthetic_tests_implemented": false},
+    "1S.parse": {"status": "APPROVED", "scope": "independent_bounded_uefi_parser_validation_table", "artifact_section": "1", "review_commit": "66eaf9f", "remaining": [], "synthetic_tests_implemented": false},
+    "1L": {"status": "APPROVED", "scope": "linux_contract_completeness_and_fake_validation_checklist", "artifact_section": "3", "review_commit": "600aa4d", "remaining": [], "synthetic_tests_implemented": false, "real_write_reboot_integration_acceptance": "PENDING"},
     "1W": {"status": "BLOCKED", "scope": "windows_native_read_only_api_evidence", "missing": ["actual_read_privilege_out_attributes_payload_error_evidence"], "blocks": ["6W", "8", "9W", "10W", "11W", "cross_platform_acceptance"]}
   },
   "implementation_tasks": {
-    "2": {"status": "PENDING", "requires": ["1S.parse"]},
+    "2": {"status": "IN_PROGRESS", "requires": ["1S.parse"]},
     "3": {"status": "PENDING", "requires": ["2", "1S"]},
     "4": {"status": "PENDING", "requires": ["3"]},
     "5": {"status": "PENDING", "requires": ["4"]},
@@ -86,5 +86,5 @@
   },
   "all_implementation_tasks_also_require": ["linux_first_revision_review_passed"],
   "cross_platform_acceptance": {"status": "PENDING", "requires": ["11L", "11W", "1S", "1L", "1W", "separately_authorized_real_firmware_reboot_gui_install_acceptance"]},
-  "notes": "Initial research had no samples. An authorized Arch read-only capture remains private with user OS labels. Empty real_samples means zero public fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published. Opaque strict exact including empty is unchanged; update pairs are only a future-relaxation gate. Linux-first review is Approved; its conditional authorization is effective. Shared parser, conservative identity and Linux contracts are now READY_FOR_REVIEW, not passed: tests are named synthetic requirements, not implemented results. 1W still blocks Windows tasks/final cross-platform claims only; contract/fake/Linux success is not Windows evidence. All implementation tasks remain pending. Task 1 aggregate remains BLOCKED; no new system operation is authorized."
+  "notes": "Initial research had no samples. An authorized Arch read-only capture remains private with user OS labels. Empty real_samples means zero public fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published. Opaque strict exact including empty is unchanged; update pairs are only a future-relaxation gate. Independent reviews approved 1S.parse/1S at 66eaf9f and 1L at 600aa4d. production_identity_contract_approved is shared-contract approval only, not implementation/test acceptance, whole Task 1 completion or Windows evidence. Task 2 is IN_PROGRESS with a fresh implementer; other implementation and real acceptance tasks remain PENDING. 1W remains BLOCKED and cannot be satisfied by contract/fake/Linux success. Task 1 aggregate remains BLOCKED; this bookkeeping authorizes no system operation."
 }
