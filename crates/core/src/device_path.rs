@@ -14,6 +14,21 @@ const END_ENTIRE_SUBTYPE: u8 = 0xff;
 const END_NODE_LENGTH: u16 = 4;
 const HARD_DRIVE_NODE_LENGTH: u16 = 42;
 
+#[derive(Clone, Copy)]
+enum PathTermination {
+    Instance,
+    Entire,
+}
+
+struct BoundedNode<'a> {
+    node_type: u8,
+    subtype: u8,
+    length: u16,
+    payload: &'a [u8],
+    end: usize,
+    termination: Option<PathTermination>,
+}
+
 pub fn parse_device_path(bytes: &[u8]) -> Result<DevicePath, Error> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(Error::ResourceLimit);
@@ -24,41 +39,19 @@ pub fn parse_device_path(bytes: &[u8]) -> Result<DevicePath, Error> {
     let mut offset = 0_usize;
 
     while offset < bytes.len() {
-        let header_end = offset
-            .checked_add(NODE_HEADER_BYTES)
-            .ok_or(Error::MalformedDevicePath)?;
-        let header = bytes
-            .get(offset..header_end)
-            .ok_or(Error::MalformedDevicePath)?;
-        let node_type = *header.first().ok_or(Error::MalformedDevicePath)?;
-        let subtype = *header.get(1).ok_or(Error::MalformedDevicePath)?;
-        let length = read_u16(header, 2)?;
-        let length_usize = usize::from(length);
-        if length_usize < NODE_HEADER_BYTES {
-            return Err(Error::MalformedDevicePath);
-        }
-
-        let node_end = offset
-            .checked_add(length_usize)
-            .ok_or(Error::MalformedDevicePath)?;
-        let node_bytes = bytes
-            .get(offset..node_end)
-            .ok_or(Error::MalformedDevicePath)?;
-        let payload = node_bytes
-            .get(NODE_HEADER_BYTES..)
-            .ok_or(Error::MalformedDevicePath)?;
-        let kind = parse_node_kind(node_type, subtype, length, payload)?;
+        let node = read_bounded_node(bytes, offset)?;
+        let kind = parse_node_kind(&node)?;
         let ends_instance = matches!(&kind, DevicePathNodeKind::EndInstance);
         let ends_entire = matches!(&kind, DevicePathNodeKind::EndEntire);
 
         nodes.push(DevicePathNode {
-            node_type,
-            subtype,
-            length,
-            payload: payload.to_vec(),
+            node_type: node.node_type,
+            subtype: node.subtype,
+            length: node.length,
+            payload: node.payload.to_vec(),
             kind,
         });
-        offset = node_end;
+        offset = node.end;
 
         if ends_instance {
             if offset == bytes.len() {
@@ -82,61 +75,72 @@ pub fn parse_device_path(bytes: &[u8]) -> Result<DevicePath, Error> {
 pub(crate) fn first_path_length(bytes: &[u8]) -> Result<usize, Error> {
     let mut offset = 0_usize;
     loop {
-        let header_end = offset
-            .checked_add(NODE_HEADER_BYTES)
-            .ok_or(Error::MalformedDevicePath)?;
-        let header = bytes
-            .get(offset..header_end)
-            .ok_or(Error::MalformedDevicePath)?;
-        let node_type = *header.first().ok_or(Error::MalformedDevicePath)?;
-        let subtype = *header.get(1).ok_or(Error::MalformedDevicePath)?;
-        let length = read_u16(header, 2)?;
-        let length_usize = usize::from(length);
-        if length_usize < NODE_HEADER_BYTES {
-            return Err(Error::MalformedDevicePath);
+        let node = read_bounded_node(bytes, offset)?;
+        if matches!(node.termination, Some(PathTermination::Entire)) {
+            return Ok(node.end);
         }
-        let node_end = offset
-            .checked_add(length_usize)
-            .ok_or(Error::MalformedDevicePath)?;
-        bytes
-            .get(offset..node_end)
-            .ok_or(Error::MalformedDevicePath)?;
-
-        if node_type == END_DEVICE_PATH {
-            if length != END_NODE_LENGTH {
-                return Err(Error::MalformedDevicePath);
-            }
-            match subtype {
-                END_INSTANCE_SUBTYPE => {}
-                END_ENTIRE_SUBTYPE => return Ok(node_end),
-                _ => return Err(Error::MalformedDevicePath),
-            }
-        }
-        offset = node_end;
+        offset = node.end;
     }
 }
 
-fn parse_node_kind(
-    node_type: u8,
-    subtype: u8,
-    length: u16,
-    payload: &[u8],
-) -> Result<DevicePathNodeKind, Error> {
-    match (node_type, subtype) {
-        (END_DEVICE_PATH, END_INSTANCE_SUBTYPE) if length == END_NODE_LENGTH => {
-            Ok(DevicePathNodeKind::EndInstance)
+fn read_bounded_node(bytes: &[u8], offset: usize) -> Result<BoundedNode<'_>, Error> {
+    let header_end = offset
+        .checked_add(NODE_HEADER_BYTES)
+        .ok_or(Error::MalformedDevicePath)?;
+    let header = bytes
+        .get(offset..header_end)
+        .ok_or(Error::MalformedDevicePath)?;
+    let node_type = *header.first().ok_or(Error::MalformedDevicePath)?;
+    let subtype = *header.get(1).ok_or(Error::MalformedDevicePath)?;
+    let length = read_u16(header, 2)?;
+    let length_usize = usize::from(length);
+    if length_usize < NODE_HEADER_BYTES {
+        return Err(Error::MalformedDevicePath);
+    }
+
+    let end = offset
+        .checked_add(length_usize)
+        .ok_or(Error::MalformedDevicePath)?;
+    let node_bytes = bytes.get(offset..end).ok_or(Error::MalformedDevicePath)?;
+    let payload = node_bytes
+        .get(NODE_HEADER_BYTES..)
+        .ok_or(Error::MalformedDevicePath)?;
+    let termination = if node_type == END_DEVICE_PATH {
+        if length != END_NODE_LENGTH {
+            return Err(Error::MalformedDevicePath);
         }
-        (END_DEVICE_PATH, END_ENTIRE_SUBTYPE) if length == END_NODE_LENGTH => {
-            Ok(DevicePathNodeKind::EndEntire)
+        match subtype {
+            END_INSTANCE_SUBTYPE => Some(PathTermination::Instance),
+            END_ENTIRE_SUBTYPE => Some(PathTermination::Entire),
+            _ => return Err(Error::MalformedDevicePath),
         }
-        (END_DEVICE_PATH, _) => Err(Error::MalformedDevicePath),
-        (MEDIA_DEVICE_PATH, HARD_DRIVE_SUBTYPE) => {
-            parse_hard_drive(length, payload).map(DevicePathNodeKind::HardDrive)
-        }
-        (MEDIA_DEVICE_PATH, FILE_PATH_SUBTYPE) => {
-            parse_file_path(payload).map(DevicePathNodeKind::FilePath)
-        }
-        _ => Ok(DevicePathNodeKind::Unknown),
+    } else {
+        None
+    };
+
+    Ok(BoundedNode {
+        node_type,
+        subtype,
+        length,
+        payload,
+        end,
+        termination,
+    })
+}
+
+fn parse_node_kind(node: &BoundedNode<'_>) -> Result<DevicePathNodeKind, Error> {
+    match node.termination {
+        Some(PathTermination::Instance) => Ok(DevicePathNodeKind::EndInstance),
+        Some(PathTermination::Entire) => Ok(DevicePathNodeKind::EndEntire),
+        None => match (node.node_type, node.subtype) {
+            (MEDIA_DEVICE_PATH, HARD_DRIVE_SUBTYPE) => {
+                parse_hard_drive(node.length, node.payload).map(DevicePathNodeKind::HardDrive)
+            }
+            (MEDIA_DEVICE_PATH, FILE_PATH_SUBTYPE) => {
+                parse_file_path(node.payload).map(DevicePathNodeKind::FilePath)
+            }
+            _ => Ok(DevicePathNodeKind::Unknown),
+        },
     }
 }
 
