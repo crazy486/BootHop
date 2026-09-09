@@ -2,6 +2,8 @@
 
 日期：2026-09-08。状态：整体设计已获用户批准，已按要求补充未知版本 fail closed 和 per-OS 首次配置规则；允许进入 writing-plans，不开始生产代码。本文不授权真实固件修改或重启验收。
 
+2026-09-09同步：[已用户批准的 opaque identity 修订](2026-09-09-opaque-identity-amendment.md) 生效；以下§5及门槛替代初稿对应规则。Task1仍BLOCKED，本轮仅改文档，不授权任何固件读取、写入或重启。
+
 ## 1. 产品与支持范围
 
 BootHop 是按需打开的单窗口桌面工具：Linux 上点击“重启进入 Windows”，Windows 上点击“重启进入 Linux”。首次配置后，点击即确认，不另弹重复重启确认框；主界面明确显示“点击后将立即重启，请先保存工作”。系统 UAC / polkit 授权保留。
@@ -57,11 +59,15 @@ helper 将所有 GUI 参数视为不可信输入。未经登记或身份不匹�
 
 Boot#### 编号仅用于定位。原编号不存在、稳定身份不符或无法验证时停止，要求重新配置，不追随相似编号。
 
-canonical identity 基于结构化稳定字段，设备路径是核心证据。不能把整个 EFI_LOAD_OPTION、所有 Attributes 或 OptionalData 无差别逐字节比较。显示名称不单独承担身份判定。影响可执行性但不属于身份的字段仍须独立验证。
+canonical identity 基于结构化稳定字段，设备路径是核心证据；禁止整个 EFI_LOAD_OPTION 总哈希或所有 Attributes 整体比较替代结构验证。显示名称不单独承担身份判定。影响可执行性但不属于身份的字段仍须独立验证。外层边界、description 编码/终止、设备路径支持范围及两类 attributes 的规则不放宽。
+
+所有 OptionalData（包括空值）使用严格身份组件 `OpaqueExactV1 { algorithm: Sha256, byte_length: u64, digest: [u8; 32] }`。起点由完整外层解析确定，终点为同次读取 payload 结尾；摘要覆盖完整原始字节，不剥离NUL、截断、重编码、删除尾部或抽取BCDOBJECT子集。空值同样保存长度0和SHA-256(empty)。记录保存显式组件种类/版本、算法、长度及完整32字节摘要（规范64位十六进制表示），不保存原始 OptionalData；GUI缓存/普通日志也不保存原文，指纹不默认公开。长度与完整摘要相等依赖SHA-256抗碰撞假设，不是数学上的绝对字节相等证明或语义安全验证。
+
+configure 先验证现有记录及组件版本，再从同一真实读取buffer生成结构化字段和opaque组件，原子保存，不信任GUI的digest。switch在原编号完整重验；任何结构化身份或opaque长度/摘要变化都在BootNext修改和重启前停止，不保存新基线、不追随编号、不自动configure。用户须主动重新选择并确认目标OS，经过正常UAC/polkit授权后configure建立新基线；日常未变化的一键切换无需额外确认。提示“目标启动配置已变化，请重新选择并确认目标。”未知记录版本、身份组件版本或算法按不支持记录fail closed，不能由普通configure覆盖；错误摘要长度/损坏记录也拒绝，不降级为Missing。
 
 自动归类需要正向证据且目标唯一，不能因“不是 Windows”或只有一个候选就推断 Linux。有歧义、名称模糊或证据不足时请求用户选择。人工确认补充 OS 语义，不绕过结构和身份检查。
 
-字段级规则必须在实现身份判定前完成专项核对：依据 UEFI 格式文档和真实只读样本，明确设备路径规范化、相关属性及已知 OptionalData 格式的处理方式，并配套测试夹具。未知且可能影响目标的数据不得静默忽略；不支持的格式明确拒绝。尚未批准任何具体字节级比较算法或自动识别白名单。
+字段级规则必须在实现身份判定前完成专项核对：依据 UEFI 格式文档和真实只读样本，完成设备路径、相关属性及结构字段的契约和正反测试。opaque完整精确组件已批准，内部语义无需解码；非UTF-16或未知魔数本身不构成OptionalData错误，但未知/不支持设备路径仍拒绝。本修订不新增结构化宽松变换或自动识别白名单，不证明引导器参数安全、相同路径的二进制/BCD未改变或最终启动OS正确。
 
 ## 6. 切换流程与并发
 
@@ -105,6 +111,8 @@ helper 不能通过 root 身份或所选 API 隐式绕过用户要求的正常�
 3. helper 权限边界测试：篡改 GUI 编号、缓存与 identity；switch 不能绕过受保护记录；configure 独立生成 identity。
 4. UEFI 虚拟机及实机验收：双向真实切换与失败反馈。
 
+opaque测试使用成熟SHA-256库的已知答案（包括空输入）、完整摘要序列化往返、同一buffer重复计算，以及合法外层下正文/尾部/NUL/追加/截断/单bit/空非空转换失配。未知二进制可严格登记，畸形外层或未知设备路径即使digest匹配也拒绝。fake事件证明失配无WriteNext/Reboot/SaveRecord；未知记录/组件版本及算法阻止三操作的记录依赖路径与普通configure覆盖，损坏摘要拒绝。测试主动用户重新确认可更新受支持旧基线但不得自动重登记；记录、错误和缓存不含原始OptionalData。人工变化标为synthetic，不冒充正常更新配对。
+
 幂等性覆盖：已有目标 BootNext、多次 inspect、重复验证，无额外副作用。恢复覆盖：原值不存在、已是目标、外部修改、读取失败；已接受重启请求不得回滚。
 
 每次真实切换比较前后 BootOrder；永久顺序变化即失败，即使成功进入目标 OS。分别记录接口调用成功、BootNext 读回成功、系统接受重启请求和人工确认目标 OS。
@@ -115,6 +123,8 @@ GUI 验收覆盖 Windows 11、Linux Wayland/X11、中文及其他 Unicode、启�
 
 本文确定产品与架构，并不把尚未验证的细节视为已成立。实现计划先安排只读研究与样本核对，产出 canonical identity 字段表、正向归类规则、平台枚举/重启/IPC 方案和明确的系统版本、CPU 架构及发行包矩阵。规则不能满足本文边界时，回到设计审阅，不悄悄降低安全要求。
 
+MVP strict exact-match不再以Windows/Arch正常更新配对或OptionalData内部语义为硬门槛；配对仅是未来允许变化、归一化或降低误失效的研究门槛。现有私有真实样本可支持研究，不要求公开原文，普通CI使用synthetic。完整结构字段契约及其验证依据仍未完成；Windows原生GetFirmwareEnvironmentVariableExW实际读取、权限、out attributes、payload与错误语义证据仍是Task1实施前硬门槛，Arch副本不能替代。只读实证需另获授权；无法安全观察的错误记录限制并以fake覆盖，不主动制造系统变化。BootNext写入及重启是后续另行授权验收，不属于该只读门槛。
+
 在用户整体审阅本文后进入 writing-plans；本文阶段不生成生产代码，不执行真实固件测试。
 
 ## 官方参考
@@ -123,7 +133,7 @@ GUI 验收覆盖 Windows 11、Linux Wayland/X11、中文及其他 Unicode、启�
 
 Windows MVP 发现范围收敛为 BootOrder 引用编号，补充 BootCurrent/BootNext 引用编号；不包含未引用的孤立 Boot####，不声称穷尽固件所有条目。不使用未文档化枚举 API 或扫描 65536 个编号。Linux 可读取 efivarfs 中严格匹配的全局 Boot#### 并标明引用状态。详见 `docs/research/platform-contracts.md`。
 
-官方研究提出 Windows 使用非强制 `InitiateSystemShutdownExW`、Linux systemd>=255 使用 `RebootWithFlags(uint64 1)` 的契约；具体会话/inhibitor 行为仍待独立授权验收。2026-09-09更新：经授权在Arch取得2个私有真实启动项，用户分别确认对应Arch Linux和Windows11；两次连续读取一致不构成正常更新配对。Windows非空OptionalData尚为opaque，身份算法和自动归类白名单未冻结，正常更新前后证据与Windows原生API验证仍缺失。Task1为BLOCKED，不能据文档或只读采集成功放行后续实现。详见 `docs/research/identity.md`、`docs/research/windows-optionaldata.md`、`docs/research/support-matrix.md` 与仅记录非敏感证据计数的 `fixtures/uefi/manifest.json`。
+官方研究提出 Windows 使用非强制 `InitiateSystemShutdownExW`、Linux systemd>=255 使用 `RebootWithFlags(uint64 1)` 的契约；具体会话/inhibitor 行为仍待独立授权验收。2026-09-09更新：经授权在Arch取得2个私有真实启动项，用户分别确认对应Arch Linux和Windows11；两次连续读取一致不构成正常更新配对。Windows非空OptionalData内部仍为opaque；当日已批准修订将其处理收敛为完整精确组件，替代此前一律拒绝及更新配对阻塞MVP的策略。完整结构字段契约及Windows原生API证据仍缺失，自动归类白名单未启用；Task1为BLOCKED，不能据策略批准或只读采集成功放行后续实现。详见 `docs/research/identity.md`、`docs/research/windows-optionaldata.md`、`docs/research/support-matrix.md` 与仅记录非敏感证据计数的 `fixtures/uefi/manifest.json`。
 
 - UEFI Boot Manager：https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html
 - Windows 读取：https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfirmwareenvironmentvariableexw

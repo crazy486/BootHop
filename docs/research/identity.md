@@ -1,6 +1,6 @@
 # UEFI identity 研究契约（Task 1，BLOCKED）
 
-首次官方核对日期：2026-09-08；证据更新：2026-09-09。这不是已通过身份稳定性验收的算法。初稿时无真实样本；此后经用户授权，在 Arch 普通权限下采集了2个真实启动项的私有副本，用户分别确认为 Arch Linux 与 Windows 11。两次连续读取一致，正常更新配对数仍为0。公开真实fixture仍为0；私有样本不是已发布的可复现fixture。`fixtures/uefi/manifest.json` 仅记录非敏感计数与门槛。所有拟议变换仍须正反样本核对，Task 1 未完成，依赖任务不得据此开始生产实现。
+首次官方核对日期：2026-09-08；证据更新：2026-09-09。初稿时无真实样本；此后经用户授权，在Arch普通权限下采集了2个真实启动项的私有副本，用户分别确认为Arch Linux与Windows 11。两次连续读取一致，正常更新配对数仍为0，公开真实fixture仍为0。[已用户批准的opaque修订](../superpowers/specs/2026-09-09-opaque-identity-amendment.md) 已替代初稿的非空未知OptionalData一律拒绝及更新配对MVP硬gate；完整精确组件已批准，不意味着结构化identity完整契约已验收。私有真实样本可支持研究，公开原文不是MVP门槛。完整结构字段契约和Windows原生只读API证据仍缺失，Task1为BLOCKED；manifest只记录非敏感计数与门槛。
 
 ## 来源和解释边界
 
@@ -9,7 +9,7 @@
 - [Linux efivarfs](https://docs.kernel.org/filesystems/efivarfs.html)：磁盘文件前四字节是小端**变量属性**；之后才是变量值。该在线页面未标明固定内核发布版本，不能用其渲染日期冒充版本。
 - [Microsoft BCDBoot](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/bcdboot-command-line-options-techref-di?view=windows-11)：Windows EFI 安装目录、NVRAM 条目和 BCD 的关系。没有据此得到 OptionalData 的完整二进制稳定性契约。
 
-以下拒绝策略是 BootHop 的保守支持范围选择，不代表 UEFI 禁止其他合法格式。`UnsupportedFormat` 是结构或安全语义不受支持；`NeedsConfirmation` 是结构受支持但 OS 证据不充分；二者不得混淆。
+以下设备路径/属性拒绝策略是BootHop的保守支持范围选择，不代表UEFI禁止其他合法格式。`UnsupportedFormat` 是外层结构/设备路径或独立有效性规则不受支持；未知OptionalData内部语义不单独触发它。`NeedsConfirmation` 是结构受支持但OS证据不充分，不能混淆；opaque策略不新增自动分类。
 
 ## 字段表
 
@@ -29,18 +29,20 @@
 | EFI_LOAD_OPTION.Attributes | UEFI §3.1.3，值内 u32 | 否，独立可执行性策略 | 不整体参与 identity；拟允许 ACTIVE=1、HIDDEN=0/1、CATEGORY_BOOT=0 | 每次必须 ACTIVE；APP、保留位、FORCE_RECONNECT 暂拒绝，hidden 只影响展示 | 私有2项均为1；缺属性变化对照 | `inactive_target_rejected`、`hidden_change_preserves_identity`、`reserved_load_attribute_rejected` |
 | UEFI 变量 attributes | UEFI §3.3；Linux 前缀或 Win32 out 参数 | 否，独立存储策略 | 与上行严格不同；Boot####/BootOrder/BootNext 拟要求 NV\|BS\|RT=7；BootCurrent 为 BS\|RT=6 | 每次核对；未知认证/附加属性不静默接受 | 私有Boot项均为7；BootNext不存在；无Win32样本 | `variable_attributes_not_load_attributes`、`unexpected_variable_attributes_rejected` |
 | FilePathListLength | UEFI §3.1.3，u16 | 否，结构长度 | 与解析消费字节数相等，非身份哈希 | 校验 description、path、OptionalData 边界 | 私有2项；缺畸形对照 | `path_list_length_overflow_rejected` |
-| OptionalData 空值 | UEFI §3.1.3 | 拟身份格式标记 `Empty` | 不创建“可忽略任意数据”的规则；零长度与非零不同格式 | 空→非空必须重新解析且未支持时拒绝 | 用户确认的Arch私有样本为空；缺变换对照 | `empty_to_unknown_optional_rejected` |
-| OptionalData 非空：Windows BCD / Linux loader 参数 / 厂商数据 | UEFI 仅定义传入加载镜像的字节；格式由生产者定义 | 未决 | Windows私有样本136字节可观察布局已记录，但完整正式语义/稳定性未证明，不做全量比较或全量忽略 | 当前一律 UnsupportedFormat，包括看似文本、常见魔数和 GUID | Windows私有样本1项；缺官方二进制契约/更新配对 | `unknown_optional_data_rejected` |
+| OptionalData 空值 | UEFI §3.1.3；已批准opaque修订§2 | 是：OpaqueExactV1 | byte_length=0 + SHA-256(empty)，完整32字节摘要；无忽略路径 | 外层边界有效；空/非空转换失配，停止switch后须主动重新确认configure | 用户确认的Arch私有样本为空；实现测试未开始 | `empty_optional_sha256_vector`、`opaque_exact_change_rejected` |
+| OptionalData 非空：Windows / Linux loader / 厂商数据 | UEFI仅定义传入加载镜像的剩余字节；已批准opaque修订§2 | 是：OpaqueExactV1 | 完整原始字节长度+SHA-256；不删NUL/尾部、不重编码/折叠/抽取子集；未知非UTF-16同样适用 | 先验证外层/设备路径/attributes；长度或摘要变化停止switch，须主动重新确认OS并授权configure；不证明内部语义安全 | Windows私有样本136字节，内部语义仍opaque；自然更新对照仅未来放宽所需 | `opaque_non_utf16_can_register`、`opaque_exact_change_rejected` |
 
-没有任何身份变换通过真实样本 gate。拟允许的 description 改名、hidden 改变也须分别提供结构合法的正例与结构破坏/目标改变的反例。不得用手工变更真实文件来冒充“正常更新前后”证据。设备前缀、几何字段、路径规范化、OptionalData 待决意味着 CanonicalIdentity 的最终序列化尚未冻结。
+未批准新的宽松身份变换。拟允许的description改名、hidden改变仍须格式依据及结构合法正例/破坏结构或改变目标的反例；可使用明确标识的synthetic测试，不冒充自然更新。设备前缀、几何字段、路径支持/规范化与独立验证仍有未决项，因此完整CanonicalIdentity序列化尚未冻结；OptionalData组件本身已定为 `OpaqueExactV1 { algorithm: Sha256, byte_length: u64, digest: [u8; 32] }`。正常更新配对不阻MVP strict exact，只约束未来允许变化/归一化。
 
-Windows非空OptionalData的官方依据、可观察布局和拒绝/候选策略见 [windows-optionaldata.md](windows-optionaldata.md)。用户的OS确认补充了本机样本标签，不能代替生产 configure 的结构检查，也不能直接启用自动 Known 规则。
+组件种类/版本、算法、长度和完整32字节摘要须显式持久化，摘要为规范64位十六进制；未知记录/组件版本或算法fail closed且不可普通configure覆盖，损坏/错误摘要长度也拒绝、不等于Missing。configure从同一读取buffer计算结构字段与组件，switch不接受GUI摘要，任何失配不得WriteNext/Reboot/SaveRecord或自动重登记。可信记录/缓存/日志不存原始OptionalData，指纹不默认公开。相等判断依赖SHA-256抗碰撞假设，不证明语义、最终OS或相同路径二进制/BCD不变。
+
+Windows非空OptionalData的官方依据、可观察布局和已批准精确策略见 [windows-optionaldata.md](windows-optionaldata.md)。用户的OS确认补充了本机样本标签，不能代替生产configure的结构检查，也不能直接启用自动Known规则。
 
 ## 支持格式与正向归类证据
 
 | 输入/证据 | 当前研究结果 | 来源与反例 |
 |---|---|---|
-| 单实例短路径 HD(GPT GUID)+单绝对 FilePath+EndEntire、空 OptionalData | 候选支持轮廓，尚未通过样本门槛 | UEFI §3/§10；同一 GUID 克隆到多个分区时固件仍可能任选，不能保证最终 OS |
+| 单实例短路径 HD(GPT GUID)+单绝对 FilePath+EndEntire、任意有界OptionalData（含空） | 结构候选轮廓仍待完整字段契约；OptionalData完整精确策略已批准 | UEFI §3/§10及opaque修订；未知路径不获放宽，同一GUID克隆仍不能保证最终OS |
 | 多实例、多 FilePathList 元素、网络、USB、vendor、完整未知前缀、默认回退文件 | UnsupportedFormat（暂定保守范围） | UEFI 允许多种解析路径；缺少可验证唯一目标语义 |
 | `\EFI\Microsoft\Boot\bootmgfw.efi` + 已支持结构 | 将来 `Known(Windows)` 规则候选；现在 NeedsConfirmation | BCDBoot 官方目录资料；文件可被替换、BCD 可转向其他链，路径不是最终 OS 的证明 |
 | `\EFI\systemd\systemd-bootx64.efi`、GRUB、shim 名称/路径 | NeedsConfirmation | 引导管理器可提供多个 OS；不能因为 Linux 项目生产 loader 就推断其最终 OS |
@@ -81,6 +83,6 @@ bcdedit.exe /enum firmware /v
 
 本任务禁止写生产代码，仓库也没有已审查的 Windows 原始变量采集器，因此不虚构可运行的导出命令。Windows 原始 API 样本若未来继续，另需明确授权制作/审查只读采集器：仅启用 SeSystemEnvironmentPrivilege，调用 GetFirmwareEnvironmentVariableExW 读取 BootOrder∪BootCurrent∪BootNext 及关联 Boot####，导出 out attributes + 原始 payload。该步骤当前未完成、未获本轮执行授权，Windows API 封装验收不能由 Linux 样本替代；已取得的 Linux 副本仅支持 Windows 启动项格式研究。
 
-正常更新配对须来自用户本来要执行的 OS/引导器更新，或已经留存的前后档案。本任务不请求执行更新、重建条目或重启。每组记录同机/同目标证据、采集 OS、更新组件精确版本、更新事件时间、两次原始摘要。至少 Windows loader 与 Linux 实际 loader 各一组。
+正常更新配对现仅是未来放宽/归一化研究要求，不是MVP strict exact门槛；须来自用户本来要执行的OS/引导器更新或既有前后档案。本任务不请求更新、重建条目或重启。未来研究至少Windows loader与Linux实际loader各一组，私有记录同机/同目标证据、采集OS、组件精确版本、事件时间及两次原始摘要。
 
 匿名化在副本进行：GUID 采取同一数据集内一致的一一映射，保留 GUID 布局和相等关系；不修改节点边界、属性、路径、OptionalData。确需处理 UTF-16 描述时重新计算长度并明确标记加工步骤；这种修改不能充当自然更新证据。保留原始摘要（私有）和公开副本摘要，转换清单与 pair_id；不能证明结构保持时不公开该夹具。每个允许变换须有正反例，人工负例单独标 `synthetic-derived`，绝不计入真实更新门槛。

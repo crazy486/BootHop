@@ -1,8 +1,8 @@
 # BootHop identity 修订：结构化身份与 opaque exact-match
 
-状态：待用户批准的设计修订稿。2026-09-09。本文接受独立设计审查，但在用户批准前不替换既有生效规格、不解除任何实施门槛、不推进生产代码。
+状态：已用户批准。2026-09-09。本文全部修订生效，替代此前非空未知 OptionalData 一律拒绝及正常更新配对阻止 MVP strict exact-match 的规则；其余研究门槛不因此解除，本轮不推进生产代码。
 
-独立审查结果：规格符合，设计质量 Approved；未发现 Critical、Important 或 Minor 问题。该结果不替代用户对修订的批准。
+独立审查结果：规格符合，设计质量 Approved；未发现 Critical、Important 或 Minor 问题。其后用户明确批准全部修订。
 
 ## 评估与推荐
 
@@ -64,7 +64,7 @@ opaque失配后用户必须主动进入重新配置，并重新确认目标OS语
 
 Windows前置门槛限于单独获授权的只读原生API验证；不会为了补齐门槛执行SetFirmwareEnvironmentVariableExW、重启或主动制造系统变化。无法安全观察的错误分支明确记录限制，以fake覆盖，不能伪装实机证据。
 
-本轮只评估和审查修订，不发起Windows读取或申请系统权限。即使修订获批，Task1也不能直接标完成；需要更新具体检查表并取得剩余Windows证据。
+本轮仅同步已批准文档，不发起Windows读取或申请系统权限。修订已获批，但Task1不能直接标完成；仍需完整结构字段契约和剩余Windows证据。
 
 ## 5. 验证要求（全部普通测试使用fake或本地夹具）
 
@@ -77,8 +77,8 @@ Windows前置门槛限于单独获授权的只读原生API验证；不会为了�
 - 明确用户重新配置可替换已支持格式的旧基线，后续严格验证新基线；没有自动重新登记路径。
 - 受保护记录、错误和GUI缓存没有原始OptionalData；正常更新可触发失效属于预期行为，不据此放宽比较。
 
-## 6. 获批后的文档同步清单
+## 6. 已批准修订的文档同步清单
 
-批准后再用writing-plans同步：主规格§5/§9/§10及Task1附录；实施计划Task1、3、4、5、9、10及全局门槛；identity字段表、windows-optionaldata研究结论、support-matrix、manifest与progress ledger。将“非空一律UnsupportedFormat”和“更新配对阻止全部后续任务”改为本修订的有限规则。
+使用writing-plans同步：主规格§5/§9/§10及Task1附录；实施计划Task1、3、4、5、9、10及全局门槛；identity字段表、windows-optionaldata研究结论、support-matrix、manifest与progress ledger。将“非空一律UnsupportedFormat”和“更新配对阻止全部后续任务”改为本修订的有限规则；ledger由controller维护。
 
-保留研究历史：内部格式依旧未知，改变的是允许严格登记与比对的产品策略，不篡改为已经解码成功。manifest可区分`opaque_exact_strategy_approved`与`production_identity_contract_approved`；前者获批不意味Windows门槛已通过或整个Task1完成。现有文档在用户批准前保持原生效规则，本文仅为待批准的替代文本。
+保留研究历史：内部格式依旧未知，改变的是允许严格登记与比对的产品策略，不篡改为已经解码成功。manifest区分`opaque_exact_strategy_approved=true`与`production_identity_contract_approved=false`；前者获批不意味Windows门槛已通过或整个Task1完成，当前状态仍为BLOCKED。

@@ -41,12 +41,14 @@ WiX7 官方文档要求显式 EULA 接受并有维护费条款，发布者需按
 
 | 层级 | 必须覆盖 | 本次状态 |
 |---|---|---|
-| 研究/夹具 | 真实 Windows/Linux 启动项；同目标正常更新配对；每个身份变换正反证据；格式字段逐项归属 | 私有真实项各1个且用户已确认OS；公开fixture仍0、正常更新配对各0，Windows非空OptionalData语义未知，变换规则未批准；BLOCKED |
-| 纯测试 | parser 边界、未知 OptionalData、未知记录版本、helper 篡改参数、阶段 Unknown、超限/超时/断连、ABA 恢复拒绝 | 未开始，禁止访问宿主固件 |
+| 研究/夹具（MVP硬gate） | 私有真实Windows/Linux项；完整结构字段/支持范围/独立验证及正反依据；Windows原生只读API权限/out attributes/payload/错误语义 | 私有真实项各1个、OS已确认；opaque完整精确策略已批准，完整结构字段契约及Windows原生API实证仍缺，Task1 BLOCKED；安全不可观察的错误需明确限制并fake覆盖 |
+| 未来放宽研究（非MVP硬gate） | 正常更新配对、OptionalData语义及允许变化/归一化的依据 | 配对各0、内部仍opaque；不阻MVP strict exact，不以本修订批准任何宽松变换 |
+| 可选公开夹具（非MVP硬gate） | 匿名化及逐字段隐私审查 | 公开fixture为0；私有真实样本可支持研究，普通CI用synthetic，不提交原文 |
+| 纯测试 | parser边界、opaque含空SHA-256/完整摘要往返/逐字节变化拒绝、未知非UTF-16可登记、未知设备路径仍拒绝、未知记录/组件/算法禁止覆盖、主动重新确认、helper篡改参数、阶段Unknown、超限/断连、ABA恢复拒绝 | 未开始，禁止访问宿主固件；不得将synthetic变体当自然更新 |
 | 包与 GUI | 两端目录保护；普通用户不能改记录/helper；中文/其他 Unicode、缩放、高 DPI；Arch Wayland、Ubuntu Wayland/X11、Windows | 未开始 |
 | inhibitor/应用阻止 | systemd255 root+block/delay、261 root+block/weak/delay，Windows 未保存应用和 UAC 不同账户 | 未执行，需独立显式授权 |
 | UEFI VM 和实机 | 双向 switch；BootNext 冲突/存在/丢失；比较每次 BootOrder 前后；分别记录 API、读回、重启接受、人工 OS 观察 | 未执行，需独立显式授权；BootOrder 变化即失败 |
 
 发布前补齐 Windows 精确 build/固件、Ubuntu VM 版本、Arch 活动会话/固件元数据，记录统一 release 构建的包大小、安装占用和额外依赖。当前没有体积数据，不设未经测量的承诺。
 
-本轮可独立完成的官方依赖版本/MSRV、API选择、平台范围、glibc构建基线和打包方式研究已记录；完整依赖图编译、运行库实测清单、安装包验证和OS行为实验仍未执行，不能由官方文档推出已通过。私有样本数量、两次一致性和用户语义标签可支持格式研究，但不替代Windows本机API证据或正常更新配对；详见 [Windows OptionalData证据分层](windows-optionaldata.md)。
+本轮可独立完成的官方依赖版本/MSRV、API选择、平台范围、glibc构建基线和打包方式研究已记录；完整依赖图编译、运行库实测清单、安装包验证和OS行为实验仍未执行，不能由官方文档推出已通过。[已批准opaque修订](../superpowers/specs/2026-09-09-opaque-identity-amendment.md)替代此前非空拒绝和更新配对MVP gate；opaque任何长度/完整SHA-256变化停止switch，用户主动重新确认OS并授权configure，未知记录/组件/算法不能普通覆盖。结构/设备路径/属性不放宽。私有样本不替代Windows原生API硬gate，也不冒充未来放宽所需自然更新配对；详见 [Windows OptionalData证据分层](windows-optionaldata.md)。

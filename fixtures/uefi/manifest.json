@@ -2,7 +2,19 @@
   "schema_version": 1,
   "research_date": "2026-09-09",
   "status": "BLOCKED",
+  "opaque_exact_strategy_approved": true,
   "production_identity_contract_approved": false,
+  "approved_optional_data_strategy": {
+    "component": "OpaqueExactV1",
+    "algorithm": "Sha256",
+    "byte_length_type": "u64",
+    "digest_bytes": 32,
+    "serialized_digest_hex_characters": 64,
+    "covers_complete_original_bytes_including_empty": true,
+    "mismatch_requires_active_user_reconfirmation": true,
+    "unknown_record_component_or_algorithm_fails_closed": true,
+    "ordinary_configure_cannot_overwrite_unsupported_record": true
+  },
   "real_samples": [],
   "real_samples_scope": "public_reviewed_fixtures_only",
   "private_evidence": {
@@ -22,6 +34,7 @@
   "synthetic_samples": [],
   "update_pairs": [],
   "approved_identity_transformations": [],
+  "required_sample_fields_scope": "private_provenance_or_optional_reviewed_public_export; publishing_originals_is_not_an_mvp_gate",
   "required_sample_fields": [
     "id", "path", "capture_time", "capture_os", "capture_os_version",
     "target_os_evidence", "firmware_vendor", "firmware_model", "firmware_version",
@@ -30,17 +43,22 @@
     "anonymization_mapping_id", "provenance", "authorization_reference"
   ],
   "accepted_capture_formats": ["linux-efivarfs-with-le-u32-attributes", "win32-payload-plus-out-attributes"],
+  "required_update_pair_fields_scope": "future_relaxation_or_normalization_research_only",
   "required_update_pair_fields": [
     "pair_id", "before_sample_id", "after_sample_id", "same_machine_evidence",
     "same_target_evidence", "component", "version_before", "version_after",
     "update_event_time", "anonymization_consistency_evidence", "observed_field_changes"
   ],
   "missing_evidence": [
-    "reviewed_public_redacted_real_fixtures", "windows_optional_data_official_semantics_and_stability",
-    "windows_normal_update_before_after", "linux_normal_update_before_after",
-    "positive_and_negative_evidence_for_each_identity_transformation",
-    "windows_native_api_capture"
+    "complete_structured_identity_field_contract_and_validation_basis",
+    "positive_and_negative_tests_for_supported_structural_rules",
+    "windows_native_firmware_api_actual_read_privilege_out_attributes_payload_error_evidence"
   ],
+  "future_relaxation_research_gaps_not_mvp_gates": [
+    "windows_optional_data_official_semantics_and_stability",
+    "windows_normal_update_before_after", "linux_normal_update_before_after"
+  ],
+  "unpublished_public_fixtures_are_mvp_blocker": false,
   "blocked_dependent_tasks": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  "notes": "Initial research had no samples. An authorized Arch read-only capture was later retained privately and labeled by the user. Empty real_samples means zero published fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published here. Two repeated reads are not a normal update pair. Task 1 remains BLOCKED."
+  "notes": "Initial research had no samples. An authorized Arch read-only capture was later retained privately and labeled by the user. Empty real_samples means zero published fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published here. The user-approved 2026-09-09 opaque amendment supersedes blanket rejection of unknown OptionalData and the normal-update-pair MVP gate. Strict exact comparison includes empty data and does not relax structural, device-path or attribute validation. Two repeated reads are not an update pair. OptionalData internal semantics remain opaque. Full structural identity and Windows native read-only API evidence remain incomplete; safely unobservable errors must state limits and use fake coverage. Task 1 remains BLOCKED; no new firmware operation is authorized."
 }

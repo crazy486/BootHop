@@ -32,14 +32,15 @@ Windows私有副本按 EFI_LOAD_OPTION 的description终止符与FilePathListLen
 
 ## identity处理决定
 
-当前生产支持结论仍为 `UnsupportedFormat`：非空Windows OptionalData是 **opaque**，没有获批字段级算法。用户确认Windows11只补充目标OS语义，不能绕过此格式门槛。不能忽略OptionalData、不能仅提取BCDOBJECT GUID、不能把整个EFI_LOAD_OPTION或整块OptionalData无差别逐字节比较后声称稳定身份已经成立。
+历史：本页初稿因完整字段语义未知而将非空OptionalData一律判为UnsupportedFormat，并把精确指纹仅列为待裁定候选。该产品策略已被[用户批准的opaque修订](../superpowers/specs/2026-09-09-opaque-identity-amendment.md)替代；内部语义依旧未知，不是已经解码成功。
 
-可审阅的保守研究候选有两类，但本轮均不启用：
+当前已批准：所有MVP OptionalData（包括空和未知非UTF-16二进制）统一使用 `OpaqueExactV1 { algorithm: Sha256, byte_length: u64, digest: [u8; 32] }`。外层完整解析确定边界，从同一读取buffer计算结构化identity及完整原始字节长度+SHA-256；不截断摘要、剥NUL、重编码、删尾部或提取BCDOBJECT子集。空值也使用长度0与SHA-256(empty)。结构/设备路径/attributes规则不放宽；此组件不能替代它们，不能证明内部格式安全或最终OS正确。
 
-1. 若未来取得正式结构依据，将已理解的对象选择字段纳入目标身份，并独立验证版本、长度、边界及影响执行的其他字段；只有获得真实正常更新正反对照的区域才允许变化。
-2. 在正式语义仍不明确时，可以把未知区域的精确指纹作为**额外变更阻断条件**研究，任何变化要求重新研究；它不能单独证明初始格式安全、不能把UnsupportedFormat变为受支持，也不替代结构化identity。该候选会拒绝可能合法的正常更新；若要作为产品支持模式，须另作明确设计裁定，不在当前规则中暗中启用。
+受保护记录显式保存组件种类/版本、算法、长度和规范64位十六进制的完整32字节摘要，不保存原始OptionalData；GUI缓存/普通日志同样禁止原文，指纹不默认公开。未知记录/组件版本或算法fail closed，普通configure不能覆盖；损坏摘要也拒绝、不当作Missing。内容一致是长度与完整SHA-256的工程判断，依赖抗碰撞假设。
 
-没有被批准的identity变换；字段级规则的正例/反例和正常更新前后配对均未满足。`WINDOWS`标记、UTF-16可解码、GUID形状、用户标签或连续两次相同，分别只能支持各自有限事实，不能叠加成尚未验证的格式白名单。
+任意长度/摘要或结构化identity变化均在BootNext修改及重启前停止，不自动保存/跟随编号/configure。用户必须主动重新选择并确认OS，经正常UAC/polkit授权后由configure建立新基线；正常未变化切换无额外确认。未知组件与普通失配区分，不提供普通configure恢复入口。
+
+完整精确策略已获批准，但没有新增宽松变换或自动归类规则。`WINDOWS`标记、UTF-16、GUID形状、用户标签、连续两次相同均只支持有限观测。未来若要语义归一化或容忍更新变化，须另定版本、取得正式依据/正反证据/自然更新配对并批准；配对不再阻止MVP strict exact。完整结构字段契约和Windows原生只读API证据仍为Task1缺口。
 
 ## 证据状态
 
@@ -48,7 +49,10 @@ Windows私有副本按 EFI_LOAD_OPTION 的description终止符与FilePathListLen
 | 本机Windows/Arch真实启动项与用户OS确认 | 已取得私有证据，各1项 |
 | 外层UEFI结构、两类attributes、OptionalData边界 | 已有官方格式依据和本机观测 |
 | 136字节内部形状分区 | 已私有检查；公开仅非敏感布局 |
-| Windows OptionalData正式字段语义与更新稳定性 | 未完成，opaque |
-| 同目标正常更新前后Windows/Arch配对 | 各0组；本轮不执行更新或追加采集 |
-| 原生Windows API attributes/payload、UAC/会话/正常重启实验 | 未完成；Arch副本不替代Windows实机验证 |
-| 公开、匿名化审阅后的真实fixture及回归样本 | 尚未发布；公开manifest仅记录私有证据计数 |
+| Windows OptionalData正式字段语义与更新稳定性 | 未完成，opaque；strict exact不要求解码 |
+| OpaqueExactV1完整精确策略 | 已用户批准；不等于完整生产identity契约完成 |
+| 同目标正常更新前后Windows/Arch配对 | 各0组；仅未来放宽/归一化gate，不阻MVP strict exact；本轮无采集/更新 |
+| 完整结构字段契约、支持规则和正反验证 | 未完成；Task1门槛仍有效 |
+| Windows原生GetFirmwareEnvironmentVariableExW权限/out attributes/payload/错误语义 | 未完成，Task1实施前硬gate；Arch副本不替代，需另获只读授权；无法安全观察的错误明确限制并fake覆盖 |
+| UAC/会话/正常重启与BootNext写入实测 | 未完成，属于后续单独授权验收，不为补只读gate执行 |
+| 公开、匿名化审阅后的真实fixture及回归样本 | 尚未发布，不是MVP硬gate；私有真实证据有效，普通CI用synthetic |

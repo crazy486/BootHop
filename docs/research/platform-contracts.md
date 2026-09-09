@@ -46,7 +46,7 @@ GUI 在本机创建随机 128-bit nonce 后缀的 `\\.\pipe\BootHop-<hex>` 单�
 
 Linux 固定 `/var/lib/boothop/targets.json`，root:root 目录 0700、文件 0600；helper `/usr/lib/boothop/boothop-helper`。Windows 固定 `FOLDERID_ProgramData\BootHop\targets.json`，目录/文件 ACL 只允许 SYSTEM 和提升管理员写；helper 安装于受保护 Program Files。路径不接收 GUI/环境变量覆盖。两端各自维护对侧 OS 目标，per-OS 首次配置互不共享。
 
-记录 envelope 未知版本必须 UnsupportedRecordVersion，普通 configure 不覆写；只有明确 NotFound 才是未配置。原子同目录替换配合落盘/权限保护，读取错误不吞掉。helper 整次 inspect/configure/switch 持本产品的互斥锁；这无法阻止其他固件工具、固件自动维护或另一个 OS 写入。
+记录envelope未知版本必须UnsupportedRecordVersion；按已批准opaque修订，未知身份组件种类/版本/算法同样是不支持记录，普通configure不覆写，损坏摘要也拒绝。只有明确NotFound才是未配置。记录不含原始OptionalData，指纹不默认公开；configure从同一读取buffer生成结构字段和完整opaque组件，失配不自动重登记。原子同目录替换配合落盘/权限保护，读取错误不吞掉。helper整次inspect/configure/switch持本产品互斥锁；这无法阻止其他固件工具、固件自动维护或另一OS写入。
 
 Windows SetFirmwareEnvironmentVariableExW 与 Linux efivarfs 均无已核实 compare-and-swap/事务语义。写前读、写后读不构成外部原子保护，值相同也无法排除 ABA。默认恢复策略：无法证明独占与无外部变化则不恢复，报告可能残留。原本已有同一 BootNext 的状态不归本次操作所有。Accepted/Unknown 重启不回滚。报告独立携带目标验证、BootNext 设置/读回、重启请求；读取不能证明固件将遵守 BootNext 或目标 OS 实际启动成功。
 
@@ -58,6 +58,6 @@ Windows SetFirmwareEnvironmentVariableExW 与 Linux efivarfs 均无已核实 com
 | Windows发现 | 固定BootOrder并集BootCurrent/BootNext引用范围与孤立项限制，公开读取API契约已明确 | Windows实际发现和权限；不承诺完整枚举 |
 | 正常重启 | Win32非强制参数/异步返回及logind255/261 flag1依据已核对 | 应用阻止、root block/block-weak/delay、UAC不同账户和多会话实验 |
 | IPC/存储 | 固定helper、权限保护、对端核验API、Unknown语义；按已批准64KiB对齐 | Windows具体token访问权、管道ACL及两平台端到端集成 |
-| identity消费 | 私有样本支持外层结构，Windows非空OptionalData为opaque | 官方专有字段语义、正常更新配对、变换正反例；不得以只读采集成功解除门槛 |
+| identity消费 | 私有样本支持外层观察；内部仍opaque，已批准全部OptionalData（含空）完整长度+SHA-256严格组件 | 完整结构字段契约/正反验证和Windows原生只读API证据仍为Task1 gate；内部解码与更新配对只约束未来放宽，公开原文不要求 |
 
 本轮没有执行表中待完成的操作，也没有把需要Windows主机/更新事件的缺口改写为已验证。下一步仍由研究门槛决定，不因平台文档已收敛而开始生产实现。
