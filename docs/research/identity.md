@@ -22,7 +22,7 @@
 | 硬件/ACPI/消息节点前缀 | UEFI §10.3 | 未决 | 不删除、不重排、不把完整路径折叠成短路径；初始候选范围暂不支持此前缀 | 未批准节点组合返回 UnsupportedFormat | 缺失 | `unknown_prefix_rejected` |
 | HD 节点分区格式/签名类型 | UEFI §10.3.5.1 | 拟身份 | 初始研究候选仅 GPT=2、GUID=2；MBR、无签名均暂拒绝 | HD 节点长 42，分区号非零、签名非零 | 私有2项均GPT/GUID；缺MBR负例 | `mbr_or_unsigned_rejected` |
 | GPT UniquePartitionGuid、分区号 | UEFI §3.1.2、§10.3.5.1 | 拟身份 | GUID 字段按 UEFI 字节布局解析成固定语义值，分区号 u32；不改 GUID 大小端含义 | 拒绝不一致/重复目标；GUID 不是磁盘 GUID | 私有2项；标识不公开，缺变化对照 | `partition_guid_change_rejected`、`partition_number_change_rejected` |
-| 分区起始 LBA、大小 | UEFI §10.3.5.1 | 未决：拟保守保留为独立字段 | 不擅自忽略移动/扩容变化；待真实更新证据决定是否身份或独立重验 | 非零大小、范围无溢出；无磁盘核对能力不得宣称已验证 GPT 内容 | 私有2项；无移动/扩容对照 | `partition_geometry_change_requires_review` |
+| 分区起始 LBA、大小 | UEFI §10.3.5.1 | 未决：拟保守保留为独立字段 | 不擅自忽略移动/扩容变化；身份归属与独立验证由结构字段契约裁定；未来忽略移动/扩容差异等放宽策略才要求真实更新证据 | 非零大小、范围无溢出；无磁盘核对能力不得宣称已验证 GPT 内容 | 私有2项；无移动/扩容对照 | `partition_geometry_change_requires_review` |
 | FilePath 节点 UTF-16 路径 | UEFI §10.3.5.4 | 拟身份 | 拟支持单个绝对路径节点；保留 UTF-16 码元，不做 Unicode NFC、大小写折叠、斜杠替换、`.`/`..` 消解 | 终止符在节点内、无嵌入 NUL、有效编码；相对路径/歧义形式暂拒绝 | 私有2项均单绝对路径；路径不公开，缺变化对照 | `loader_path_change_rejected`、`invalid_utf16_path_rejected` |
 | 多 FilePath 节点拼接 | UEFI §10.3.5.4 给出分隔符合并/插入规则 | 未决 | 规范允许，BootHop 尚无正反样本；当前候选范围不允许此变换 | 暂 UnsupportedFormat，不能任意拼接字符串 | 缺失 | `split_path_not_silently_normalized` |
 | Description | UEFI §3.1.3 | 否 | 仅显示；合法改名拟不改变身份；不 trim 后用名称分类 | 检查 UTF-16 NUL 结束、边界、有效编码，显示层转义控制字符 | 私有2项；缺改名对照 | `valid_description_change_preserves_identity`、`malformed_description_rejected` |
