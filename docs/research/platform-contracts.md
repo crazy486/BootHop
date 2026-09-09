@@ -1,6 +1,6 @@
 # 平台契约（官方研究，待实机验收）
 
-访问日期 2026-09-08；Task 1 状态 BLOCKED，原因见 [identity](identity.md)。本文固定实现候选的 API、输入边界和失败语义，不宣称已运行任何提权、固件访问或重启测试。生产实现须等研究门槛放行。
+首次访问日期2026-09-08；证据/产品约束更新2026-09-09。Task 1 状态 BLOCKED，原因见 [identity](identity.md)。本文固定实现候选的API、输入边界和失败语义。此后controller经用户授权，已在Arch普通权限下完成一次私有只读采集；这只验证当前变量可读取和本地解析，不等于生产平台实现或固件启动行为验收。未运行提权、Windows固件API、UEFI写入或重启测试；生产实现仍须等研究门槛放行。
 
 ## UEFI 访问与发现范围
 
@@ -30,7 +30,9 @@ block/block-weak 的拒绝和 delay 锁等待必须分别验收；delay 受 logi
 
 ## IPC 与授权
 
-产品常量：协议 envelope 版本 1；长度前缀 u32 LE + UTF-8 JSON；请求上限 4 KiB，单响应帧 1 MiB，整个操作 stdout/管道累积 8 MiB，stderr 64 KiB。一个操作一条请求，阶段报告必须带同一个 request_id；未知版本、未知字段、重复字段、超长帧、额外请求拒绝。授权/连接等待 120 秒，建立后请求/读写等待 30 秒；重启 RPC 回复等待 30 秒。上限是 BootHop 的设计选择，须 fake 测试边界；不是 OS 默认值。GUI 不阻塞主线程等待。
+产品常量：协议 envelope 版本1；长度前缀u32 LE + UTF-8 JSON。依已批准Task9统一约束，请求和响应各以 **64 KiB** 为上限，长度前缀计入该上限；单次操作接收的所有响应帧与stderr诊断合计也不得超过64 KiB。超限明确报告 `ResourceLimit`，不截断后继续解析或将部分枚举显示成完整结果。它是产品资源约束，非官方API要求；初稿中的1MiB响应/8MiB累积没有需求证据，本版不采用。若后续需扩大，须由controller明确裁定和统一契约，不能由平台或GUI各自增加。
+
+一个操作一条请求，阶段报告必须带同一个request_id；未知版本、未知字段、重复字段、超长帧、额外请求拒绝。授权/连接等待120秒，建立后请求/读写等待30秒；重启RPC回复等待30秒。这些等待时间同属产品选择，须fake测试边界，不是OS默认值。GUI不阻塞主线程等待；私有研究采集器的文件大小限制不是产品IPC限制，也不将raw固件内容作为常规GUI响应。
 
 Linux 固定 exec `/usr/bin/pkexec --disable-internal-agent /usr/lib/boothop/boothop-helper`，通过 argv 数组调用，不调用 shell，不采用 GUI 指定路径。helper 路径、policy action、父目录均 root 可写；`org.freedesktop.policykit.exec.path` 精确对应安装路径，禁止 keep 授权规则导致任意参数受信。仅传受限 stdin/stdout/stderr 管道，关闭其他继承 FD；环境不传 loader 注入变量；helper 检查 euid=0、管道类型、版本/长度/操作，不信任 PKEXEC_UID 或 GUI 发来的 identity。GUI 不被提升、不保留 DISPLAY/XAUTHORITY 特例。pkexec exit 126 表示取消，127 表示未授权或其他错误，不能把 127 单独诊断成没有认证代理。禁用内部代理后依实际失败提供“取消 / 授权失败 / 无法确定的授权环境错误”，不声称可靠预检测认证代理存在。[pkexec 官方手册](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html)。
 
@@ -47,3 +49,15 @@ Linux 固定 `/var/lib/boothop/targets.json`，root:root 目录 0700、文件 06
 记录 envelope 未知版本必须 UnsupportedRecordVersion，普通 configure 不覆写；只有明确 NotFound 才是未配置。原子同目录替换配合落盘/权限保护，读取错误不吞掉。helper 整次 inspect/configure/switch 持本产品的互斥锁；这无法阻止其他固件工具、固件自动维护或另一个 OS 写入。
 
 Windows SetFirmwareEnvironmentVariableExW 与 Linux efivarfs 均无已核实 compare-and-swap/事务语义。写前读、写后读不构成外部原子保护，值相同也无法排除 ABA。默认恢复策略：无法证明独占与无外部变化则不恢复，报告可能残留。原本已有同一 BootNext 的状态不归本次操作所有。Accepted/Unknown 重启不回滚。报告独立携带目标验证、BootNext 设置/读回、重启请求；读取不能证明固件将遵守 BootNext 或目标 OS 实际启动成功。
+
+## 本轮契约核对与剩余证据
+
+| 项目 | 无额外实机操作可确认的依据 | 仍未完成的验证 |
+|---|---|---|
+| UEFI/efivarfs读取与属性分离 | 官方格式已核对；私有Arch采集8个raw文件哈希/两次内容一致，2个真实项有用户OS标签 | Windows原生API out attributes/payload；生产reader错误分支 |
+| Windows发现 | 固定BootOrder并集BootCurrent/BootNext引用范围与孤立项限制，公开读取API契约已明确 | Windows实际发现和权限；不承诺完整枚举 |
+| 正常重启 | Win32非强制参数/异步返回及logind255/261 flag1依据已核对 | 应用阻止、root block/block-weak/delay、UAC不同账户和多会话实验 |
+| IPC/存储 | 固定helper、权限保护、对端核验API、Unknown语义；按已批准64KiB对齐 | Windows具体token访问权、管道ACL及两平台端到端集成 |
+| identity消费 | 私有样本支持外层结构，Windows非空OptionalData为opaque | 官方专有字段语义、正常更新配对、变换正反例；不得以只读采集成功解除门槛 |
+
+本轮没有执行表中待完成的操作，也没有把需要Windows主机/更新事件的缺口改写为已验证。下一步仍由研究门槛决定，不因平台文档已收敛而开始生产实现。

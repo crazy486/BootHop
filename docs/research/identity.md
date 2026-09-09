@@ -1,6 +1,6 @@
 # UEFI identity 研究契约（Task 1，BLOCKED）
 
-访问与核对日期：2026-09-08。这是官方资料阶段产物，不是已通过真实样本验收的身份算法。真实样本数、正常更新配对数均为 0；`fixtures/uefi/manifest.json` 是门槛状态的机器可读记录。所有拟议规则仍须真实正反样本核对，Task 1 未完成，依赖任务不得据此开始生产实现。
+首次官方核对日期：2026-09-08；证据更新：2026-09-09。这不是已通过身份稳定性验收的算法。初稿时无真实样本；此后经用户授权，在 Arch 普通权限下采集了2个真实启动项的私有副本，用户分别确认为 Arch Linux 与 Windows 11。两次连续读取一致，正常更新配对数仍为0。公开真实fixture仍为0；私有样本不是已发布的可复现fixture。`fixtures/uefi/manifest.json` 仅记录非敏感计数与门槛。所有拟议变换仍须正反样本核对，Task 1 未完成，依赖任务不得据此开始生产实现。
 
 ## 来源和解释边界
 
@@ -13,26 +13,28 @@
 
 ## 字段表
 
-“拟身份”表示待样本确认的 canonical 字段，不是当前可用白名单。表中测试名均为待实施验收名，没有声称已存在或已运行测试。
+“拟身份”表示待稳定性证据确认的 canonical 字段，不是当前可用白名单。表中测试名均为待实施验收名，没有声称已存在或已运行测试。样本列的“私有2项”只说明本机字段已观测，不说明变换已验证；OS标签来自用户确认，不来自名称或路径推断。
 
 | 字段 | 格式来源 | 是否身份 | 规范化方法 | 是否独立验证 | 样本 | 回归测试名 |
 |---|---|---|---|---|---|---|
-| Boot#### 编号 | UEFI §3.1.1，四位大写十六进制 UINT16 | 否，仅定位 | 解析为 u16；不追随其他编号 | 原编号存在、当前值可读 | 缺失 | `missing_original_id_stops` |
-| 节点 type/subtype/length、顺序、结束节点 | UEFI §10.3 | 拟身份：有序结构 | 按节点解析；不把未知节点原样哈希后称为支持 | 长度至少 4、无溢出、恰好消费边界；单实例且一个完整路径 | 缺失 | `truncated_node_rejected`、`extra_path_rejected` |
+| Boot#### 编号 | UEFI §3.1.1，四位大写十六进制 UINT16 | 否，仅定位 | 解析为 u16；不追随其他编号 | 原编号存在、当前值可读 | 私有2项；缺删除对照 | `missing_original_id_stops` |
+| 节点 type/subtype/length、顺序、结束节点 | UEFI §10.3 | 拟身份：有序结构 | 按节点解析；不把未知节点原样哈希后称为支持 | 长度至少 4、无溢出、恰好消费边界；单实例且一个完整路径 | 私有2项均HD+FilePath+EndEntire；缺负例 | `truncated_node_rejected`、`extra_path_rejected` |
 | 硬件/ACPI/消息节点前缀 | UEFI §10.3 | 未决 | 不删除、不重排、不把完整路径折叠成短路径；初始候选范围暂不支持此前缀 | 未批准节点组合返回 UnsupportedFormat | 缺失 | `unknown_prefix_rejected` |
-| HD 节点分区格式/签名类型 | UEFI §10.3.5.1 | 拟身份 | 初始研究候选仅 GPT=2、GUID=2；MBR、无签名均暂拒绝 | HD 节点长 42，分区号非零、签名非零 | 缺失 | `mbr_or_unsigned_rejected` |
-| GPT UniquePartitionGuid、分区号 | UEFI §3.1.2、§10.3.5.1 | 拟身份 | GUID 字段按 UEFI 字节布局解析成固定语义值，分区号 u32；不改 GUID 大小端含义 | 拒绝不一致/重复目标；GUID 不是磁盘 GUID | 缺失 | `partition_guid_change_rejected`、`partition_number_change_rejected` |
-| 分区起始 LBA、大小 | UEFI §10.3.5.1 | 未决：拟保守保留为独立字段 | 不擅自忽略移动/扩容变化；待真实更新证据决定是否身份或独立重验 | 非零大小、范围无溢出；无磁盘核对能力不得宣称已验证 GPT 内容 | 缺失 | `partition_geometry_change_requires_review` |
-| FilePath 节点 UTF-16 路径 | UEFI §10.3.5.4 | 拟身份 | 拟支持单个绝对路径节点；保留 UTF-16 码元，不做 Unicode NFC、大小写折叠、斜杠替换、`.`/`..` 消解 | 终止符在节点内、无嵌入 NUL、有效编码；相对路径/歧义形式暂拒绝 | 缺失 | `loader_path_change_rejected`、`invalid_utf16_path_rejected` |
+| HD 节点分区格式/签名类型 | UEFI §10.3.5.1 | 拟身份 | 初始研究候选仅 GPT=2、GUID=2；MBR、无签名均暂拒绝 | HD 节点长 42，分区号非零、签名非零 | 私有2项均GPT/GUID；缺MBR负例 | `mbr_or_unsigned_rejected` |
+| GPT UniquePartitionGuid、分区号 | UEFI §3.1.2、§10.3.5.1 | 拟身份 | GUID 字段按 UEFI 字节布局解析成固定语义值，分区号 u32；不改 GUID 大小端含义 | 拒绝不一致/重复目标；GUID 不是磁盘 GUID | 私有2项；标识不公开，缺变化对照 | `partition_guid_change_rejected`、`partition_number_change_rejected` |
+| 分区起始 LBA、大小 | UEFI §10.3.5.1 | 未决：拟保守保留为独立字段 | 不擅自忽略移动/扩容变化；待真实更新证据决定是否身份或独立重验 | 非零大小、范围无溢出；无磁盘核对能力不得宣称已验证 GPT 内容 | 私有2项；无移动/扩容对照 | `partition_geometry_change_requires_review` |
+| FilePath 节点 UTF-16 路径 | UEFI §10.3.5.4 | 拟身份 | 拟支持单个绝对路径节点；保留 UTF-16 码元，不做 Unicode NFC、大小写折叠、斜杠替换、`.`/`..` 消解 | 终止符在节点内、无嵌入 NUL、有效编码；相对路径/歧义形式暂拒绝 | 私有2项均单绝对路径；路径不公开，缺变化对照 | `loader_path_change_rejected`、`invalid_utf16_path_rejected` |
 | 多 FilePath 节点拼接 | UEFI §10.3.5.4 给出分隔符合并/插入规则 | 未决 | 规范允许，BootHop 尚无正反样本；当前候选范围不允许此变换 | 暂 UnsupportedFormat，不能任意拼接字符串 | 缺失 | `split_path_not_silently_normalized` |
-| Description | UEFI §3.1.3 | 否 | 仅显示；合法改名拟不改变身份；不 trim 后用名称分类 | 检查 UTF-16 NUL 结束、边界、有效编码，显示层转义控制字符 | 缺失 | `valid_description_change_preserves_identity`、`malformed_description_rejected` |
-| EFI_LOAD_OPTION.Attributes | UEFI §3.1.3，值内 u32 | 否，独立可执行性策略 | 不整体参与 identity；拟允许 ACTIVE=1、HIDDEN=0/1、CATEGORY_BOOT=0 | 每次必须 ACTIVE；APP、保留位、FORCE_RECONNECT 暂拒绝，hidden 只影响展示 | 缺失 | `inactive_target_rejected`、`hidden_change_preserves_identity`、`reserved_load_attribute_rejected` |
-| UEFI 变量 attributes | UEFI §3.3；Linux 前缀或 Win32 out 参数 | 否，独立存储策略 | 与上行严格不同；Boot####/BootOrder/BootNext 拟要求 NV\|BS\|RT=7；BootCurrent 为 BS\|RT=6 | 每次核对；未知认证/附加属性不静默接受 | 缺失 | `variable_attributes_not_load_attributes`、`unexpected_variable_attributes_rejected` |
-| FilePathListLength | UEFI §3.1.3，u16 | 否，结构长度 | 与解析消费字节数相等，非身份哈希 | 校验 description、path、OptionalData 边界 | 缺失 | `path_list_length_overflow_rejected` |
-| OptionalData 空值 | UEFI §3.1.3 | 拟身份格式标记 `Empty` | 不创建“可忽略任意数据”的规则；零长度与非零不同格式 | 空→非空必须重新解析且未支持时拒绝 | 缺失 | `empty_to_unknown_optional_rejected` |
-| OptionalData 非空：Windows BCD / Linux loader 参数 / 厂商数据 | UEFI 仅定义传入加载镜像的字节；格式由生产者定义 | 未决 | 未获得完整正式字段定义与前后样本，不做全量比较或全量忽略 | 当前一律 UnsupportedFormat，包括看似文本、常见魔数和 GUID | 缺失 | `unknown_optional_data_rejected` |
+| Description | UEFI §3.1.3 | 否 | 仅显示；合法改名拟不改变身份；不 trim 后用名称分类 | 检查 UTF-16 NUL 结束、边界、有效编码，显示层转义控制字符 | 私有2项；缺改名对照 | `valid_description_change_preserves_identity`、`malformed_description_rejected` |
+| EFI_LOAD_OPTION.Attributes | UEFI §3.1.3，值内 u32 | 否，独立可执行性策略 | 不整体参与 identity；拟允许 ACTIVE=1、HIDDEN=0/1、CATEGORY_BOOT=0 | 每次必须 ACTIVE；APP、保留位、FORCE_RECONNECT 暂拒绝，hidden 只影响展示 | 私有2项均为1；缺属性变化对照 | `inactive_target_rejected`、`hidden_change_preserves_identity`、`reserved_load_attribute_rejected` |
+| UEFI 变量 attributes | UEFI §3.3；Linux 前缀或 Win32 out 参数 | 否，独立存储策略 | 与上行严格不同；Boot####/BootOrder/BootNext 拟要求 NV\|BS\|RT=7；BootCurrent 为 BS\|RT=6 | 每次核对；未知认证/附加属性不静默接受 | 私有Boot项均为7；BootNext不存在；无Win32样本 | `variable_attributes_not_load_attributes`、`unexpected_variable_attributes_rejected` |
+| FilePathListLength | UEFI §3.1.3，u16 | 否，结构长度 | 与解析消费字节数相等，非身份哈希 | 校验 description、path、OptionalData 边界 | 私有2项；缺畸形对照 | `path_list_length_overflow_rejected` |
+| OptionalData 空值 | UEFI §3.1.3 | 拟身份格式标记 `Empty` | 不创建“可忽略任意数据”的规则；零长度与非零不同格式 | 空→非空必须重新解析且未支持时拒绝 | 用户确认的Arch私有样本为空；缺变换对照 | `empty_to_unknown_optional_rejected` |
+| OptionalData 非空：Windows BCD / Linux loader 参数 / 厂商数据 | UEFI 仅定义传入加载镜像的字节；格式由生产者定义 | 未决 | Windows私有样本136字节可观察布局已记录，但完整正式语义/稳定性未证明，不做全量比较或全量忽略 | 当前一律 UnsupportedFormat，包括看似文本、常见魔数和 GUID | Windows私有样本1项；缺官方二进制契约/更新配对 | `unknown_optional_data_rejected` |
 
 没有任何身份变换通过真实样本 gate。拟允许的 description 改名、hidden 改变也须分别提供结构合法的正例与结构破坏/目标改变的反例。不得用手工变更真实文件来冒充“正常更新前后”证据。设备前缀、几何字段、路径规范化、OptionalData 待决意味着 CanonicalIdentity 的最终序列化尚未冻结。
+
+Windows非空OptionalData的官方依据、可观察布局和拒绝/候选策略见 [windows-optionaldata.md](windows-optionaldata.md)。用户的OS确认补充了本机样本标签，不能代替生产 configure 的结构检查，也不能直接启用自动 Known 规则。
 
 ## 支持格式与正向归类证据
 
@@ -49,7 +51,9 @@
 
 ## 真实样本采集门槛
 
-未读取 `/sys/firmware/efi/efivars`，未运行 efibootmgr、bootctl、bcdedit、pkexec、sudo 或任何重启 API。以下是向 controller 提交的**待单独授权**只读命令，不是已执行记录。文件内容可能含设备 GUID、描述和参数，先私人保存，匿名化审查后才提交。
+时间线：2026-09-08初稿没有读取固件。2026-09-09用户授权后，controller 使用已审查的独立Python研究采集器，在Arch普通权限下读取允许的固件变量并仅保存本地私有副本，未使用root、未运行固件工具、未写EFI或重启。其后分析只读本地副本；OS标签由用户明确确认。当前授权不包含追加采集、Windows操作、更新或重启。
+
+下列命令保留为初稿的**历史提案**，并非本次执行方式，不构成继续执行的授权。文件内容可能含设备标识、描述和参数，必须先私人保存；公开manifest只记录计数，真实内容在逐字段匿名化审查前不得提交。
 
 Linux 可在一个系统中获取同台固件的 Windows 与 Linux Boot#### 原始项；OS 标签必须由提供者说明，不能从 description 猜测。最低请求仅列出全局 GUID 下 Boot####、BootOrder、BootCurrent、BootNext，输出包含文件名、原始 SHA-256、Base64（保留四字节前缀），不写源文件。命令的 sudo 是权限请求范围，当前未获执行授权：
 
@@ -75,7 +79,7 @@ Get-ComputerInfo -Property WindowsProductName,WindowsVersion,OsBuildNumber,OsArc
 bcdedit.exe /enum firmware /v
 ```
 
-本任务禁止写生产代码，仓库也没有已审查的 Windows 原始变量采集器，因此不虚构可运行的导出命令。Windows 原始 API 样本另需明确授权制作/审查只读采集器：仅启用 SeSystemEnvironmentPrivilege，调用 GetFirmwareEnvironmentVariableExW 读取 BootOrder∪BootCurrent∪BootNext 及关联 Boot####，导出 out attributes + 原始 payload。该步骤当前未完成，Windows API 封装验收不能由 Linux 样本替代；Linux 采集仍可提供 Windows 启动项的真实格式样本。
+本任务禁止写生产代码，仓库也没有已审查的 Windows 原始变量采集器，因此不虚构可运行的导出命令。Windows 原始 API 样本若未来继续，另需明确授权制作/审查只读采集器：仅启用 SeSystemEnvironmentPrivilege，调用 GetFirmwareEnvironmentVariableExW 读取 BootOrder∪BootCurrent∪BootNext 及关联 Boot####，导出 out attributes + 原始 payload。该步骤当前未完成、未获本轮执行授权，Windows API 封装验收不能由 Linux 样本替代；已取得的 Linux 副本仅支持 Windows 启动项格式研究。
 
 正常更新配对须来自用户本来要执行的 OS/引导器更新，或已经留存的前后档案。本任务不请求执行更新、重建条目或重启。每组记录同机/同目标证据、采集 OS、更新组件精确版本、更新事件时间、两次原始摘要。至少 Windows loader 与 Linux 实际 loader 各一组。
 

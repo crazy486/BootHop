@@ -1,9 +1,24 @@
 {
   "schema_version": 1,
-  "research_date": "2026-09-08",
+  "research_date": "2026-09-09",
   "status": "BLOCKED",
   "production_identity_contract_approved": false,
   "real_samples": [],
+  "real_samples_scope": "public_reviewed_fixtures_only",
+  "private_evidence": {
+    "capture_os": "Arch Linux",
+    "capture_count": 1,
+    "boot_entry_count": 2,
+    "user_confirmed_os_counts": {"Arch Linux": 1, "Windows 11": 1},
+    "raw_file_count": 8,
+    "raw_hashes_and_two_reads_verified": true,
+    "optional_data_lengths_bytes": [0, 136],
+    "nonempty_optional_data_semantics": "opaque",
+    "normal_update_pair_count": 0,
+    "windows_native_api_capture": false,
+    "public_fixture_count": 0,
+    "level": "private_read_observation_with_explicit_user_os_labels"
+  },
   "synthetic_samples": [],
   "update_pairs": [],
   "approved_identity_transformations": [],
@@ -21,11 +36,11 @@
     "update_event_time", "anonymization_consistency_evidence", "observed_field_changes"
   ],
   "missing_evidence": [
-    "real_windows_boot_entry", "real_linux_boot_entry",
+    "reviewed_public_redacted_real_fixtures", "windows_optional_data_official_semantics_and_stability",
     "windows_normal_update_before_after", "linux_normal_update_before_after",
     "positive_and_negative_evidence_for_each_identity_transformation",
     "windows_native_api_capture"
   ],
   "blocked_dependent_tasks": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  "notes": "Empty arrays are intentional. No host firmware variables were read. No synthetic fixture is evidence of a real update. See docs/research/identity.md for proposed read-only collection scope."
+  "notes": "Initial research had no samples. An authorized Arch read-only capture was later retained privately and labeled by the user. Empty real_samples means zero published fixtures, not zero private evidence. No private ids, paths, GUIDs, bytes or hashes are published here. Two repeated reads are not a normal update pair. Task 1 remains BLOCKED."
 }

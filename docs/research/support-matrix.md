@@ -1,10 +1,10 @@
 # 支持与验收矩阵（研究阶段）
 
-核对日期 2026-09-08。所有“支持”均为拟发布范围，真实 UEFI、双向重启与 GUI 验收尚未执行；Task 1 BLOCKED。不得将主机包版本记录当固件兼容认证。
+首次核对日期2026-09-08；私有样本/用户语义证据更新2026-09-09。所有“支持”均为拟发布范围。已完成一次经授权的Arch普通权限只读采集，取得用户确认的Arch Linux/Windows11启动项各1项；双向重启、Windows API与GUI验收尚未执行，Task1仍BLOCKED。不得将样本或主机包版本记录当固件兼容认证。
 
 | 环境 | 地位与架构 | 已知实际版本 / 缺口 | 验收范围 |
 |---|---|---|---|
-| Windows 11 | 主要实机，x86-64 / x86_64-pc-windows-msvc | 用户指定；具体版本、build、固件未知 | UAC 双账户情形、MSI 安装/卸载/ACL、应用阻止重启、中文/Unicode/高 DPI、实际进 Arch |
+| Windows 11 | 主要实机，x86-64 / x86_64-pc-windows-msvc | 用户确认其真实启动项语义；原始项由Arch读取。具体版本、build、固件未知；未在Windows运行API | UAC 双账户情形、MSI 安装/卸载/ACL、应用阻止重启、中文/Unicode/高 DPI、实际进 Arch |
 | 当前 Arch Linux KDE Plasma Wayland | 主要实机，x86-64 / x86_64-unknown-linux-gnu | 当前执行环境只读查询：kernel 7.2.3-zen1-3-zen；systemd 261.2-1；glibc 2.44+r24+g16be1518495f-1；polkit 127-3；plasma-desktop 6.7.4-1；plasma-workspace 6.7.4-3；kwin 6.7.4-7。Wayland 是用户指定，未自行读取活动会话验证 | 原生 Arch 包、图形认证代理、root inhibitor 行为、Unicode/缩放、实际进 Windows |
 | Ubuntu 24.04 LTS | 稳定参考和 UEFI VM，x86-64，Wayland/X11 | 官方 noble 包基线 systemd 255、glibc 2.39；实际 VM 的 kernel、包修订、桌面、固件版本缺失 | .deb、systemd255 inhibitor、Wayland/X11、OVMF/UEFI VM 图形、双向切换；虚拟机不替代实机 |
 
@@ -41,10 +41,12 @@ WiX7 官方文档要求显式 EULA 接受并有维护费条款，发布者需按
 
 | 层级 | 必须覆盖 | 本次状态 |
 |---|---|---|
-| 研究/夹具 | 真实 Windows/Linux 启动项；同目标正常更新配对；每个身份变换正反证据；格式字段逐项归属 | BLOCKED：全部真实夹具缺失 |
+| 研究/夹具 | 真实 Windows/Linux 启动项；同目标正常更新配对；每个身份变换正反证据；格式字段逐项归属 | 私有真实项各1个且用户已确认OS；公开fixture仍0、正常更新配对各0，Windows非空OptionalData语义未知，变换规则未批准；BLOCKED |
 | 纯测试 | parser 边界、未知 OptionalData、未知记录版本、helper 篡改参数、阶段 Unknown、超限/超时/断连、ABA 恢复拒绝 | 未开始，禁止访问宿主固件 |
 | 包与 GUI | 两端目录保护；普通用户不能改记录/helper；中文/其他 Unicode、缩放、高 DPI；Arch Wayland、Ubuntu Wayland/X11、Windows | 未开始 |
 | inhibitor/应用阻止 | systemd255 root+block/delay、261 root+block/weak/delay，Windows 未保存应用和 UAC 不同账户 | 未执行，需独立显式授权 |
 | UEFI VM 和实机 | 双向 switch；BootNext 冲突/存在/丢失；比较每次 BootOrder 前后；分别记录 API、读回、重启接受、人工 OS 观察 | 未执行，需独立显式授权；BootOrder 变化即失败 |
 
 发布前补齐 Windows 精确 build/固件、Ubuntu VM 版本、Arch 活动会话/固件元数据，记录统一 release 构建的包大小、安装占用和额外依赖。当前没有体积数据，不设未经测量的承诺。
+
+本轮可独立完成的官方依赖版本/MSRV、API选择、平台范围、glibc构建基线和打包方式研究已记录；完整依赖图编译、运行库实测清单、安装包验证和OS行为实验仍未执行，不能由官方文档推出已通过。私有样本数量、两次一致性和用户语义标签可支持格式研究，但不替代Windows本机API证据或正常更新配对；详见 [Windows OptionalData证据分层](windows-optionaldata.md)。
