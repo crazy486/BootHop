@@ -4,5 +4,8 @@ pub enum Error {
     MalformedDevicePath,
     ResourceLimit,
     UnsupportedFormat,
+    UnsupportedRecordVersion { found: u64 },
+    UnsupportedIdentityComponent,
+    CorruptRecord,
     IdentityMismatch,
 }

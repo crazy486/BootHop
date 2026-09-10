@@ -3,6 +3,7 @@ mod error;
 mod identity;
 mod load_option;
 mod model;
+mod record;
 
 pub use device_path::parse_device_path;
 pub use error::Error;
@@ -12,5 +13,6 @@ pub use model::{
     BootId, CanonicalDevicePathNode, CanonicalEndEntireNode, CanonicalFilePathNode,
     CanonicalHardDriveNode, CanonicalIdentity, Classification, DevicePath, DevicePathInstance,
     DevicePathNode, DevicePathNodeKind, FilePathNode, HardDriveNode, LoadOption, OpaqueAlgorithm,
-    OpaqueExactV1, Os, TargetRecord,
+    OpaqueExactV1, Os, RecordState, TargetRecord,
 };
+pub use record::{decode_record, encode_record, expected_target};

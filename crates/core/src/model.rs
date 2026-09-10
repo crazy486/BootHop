@@ -73,6 +73,13 @@ pub struct TargetRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum RecordState {
+    Missing,
+    Ready(TargetRecord),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalIdentity {
     pub file_path_list_length: u16,
     pub nodes: [CanonicalDevicePathNode; 3],

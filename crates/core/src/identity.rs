@@ -6,7 +6,7 @@ use crate::{
     HardDriveNode, LoadOption, OpaqueAlgorithm, OpaqueExactV1, TargetRecord,
 };
 
-const MAX_LOAD_OPTION_BYTES: usize = 1_048_576;
+pub(crate) const MAX_LOAD_OPTION_BYTES: usize = 1_048_576;
 const ACTIVE: u32 = 0x0000_0001;
 const ACTIVE_HIDDEN: u32 = 0x0000_0009;
 
@@ -36,7 +36,7 @@ pub fn canonicalize(option: &LoadOption) -> Result<CanonicalIdentity, Error> {
     let byte_length =
         u64::try_from(option.optional_data.len()).map_err(|_| Error::ResourceLimit)?;
 
-    Ok(CanonicalIdentity {
+    let identity = CanonicalIdentity {
         file_path_list_length: option.file_path_list_length,
         nodes: [
             CanonicalDevicePathNode::HardDrive(hard_drive),
@@ -48,7 +48,74 @@ pub fn canonicalize(option: &LoadOption) -> Result<CanonicalIdentity, Error> {
             byte_length,
             digest,
         },
-    })
+    };
+    validate_canonical_identity(&identity)?;
+    Ok(identity)
+}
+
+pub(crate) fn validate_canonical_identity(identity: &CanonicalIdentity) -> Result<(), Error> {
+    let [
+        CanonicalDevicePathNode::HardDrive(hard_drive),
+        CanonicalDevicePathNode::FilePath(file_path),
+        CanonicalDevicePathNode::EndEntire(end),
+    ] = &identity.nodes
+    else {
+        return Err(Error::UnsupportedFormat);
+    };
+
+    if hard_drive.node_type != 4 || hard_drive.subtype != 1 || hard_drive.length != 42 {
+        return Err(Error::UnsupportedFormat);
+    }
+    validate_hard_drive(&HardDriveNode {
+        partition_number: hard_drive.partition_number,
+        partition_start_lba: hard_drive.partition_start_lba,
+        partition_size_lba: hard_drive.partition_size_lba,
+        partition_signature_uefi_bytes: hard_drive.partition_signature_uefi_bytes,
+        mbr_type: hard_drive.mbr_type,
+        signature_type: hard_drive.signature_type,
+    })?;
+
+    let expected_file_length = file_path
+        .path_utf16
+        .len()
+        .checked_add(1)
+        .and_then(|length| length.checked_mul(2))
+        .and_then(|length| length.checked_add(4))
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(Error::UnsupportedFormat)?;
+    if file_path.node_type != 4
+        || file_path.subtype != 4
+        || file_path.length != expected_file_length
+        || file_path.terminator != 0
+        || !valid_file_path(&FilePathNode {
+            path_utf16: file_path.path_utf16.clone(),
+        })
+    {
+        return Err(Error::UnsupportedFormat);
+    }
+
+    if end.node_type != 0x7f || end.subtype != 0xff || end.length != 4 {
+        return Err(Error::UnsupportedFormat);
+    }
+    let derived_path_list_length = hard_drive
+        .length
+        .checked_add(file_path.length)
+        .and_then(|length| length.checked_add(end.length))
+        .ok_or(Error::UnsupportedFormat)?;
+    if identity.file_path_list_length != derived_path_list_length
+        || identity.optional_data.byte_length > MAX_LOAD_OPTION_BYTES as u64
+        || (identity.optional_data.byte_length == 0
+            && identity.optional_data.digest
+                != [
+                    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99,
+                    0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95,
+                    0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+                ])
+    {
+        return Err(Error::UnsupportedFormat);
+    }
+
+    Ok(())
 }
 
 pub fn classify(option: &LoadOption) -> Classification {
