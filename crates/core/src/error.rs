@@ -3,4 +3,6 @@ pub enum Error {
     MalformedLoadOption,
     MalformedDevicePath,
     ResourceLimit,
+    UnsupportedFormat,
+    IdentityMismatch,
 }

@@ -10,7 +10,7 @@
 
 `parse_device_path(&[u8]) -> Result<DevicePath, Error>`消费恰好一个以EndEntire结束的完整路径（可含EndInstance）。load-option解析器在FilePathListLength限定切片内，以有界节点长度找到每个EndEntire并逐个解析，保留多个完整路径元素，不把第二元素误当OptionalData。未知节点只保留有界原文供诊断，**可解析不代表identity支持**；Task3另行拒绝未知前缀、多实例/多元素/多FilePath。
 
-以下名称为**待实现synthetic测试**，没有声称测试已存在或通过。正反例按此契约构造，无需公开私有样本，也不冒充自然更新。
+以下名称为synthetic测试要求；实际实施与通过结果见manifest和controller ledger，不由本文重复判定，也不把后续identity测试提前标为完成。正反例按此契约构造，无需公开私有样本，也不冒充自然更新。
 
 | 检查 | 精确结果/边界 | 正例测试 | 反例测试 |
 |---|---|---|---|
