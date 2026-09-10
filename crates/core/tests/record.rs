@@ -220,6 +220,50 @@ fn future_algorithm_marker_precedes_changed_opaque_shape() {
 }
 
 #[test]
+fn future_identity_kind_precedes_wrong_typed_sibling_version() {
+    let json = valid_json()
+        .replacen("CanonicalIdentity", "FutureIdentity", 1)
+        .replacen(
+            r#""version":1,"file_path_list_length"#,
+            r#""version":{"future":2},"file_path_list_length"#,
+            1,
+        );
+
+    assert_eq!(
+        decode_record(json.as_bytes()),
+        Err(Error::UnsupportedIdentityComponent)
+    );
+}
+
+#[test]
+fn future_opaque_discriminator_precedes_later_marker_and_body_types() {
+    let future_kind = valid_json()
+        .replacen("OpaqueExact", "FutureOpaque", 1)
+        .replacen(
+            r#""version":1,"algorithm":"Sha256""#,
+            r#""version":"v2","algorithm":7"#,
+            1,
+        );
+    let future_version = valid_json().replacen(
+        r#""kind":"OpaqueExact","version":1,"algorithm":"Sha256""#,
+        r#""kind":"OpaqueExact","version":2,"algorithm":7"#,
+        1,
+    );
+    let future_algorithm = valid_json().replacen("Sha256", "FutureHash", 1).replacen(
+        r#""byte_length":32"#,
+        r#""byte_length":{"future":32}"#,
+        1,
+    );
+
+    for json in [future_kind, future_version, future_algorithm] {
+        assert_eq!(
+            decode_record(json.as_bytes()),
+            Err(Error::UnsupportedIdentityComponent)
+        );
+    }
+}
+
+#[test]
 fn known_or_invalid_marker_fields_remain_corrupt() {
     for json in [
         valid_json().replacen(
@@ -244,7 +288,27 @@ fn known_or_invalid_marker_fields_remain_corrupt() {
         ),
         valid_json().replacen(r#""kind":"CanonicalIdentity""#, r#""kind":7"#, 1),
         valid_json().replacen(r#""kind":"HardDrive""#, r#""kind":7"#, 1),
+        valid_json().replacen(
+            r#""version":1,"file_path_list_length"#,
+            r#""version":"v1","file_path_list_length"#,
+            1,
+        ),
+        valid_json().replacen(
+            r#""kind":"OpaqueExact","version":1"#,
+            r#""kind":"OpaqueExact","version":"v1""#,
+            1,
+        ),
         valid_json().replacen(r#""algorithm":"Sha256""#, r#""algorithm":7"#, 1),
+        valid_json().replacen(
+            r#""kind":"CanonicalIdentity""#,
+            r#""kind":"FutureIdentity","kind":"FutureIdentity""#,
+            1,
+        ),
+        valid_json().replacen(
+            r#""kind":"OpaqueExact""#,
+            r#""kind":"FutureOpaque","algorithm":"FutureHash","algorithm":"FutureHash""#,
+            1,
+        ),
     ] {
         assert_eq!(decode_record(json.as_bytes()), Err(Error::CorruptRecord));
     }

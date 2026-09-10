@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::{
     BootId, CanonicalDevicePathNode, CanonicalEndEntireNode, CanonicalFilePathNode,
@@ -17,61 +18,47 @@ struct VersionEnvelope {
 }
 
 #[derive(Deserialize)]
-struct IdentityMarkerEnvelope {
-    target: Option<IdentityMarkerTarget>,
+struct RawTargetEnvelope<'a> {
+    #[serde(borrow)]
+    target: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
-struct IdentityMarkerTarget {
-    identity: Option<IdentityMarkers>,
+struct RawIdentityEnvelope<'a> {
+    #[serde(borrow)]
+    identity: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
-struct IdentityMarkers {
-    kind: Option<String>,
-    version: Option<u64>,
+struct RawIdentityMarkers<'a> {
+    #[serde(borrow)]
+    kind: Option<&'a RawValue>,
+    #[serde(borrow)]
+    version: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
-struct NodeMarkerEnvelope {
-    target: Option<NodeMarkerTarget>,
+struct RawIdentityBody<'a> {
+    #[serde(borrow)]
+    nodes: Option<&'a RawValue>,
+    #[serde(borrow)]
+    optional_data: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
-struct NodeMarkerTarget {
-    identity: Option<NodeMarkerIdentity>,
+struct RawNodeMarker<'a> {
+    #[serde(borrow)]
+    kind: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
-struct NodeMarkerIdentity {
-    nodes: Option<Vec<NodeMarker>>,
-}
-
-#[derive(Deserialize)]
-struct NodeMarker {
-    kind: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OpaqueMarkerEnvelope {
-    target: Option<OpaqueMarkerTarget>,
-}
-
-#[derive(Deserialize)]
-struct OpaqueMarkerTarget {
-    identity: Option<OpaqueMarkerIdentity>,
-}
-
-#[derive(Deserialize)]
-struct OpaqueMarkerIdentity {
-    optional_data: Option<OpaqueMarkers>,
-}
-
-#[derive(Deserialize)]
-struct OpaqueMarkers {
-    kind: Option<String>,
-    version: Option<u64>,
-    algorithm: Option<String>,
+struct RawOpaqueMarkers<'a> {
+    #[serde(borrow)]
+    kind: Option<&'a RawValue>,
+    #[serde(borrow)]
+    version: Option<&'a RawValue>,
+    #[serde(borrow)]
+    algorithm: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -168,65 +155,61 @@ pub fn decode_record(bytes: &[u8]) -> Result<TargetRecord, Error> {
 }
 
 fn preflight_identity_components(bytes: &[u8]) -> Result<(), Error> {
-    let identity_envelope: IdentityMarkerEnvelope =
+    let target_envelope: RawTargetEnvelope<'_> =
         serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
-    if identity_envelope
-        .target
-        .and_then(|target| target.identity)
-        .is_some_and(|identity| {
-            identity
-                .kind
-                .as_deref()
-                .is_some_and(|kind| kind != "CanonicalIdentity")
-                || identity
-                    .version
-                    .is_some_and(|version| version != IDENTITY_VERSION)
-        })
-    {
+    let target = target_envelope.target.ok_or(Error::CorruptRecord)?;
+    let identity_envelope: RawIdentityEnvelope<'_> =
+        serde_json::from_str(target.get()).map_err(|_| Error::CorruptRecord)?;
+    let identity = identity_envelope.identity.ok_or(Error::CorruptRecord)?;
+    let markers: RawIdentityMarkers<'_> =
+        serde_json::from_str(identity.get()).map_err(|_| Error::CorruptRecord)?;
+
+    let kind: String = decode_marker(markers.kind)?;
+    if kind != "CanonicalIdentity" {
+        return Err(Error::UnsupportedIdentityComponent);
+    }
+    let version: u64 = decode_marker(markers.version)?;
+    if version != IDENTITY_VERSION {
         return Err(Error::UnsupportedIdentityComponent);
     }
 
-    let node_envelope: NodeMarkerEnvelope =
-        serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
-    if node_envelope
-        .target
-        .and_then(|target| target.identity)
-        .and_then(|identity| identity.nodes)
-        .is_some_and(|nodes| {
-            nodes.into_iter().any(|node| {
-                node.kind
-                    .as_deref()
-                    .is_some_and(|kind| !matches!(kind, "HardDrive" | "FilePath" | "EndEntire"))
-            })
-        })
-    {
-        return Err(Error::UnsupportedIdentityComponent);
+    let body: RawIdentityBody<'_> =
+        serde_json::from_str(identity.get()).map_err(|_| Error::CorruptRecord)?;
+    let nodes: Vec<&RawValue> = serde_json::from_str(body.nodes.ok_or(Error::CorruptRecord)?.get())
+        .map_err(|_| Error::CorruptRecord)?;
+    for node in nodes {
+        let marker: RawNodeMarker<'_> =
+            serde_json::from_str(node.get()).map_err(|_| Error::CorruptRecord)?;
+        let kind: String = decode_marker(marker.kind)?;
+        if !matches!(kind.as_str(), "HardDrive" | "FilePath" | "EndEntire") {
+            return Err(Error::UnsupportedIdentityComponent);
+        }
     }
 
-    let opaque_envelope: OpaqueMarkerEnvelope =
-        serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
-    if opaque_envelope
-        .target
-        .and_then(|target| target.identity)
-        .and_then(|identity| identity.optional_data)
-        .is_some_and(|opaque| {
-            opaque
-                .kind
-                .as_deref()
-                .is_some_and(|kind| kind != "OpaqueExact")
-                || opaque
-                    .version
-                    .is_some_and(|version| version != OPAQUE_VERSION)
-                || opaque
-                    .algorithm
-                    .as_deref()
-                    .is_some_and(|algorithm| algorithm != "Sha256")
-        })
-    {
+    let optional_data = body.optional_data.ok_or(Error::CorruptRecord)?;
+    let opaque: RawOpaqueMarkers<'_> =
+        serde_json::from_str(optional_data.get()).map_err(|_| Error::CorruptRecord)?;
+    let kind: String = decode_marker(opaque.kind)?;
+    if kind != "OpaqueExact" {
+        return Err(Error::UnsupportedIdentityComponent);
+    }
+    let version: u64 = decode_marker(opaque.version)?;
+    if version != OPAQUE_VERSION {
+        return Err(Error::UnsupportedIdentityComponent);
+    }
+    let algorithm: String = decode_marker(opaque.algorithm)?;
+    if algorithm != "Sha256" {
         return Err(Error::UnsupportedIdentityComponent);
     }
 
     Ok(())
+}
+
+fn decode_marker<T>(raw: Option<&RawValue>) -> Result<T, Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_str(raw.ok_or(Error::CorruptRecord)?.get()).map_err(|_| Error::CorruptRecord)
 }
 
 pub fn encode_record(record: &TargetRecord) -> Result<Vec<u8>, Error> {
