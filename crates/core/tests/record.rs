@@ -140,6 +140,117 @@ fn unknown_identity_components_fail_closed_as_unsupported() {
 }
 
 #[test]
+fn future_identity_marker_precedes_changed_identity_shape() {
+    let future_kind = valid_json()
+        .replacen("CanonicalIdentity", "FutureIdentity", 1)
+        .replacen(
+            r#""file_path_list_length":94"#,
+            r#""future_identity_payload":true"#,
+            1,
+        );
+    let future_version = valid_json()
+        .replacen(
+            r#""kind":"CanonicalIdentity","version":1"#,
+            r#""kind":"CanonicalIdentity","version":2"#,
+            1,
+        )
+        .replacen(
+            r#""file_path_list_length":94"#,
+            r#""future_identity_payload":true"#,
+            1,
+        );
+
+    for json in [future_kind, future_version] {
+        assert_eq!(
+            decode_record(json.as_bytes()),
+            Err(Error::UnsupportedIdentityComponent)
+        );
+    }
+}
+
+#[test]
+fn future_node_marker_precedes_changed_node_shape() {
+    let json = valid_json()
+        .replacen("HardDrive", "FutureNode", 1)
+        .replacen(
+            r#""partition_number":4294967295"#,
+            r#""future_node_payload":true"#,
+            1,
+        );
+
+    assert_eq!(
+        decode_record(json.as_bytes()),
+        Err(Error::UnsupportedIdentityComponent)
+    );
+}
+
+#[test]
+fn future_opaque_marker_precedes_changed_opaque_shape() {
+    let future_kind = valid_json()
+        .replacen("OpaqueExact", "FutureOpaque", 1)
+        .replacen(r#""byte_length":32"#, r#""future_opaque_payload":true"#, 1);
+    let future_version = valid_json()
+        .replacen(
+            r#""kind":"OpaqueExact","version":1"#,
+            r#""kind":"OpaqueExact","version":2"#,
+            1,
+        )
+        .replacen(r#""byte_length":32"#, r#""future_opaque_payload":true"#, 1);
+
+    for json in [future_kind, future_version] {
+        assert_eq!(
+            decode_record(json.as_bytes()),
+            Err(Error::UnsupportedIdentityComponent)
+        );
+    }
+}
+
+#[test]
+fn future_algorithm_marker_precedes_changed_opaque_shape() {
+    let json = valid_json().replacen("Sha256", "FutureHash", 1).replacen(
+        r#""byte_length":32"#,
+        r#""future_algorithm_payload":true"#,
+        1,
+    );
+
+    assert_eq!(
+        decode_record(json.as_bytes()),
+        Err(Error::UnsupportedIdentityComponent)
+    );
+}
+
+#[test]
+fn known_or_invalid_marker_fields_remain_corrupt() {
+    for json in [
+        valid_json().replacen(
+            r#""kind":"CanonicalIdentity""#,
+            r#""kind":"CanonicalIdentity","kind":"CanonicalIdentity""#,
+            1,
+        ),
+        valid_json().replacen(
+            r#""kind":"HardDrive""#,
+            r#""kind":"HardDrive","kind":"HardDrive""#,
+            1,
+        ),
+        valid_json().replacen(
+            r#""kind":"OpaqueExact""#,
+            r#""kind":"OpaqueExact","kind":"OpaqueExact""#,
+            1,
+        ),
+        valid_json().replacen(
+            r#""kind":"CanonicalIdentity""#,
+            r#""kind":"CanonicalIdentity","future_identity_field":true"#,
+            1,
+        ),
+        valid_json().replacen(r#""kind":"CanonicalIdentity""#, r#""kind":7"#, 1),
+        valid_json().replacen(r#""kind":"HardDrive""#, r#""kind":7"#, 1),
+        valid_json().replacen(r#""algorithm":"Sha256""#, r#""algorithm":7"#, 1),
+    ] {
+        assert_eq!(decode_record(json.as_bytes()), Err(Error::CorruptRecord));
+    }
+}
+
+#[test]
 fn record_input_over_one_mib_is_rejected_without_truncation() {
     let oversized = format!(
         r#"{{"version":1,"target":{{"padding":"{}"}}}}"#,

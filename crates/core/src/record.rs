@@ -16,6 +16,64 @@ struct VersionEnvelope {
     version: u64,
 }
 
+#[derive(Deserialize)]
+struct IdentityMarkerEnvelope {
+    target: Option<IdentityMarkerTarget>,
+}
+
+#[derive(Deserialize)]
+struct IdentityMarkerTarget {
+    identity: Option<IdentityMarkers>,
+}
+
+#[derive(Deserialize)]
+struct IdentityMarkers {
+    kind: Option<String>,
+    version: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct NodeMarkerEnvelope {
+    target: Option<NodeMarkerTarget>,
+}
+
+#[derive(Deserialize)]
+struct NodeMarkerTarget {
+    identity: Option<NodeMarkerIdentity>,
+}
+
+#[derive(Deserialize)]
+struct NodeMarkerIdentity {
+    nodes: Option<Vec<NodeMarker>>,
+}
+
+#[derive(Deserialize)]
+struct NodeMarker {
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpaqueMarkerEnvelope {
+    target: Option<OpaqueMarkerTarget>,
+}
+
+#[derive(Deserialize)]
+struct OpaqueMarkerTarget {
+    identity: Option<OpaqueMarkerIdentity>,
+}
+
+#[derive(Deserialize)]
+struct OpaqueMarkerIdentity {
+    optional_data: Option<OpaqueMarkers>,
+}
+
+#[derive(Deserialize)]
+struct OpaqueMarkers {
+    kind: Option<String>,
+    version: Option<u64>,
+    algorithm: Option<String>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct WireRecord {
@@ -103,8 +161,72 @@ pub fn decode_record(bytes: &[u8]) -> Result<TargetRecord, Error> {
         });
     }
 
+    preflight_identity_components(bytes)?;
+
     let wire: WireRecord = serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
     wire.try_into()
+}
+
+fn preflight_identity_components(bytes: &[u8]) -> Result<(), Error> {
+    let identity_envelope: IdentityMarkerEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
+    if identity_envelope
+        .target
+        .and_then(|target| target.identity)
+        .is_some_and(|identity| {
+            identity
+                .kind
+                .as_deref()
+                .is_some_and(|kind| kind != "CanonicalIdentity")
+                || identity
+                    .version
+                    .is_some_and(|version| version != IDENTITY_VERSION)
+        })
+    {
+        return Err(Error::UnsupportedIdentityComponent);
+    }
+
+    let node_envelope: NodeMarkerEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
+    if node_envelope
+        .target
+        .and_then(|target| target.identity)
+        .and_then(|identity| identity.nodes)
+        .is_some_and(|nodes| {
+            nodes.into_iter().any(|node| {
+                node.kind
+                    .as_deref()
+                    .is_some_and(|kind| !matches!(kind, "HardDrive" | "FilePath" | "EndEntire"))
+            })
+        })
+    {
+        return Err(Error::UnsupportedIdentityComponent);
+    }
+
+    let opaque_envelope: OpaqueMarkerEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| Error::CorruptRecord)?;
+    if opaque_envelope
+        .target
+        .and_then(|target| target.identity)
+        .and_then(|identity| identity.optional_data)
+        .is_some_and(|opaque| {
+            opaque
+                .kind
+                .as_deref()
+                .is_some_and(|kind| kind != "OpaqueExact")
+                || opaque
+                    .version
+                    .is_some_and(|version| version != OPAQUE_VERSION)
+                || opaque
+                    .algorithm
+                    .as_deref()
+                    .is_some_and(|algorithm| algorithm != "Sha256")
+        })
+    {
+        return Err(Error::UnsupportedIdentityComponent);
+    }
+
+    Ok(())
 }
 
 pub fn encode_record(record: &TargetRecord) -> Result<Vec<u8>, Error> {
