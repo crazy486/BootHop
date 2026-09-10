@@ -7,6 +7,54 @@ pub enum Os {
     Linux,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Request {
+    Inspect,
+    Configure { boot_id: BootId, os: Os },
+    Switch { os: Os },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RebootOutcome {
+    /// The reboot request was accepted, not evidence that the target OS started.
+    Accepted,
+    Rejected,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage {
+    TargetValidated,
+    BootNextVerified,
+    RebootAccepted,
+    RebootRejected,
+    RebootUnknown,
+    ResidualPossible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordDiagnostic {
+    Missing,
+    Ready { boot_id: BootId, os: Os },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Candidate {
+    pub boot_id: BootId,
+    /// Display only; the presentation layer must escape control characters.
+    pub description_utf16: Vec<u16>,
+    pub classification: Classification,
+    pub ambiguous: bool,
+}
+
+/// Presentation data deliberately excludes canonical identity and opaque data/digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Report {
+    pub candidates: Vec<Candidate>,
+    pub record: RecordDiagnostic,
+    pub stages: Vec<Stage>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadOption {
     pub attributes: u32,

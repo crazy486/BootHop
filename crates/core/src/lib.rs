@@ -1,18 +1,21 @@
 mod device_path;
 mod error;
+mod flow;
 mod identity;
 mod load_option;
 mod model;
 mod record;
 
 pub use device_path::parse_device_path;
-pub use error::Error;
+pub use error::{Error, ResidualAssessment};
+pub use flow::{Platform, execute};
 pub use identity::{canonicalize, classify, validate_target};
 pub use load_option::parse_load_option;
 pub use model::{
-    BootId, CanonicalDevicePathNode, CanonicalEndEntireNode, CanonicalFilePathNode,
+    BootId, Candidate, CanonicalDevicePathNode, CanonicalEndEntireNode, CanonicalFilePathNode,
     CanonicalHardDriveNode, CanonicalIdentity, Classification, DevicePath, DevicePathInstance,
     DevicePathNode, DevicePathNodeKind, FilePathNode, HardDriveNode, LoadOption, OpaqueAlgorithm,
-    OpaqueExactV1, Os, RecordState, TargetRecord,
+    OpaqueExactV1, Os, RebootOutcome, RecordDiagnostic, RecordState, Report, Request, Stage,
+    TargetRecord,
 };
 pub use record::{decode_record, encode_record, expected_target};
