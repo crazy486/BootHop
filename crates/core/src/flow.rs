@@ -1,5 +1,5 @@
 use crate::{
-    BootId, Candidate, Classification, Error, LoadOption, Os, RebootOutcome, RecordDiagnostic,
+    BootId, Candidate, Classification, Error, OptionInventory, Os, RebootOutcome, RecordDiagnostic,
     RecordState, Report, Request, ResidualAssessment, Stage, TargetRecord, canonicalize,
     expected_target,
 };
@@ -12,7 +12,7 @@ pub trait Platform {
     /// Return complete parsed buffers after checking variable attributes and enumeration completeness.
     /// Core additionally validates load-option attributes, structure, and identity.
     /// Duplicate boot IDs are rejected; equal identities under distinct IDs remain selectable.
-    fn read_options(&mut self) -> Result<Vec<(BootId, LoadOption)>, Error>;
+    fn read_options(&mut self) -> Result<OptionInventory, Error>;
     /// Validate control-variable attributes and shape; only a confirmed absent value is None.
     fn read_next(&mut self) -> Result<Option<BootId>, Error>;
     /// A failed write may still have changed firmware. Never replay or clear it automatically.
@@ -34,7 +34,10 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
         return Err(Error::UnexpectedOs);
     }
     platform.check_environment()?;
-    let options = platform.read_options()?;
+    let OptionInventory {
+        entries: options,
+        diagnostics,
+    } = platform.read_options()?;
     let mut seen = std::collections::HashSet::new();
     if options.iter().any(|(id, _)| !seen.insert(*id)) {
         return Err(Error::UnsupportedFormat);
@@ -74,6 +77,7 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
         candidates,
         record: diagnostic,
         stages: Vec::new(),
+        diagnostics,
     };
     match request {
         Request::Inspect => Ok(report),
@@ -90,7 +94,7 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
             report.stages.push(Stage::TargetValidated);
             platform
                 .save_record(&target)
-                .map_err(|error| failure(error, &report.stages, true))?;
+                .map_err(|error| failure(error, &report, true))?;
             report.record = RecordDiagnostic::Ready { boot_id, os };
             Ok(report)
         }
@@ -111,32 +115,32 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
             report.stages.push(Stage::TargetValidated);
             let initial = platform
                 .read_next()
-                .map_err(|error| failure(error, &report.stages, false))?;
+                .map_err(|error| failure(error, &report, false))?;
             if initial.is_some_and(|id| id != target.boot_id) {
-                return Err(failure(Error::BootNextConflict, &report.stages, false));
+                return Err(failure(Error::BootNextConflict, &report, false));
             }
             if initial.is_none() {
                 // Recheck immediately before attempting a write. This is not an external CAS:
                 // the adapter must also reject an object that appears during write preparation.
                 match platform
                     .read_next()
-                    .map_err(|error| failure(error, &report.stages, false))?
+                    .map_err(|error| failure(error, &report, false))?
                 {
                     Some(id) if id != target.boot_id => {
-                        return Err(failure(Error::BootNextConflict, &report.stages, false));
+                        return Err(failure(Error::BootNextConflict, &report, false));
                     }
                     Some(_) => {}
                     None => platform
                         .write_next(target.boot_id)
-                        .map_err(|error| failure(error, &report.stages, true))?,
+                        .map_err(|error| failure(error, &report, true))?,
                 }
             }
             if platform
                 .read_next()
-                .map_err(|error| failure(error, &report.stages, true))?
+                .map_err(|error| failure(error, &report, true))?
                 != Some(target.boot_id)
             {
-                return Err(failure(Error::ReadbackFailed, &report.stages, true));
+                return Err(failure(Error::ReadbackFailed, &report, true));
             }
             report.stages.push(Stage::BootNextVerified);
             match platform.reboot() {
@@ -163,6 +167,7 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
                         cause: Box::new(Error::RebootRejected),
                         stages: report.stages,
                         residual_assessment: assessment,
+                        diagnostics: report.diagnostics,
                     });
                 }
             }
@@ -171,8 +176,8 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
     }
 }
 
-fn failure(cause: Error, completed: &[Stage], residual_possible: bool) -> Error {
-    let mut stages = completed.to_vec();
+fn failure(cause: Error, report: &Report, residual_possible: bool) -> Error {
+    let mut stages = report.stages.clone();
     if residual_possible {
         stages.push(Stage::ResidualPossible);
     }
@@ -180,5 +185,6 @@ fn failure(cause: Error, completed: &[Stage], residual_possible: bool) -> Error 
         cause: Box::new(cause),
         stages,
         residual_assessment: ResidualAssessment::NotChecked,
+        diagnostics: report.diagnostics.clone(),
     }
 }

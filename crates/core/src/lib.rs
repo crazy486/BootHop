@@ -14,8 +14,8 @@ pub use load_option::parse_load_option;
 pub use model::{
     BootId, Candidate, CanonicalDevicePathNode, CanonicalEndEntireNode, CanonicalFilePathNode,
     CanonicalHardDriveNode, CanonicalIdentity, Classification, DevicePath, DevicePathInstance,
-    DevicePathNode, DevicePathNodeKind, FilePathNode, HardDriveNode, LoadOption, OpaqueAlgorithm,
-    OpaqueExactV1, Os, RebootOutcome, RecordDiagnostic, RecordState, Report, Request, Stage,
-    TargetRecord,
+    DevicePathNode, DevicePathNodeKind, EnumerationDiagnostic, FilePathNode, HardDriveNode,
+    LoadOption, OpaqueAlgorithm, OpaqueExactV1, OptionInventory, Os, RebootOutcome,
+    RecordDiagnostic, RecordState, Report, Request, Stage, TargetRecord,
 };
 pub use record::{decode_record, encode_record, expected_target};

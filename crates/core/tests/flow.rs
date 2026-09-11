@@ -198,6 +198,7 @@ fn assert_failure(error: Error, cause: Error, stages: &[Stage], assessment: Resi
         cause: actual,
         stages: actual_stages,
         residual_assessment,
+        ..
     } = error
     else {
         panic!("failure must retain completed stages: {error:?}")
@@ -848,4 +849,31 @@ fn duplicate_boot_ids_are_rejected_without_choosing_first() {
             );
         }
     }
+}
+// Catches silently dropping platform discovery diagnostics at the core boundary.
+#[test]
+fn inventory_diagnostics_survive_reports_and_structured_failures() {
+    use boothop_core::EnumerationDiagnostic::DuplicateBootOrder;
+    for request in [
+        Request::Inspect,
+        Request::Configure {
+            boot_id: BootId(7),
+            os: Os::Windows,
+        },
+        Request::Switch { os: Os::Windows },
+    ] {
+        let mut p = support::FakePlatform::ready();
+        p.diagnostics = vec![DuplicateBootOrder(BootId(7))];
+        let report = execute(request, Os::Linux, &mut p).unwrap();
+        assert_eq!(report.diagnostics, [DuplicateBootOrder(BootId(7))]);
+    }
+    let mut p = support::FakePlatform::ready();
+    p.diagnostics = vec![DuplicateBootOrder(BootId(7))];
+    p.next = Some(BootId(8));
+    let Error::FlowFailure { diagnostics, .. } =
+        execute(Request::Switch { os: Os::Windows }, Os::Linux, &mut p).unwrap_err()
+    else {
+        panic!("expected structured failure")
+    };
+    assert_eq!(diagnostics, [DuplicateBootOrder(BootId(7))]);
 }

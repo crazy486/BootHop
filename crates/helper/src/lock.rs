@@ -48,10 +48,13 @@ mod tests {
             assert!(self.fs.held());
             self.store.save(t)
         }
-        fn read_options(&mut self) -> Result<Vec<(BootId, LoadOption)>, Error> {
+        fn read_options(&mut self) -> Result<boothop_core::OptionInventory, Error> {
             assert!(self.fs.held());
             self.events.push("options");
-            Ok(vec![(BootId(7), option())])
+            Ok(boothop_core::OptionInventory {
+                entries: vec![(BootId(7), option())],
+                diagnostics: vec![],
+            })
         }
         fn check_environment(&mut self) -> Result<(), Error> {
             assert!(self.fs.held());

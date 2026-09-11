@@ -32,6 +32,7 @@ pub enum Error {
         cause: Box<Error>,
         stages: Vec<Stage>,
         residual_assessment: ResidualAssessment,
+        diagnostics: Vec<crate::EnumerationDiagnostic>,
     },
 }
 

@@ -53,6 +53,18 @@ pub struct Report {
     pub candidates: Vec<Candidate>,
     pub record: RecordDiagnostic,
     pub stages: Vec<Stage>,
+    pub diagnostics: Vec<EnumerationDiagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptionInventory {
+    pub entries: Vec<(BootId, LoadOption)>,
+    pub diagnostics: Vec<EnumerationDiagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnumerationDiagnostic {
+    DuplicateBootOrder(BootId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

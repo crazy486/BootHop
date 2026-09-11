@@ -42,6 +42,7 @@ pub struct FakePlatform {
     pub failure: Option<(usize, Error)>,
     pub next_reads: std::collections::VecDeque<Result<Option<BootId>, Error>>,
     pub write_error_mutates: bool,
+    pub diagnostics: Vec<boothop_core::EnumerationDiagnostic>,
 }
 
 impl FakePlatform {
@@ -55,6 +56,7 @@ impl FakePlatform {
             failure: None,
             next_reads: Default::default(),
             write_error_mutates: false,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -100,9 +102,12 @@ impl Platform for FakePlatform {
         self.record = Ok(RecordState::Ready(target.clone()));
         Ok(())
     }
-    fn read_options(&mut self) -> Result<Vec<(BootId, LoadOption)>, Error> {
+    fn read_options(&mut self) -> Result<boothop_core::OptionInventory, Error> {
         self.call(Event::ReadOptions)?;
-        Ok(self.options.clone())
+        Ok(boothop_core::OptionInventory {
+            entries: self.options.clone(),
+            diagnostics: self.diagnostics.clone(),
+        })
     }
     fn read_next(&mut self) -> Result<Option<BootId>, Error> {
         self.call(Event::ReadNext)?;
