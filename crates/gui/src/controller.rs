@@ -119,29 +119,40 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         self.cache_warning.as_ref()
     }
     fn inspect_only(&self) -> bool {
+        if self.state == UiState::TargetChanged {
+            return !self.inspected;
+        }
         matches!(
             self.state,
             UiState::UnsupportedRecord
                 | UiState::StoreDurabilityUnknown { .. }
                 | UiState::UnknownResult
                 | UiState::RebootRequested
-                | UiState::TargetChanged
         )
     }
     pub fn can_inspect(&self) -> bool {
         self.state != UiState::Busy
     }
     pub fn can_switch(&self) -> bool {
-        self.can_inspect() && !self.inspect_only()
+        self.can_inspect() && !self.inspect_only() && self.state != UiState::TargetChanged
     }
     pub fn configuration_visible(&self) -> bool {
         !self.inspect_only() && self.recovery_state.is_none()
     }
     pub fn can_configure(&self) -> bool {
-        self.can_switch() && self.selected.is_some() && self.confirmed
+        self.can_select() && self.selected.is_some() && self.confirmed
+    }
+    pub fn can_select(&self) -> bool {
+        self.can_inspect()
+            && self.configuration_visible()
+            && self.inspected
+            && self
+                .candidates
+                .iter()
+                .any(|candidate| candidate.classification != Classification::Unsupported)
     }
     pub fn select(&mut self, boot_id: BootId) -> bool {
-        if !self.can_switch() {
+        if !self.can_select() {
             return false;
         }
         self.confirmed = false;
@@ -153,7 +164,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         self.selected.is_some()
     }
     pub fn confirm_windows(&mut self, confirmed: bool) {
-        if self.can_switch() {
+        if self.can_select() {
             self.confirmed = confirmed && self.selected.is_some();
         }
     }
@@ -190,7 +201,8 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
         let request = match intent {
             UiIntent::Inspect => Request::Inspect,
-            UiIntent::Switch => Request::Switch { os: Os::Windows },
+            UiIntent::Switch if self.can_switch() => Request::Switch { os: Os::Windows },
+            UiIntent::Switch => return,
             UiIntent::Configure(_, os) if os != Os::Windows => {
                 self.fail(ClientError::Domain(Error::UnexpectedOs));
                 return;
@@ -202,8 +214,10 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             }
             UiIntent::Configure(_, _) => return,
         };
-        // Only a successful explicit inspection clears an unresolved protected-record state.
-        if intent == UiIntent::Inspect && self.inspect_only() {
+        // Keep unresolved evidence across failed inspection or attempted reconfiguration.
+        if (intent == UiIntent::Inspect && self.inspect_only())
+            || self.state == UiState::TargetChanged
+        {
             self.recovery_state = Some(self.state.clone());
         }
         self.state = UiState::Busy;
@@ -244,56 +258,53 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
     }
     fn success(&mut self, request: Request, report: Report) {
-        if request == Request::Inspect && !report.stages.is_empty() {
+        // Validate the entire request/report relationship before trusting any returned display data.
+        let Some(outcome) = validate_report(request, &report) else {
             self.fail(ClientError::UnknownAfterSend(TransportError::Protocol));
             return;
-        }
-        if matches!(request, Request::Switch { .. }) {
-            // Associate returned stages with the helper's public record, never a stale cached ID.
-            self.target = display_target(&report);
-        }
+        };
+        self.target = display_target(&report);
         self.diagnostic = stages_text(&report.stages);
-        if report.stages.contains(&Stage::RebootUnknown) {
-            self.state = UiState::UnknownResult;
-            self.candidates.clear();
-            return;
-        }
-        if report.stages.contains(&Stage::RebootRejected) {
-            self.state = UiState::Failed;
-            self.candidates.clear();
-            return;
-        }
-        match request {
-            Request::Inspect => {
+        match outcome {
+            ValidatedReport::Inspected | ValidatedReport::InspectedChanged => {
+                // Inspect exposes no identity evidence that can clear an earlier mismatch.
+                let previously_changed = self.recovery_state == Some(UiState::TargetChanged);
                 self.recovery_state = None;
                 self.inspected = true;
-                self.state = match report.record {
-                    RecordDiagnostic::Missing => UiState::Unconfigured,
-                    RecordDiagnostic::Ready { .. } => UiState::Configured,
-                };
-                self.target = display_target(&report);
+                self.state =
+                    if previously_changed || matches!(outcome, ValidatedReport::InspectedChanged) {
+                        UiState::TargetChanged
+                    } else {
+                        match report.record {
+                            RecordDiagnostic::Missing => UiState::Unconfigured,
+                            RecordDiagnostic::Ready { .. } => UiState::Configured,
+                        }
+                    };
                 self.candidates = report.candidates;
             }
-            Request::Configure { boot_id, os }
-                if report.record == (RecordDiagnostic::Ready { boot_id, os })
-                    && report.stages == [Stage::TargetValidated] =>
-            {
+            ValidatedReport::Configured => {
+                self.recovery_state = None;
                 self.inspected = false;
                 self.state = UiState::Configured;
-                self.target = display_target(&report);
                 if let Some(target) = &self.target {
                     self.cache_warning = self.cache.save(target).err();
                 }
                 self.candidates.clear();
             }
-            Request::Switch { .. } if report.stages.contains(&Stage::RebootAccepted) => {
+            ValidatedReport::RebootAccepted => {
                 self.state = UiState::RebootRequested;
                 self.candidates.clear();
             }
-            _ => self.fail(ClientError::UnknownAfterSend(TransportError::Protocol)),
+            ValidatedReport::RebootUnknown => {
+                self.state = UiState::UnknownResult;
+                self.candidates.clear();
+            }
         }
     }
     fn fail(&mut self, error: ClientError) {
+        if self.state == UiState::TargetChanged {
+            self.recovery_state = Some(UiState::TargetChanged);
+        }
         self.candidates.clear();
         self.selected = None;
         self.confirmed = false;
@@ -338,6 +349,70 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
     }
 }
+enum ValidatedReport {
+    Inspected,
+    InspectedChanged,
+    Configured,
+    RebootAccepted,
+    RebootUnknown,
+}
+
+/// Public report semantics guaranteed by core::execute on a Linux host.
+/// Inspect deliberately does not validate the saved identity against current options.
+fn validate_report(request: Request, report: &Report) -> Option<ValidatedReport> {
+    let target = match report.record {
+        RecordDiagnostic::Missing => None,
+        RecordDiagnostic::Ready {
+            boot_id,
+            os: Os::Windows,
+        } => Some(boot_id),
+        RecordDiagnostic::Ready { os: Os::Linux, .. } => return None,
+    };
+    let supported_target = target.is_some_and(|id| {
+        let mut matches = report
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.boot_id == id);
+        matches
+            .next()
+            .is_some_and(|candidate| candidate.classification != Classification::Unsupported)
+            && matches.next().is_none()
+    });
+    match request {
+        Request::Inspect if report.stages.is_empty() => {
+            Some(if target.is_some() && !supported_target {
+                ValidatedReport::InspectedChanged
+            } else {
+                ValidatedReport::Inspected
+            })
+        }
+        Request::Configure {
+            boot_id,
+            os: Os::Windows,
+        } if target == Some(boot_id)
+            && supported_target
+            && report.stages == [Stage::TargetValidated] =>
+        {
+            Some(ValidatedReport::Configured)
+        }
+        Request::Switch { os: Os::Windows } if supported_target => match report.stages.as_slice() {
+            [
+                Stage::TargetValidated,
+                Stage::BootNextVerified,
+                Stage::RebootAccepted,
+            ] => Some(ValidatedReport::RebootAccepted),
+            [
+                Stage::TargetValidated,
+                Stage::BootNextVerified,
+                Stage::RebootUnknown,
+                Stage::ResidualPossible,
+            ] => Some(ValidatedReport::RebootUnknown),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn display_target(report: &Report) -> Option<CachedTarget> {
     match report.record {
         RecordDiagnostic::Missing => None,

@@ -53,8 +53,8 @@ mod linux {
         ui.set_switch_enabled(c.can_switch());
         ui.set_configuration_visible(c.configuration_visible());
         ui.set_configure_enabled(c.can_configure());
-        ui.set_selection_enabled(c.can_switch());
-        ui.set_confirmation_enabled(c.can_switch() && c.selected().is_some());
+        ui.set_selection_enabled(c.can_select());
+        ui.set_confirmation_enabled(c.can_select() && c.selected().is_some());
         ui.set_windows_confirmed(c.confirmed());
         ui.set_candidates(ModelRc::new(VecModel::from(
             c.candidates()

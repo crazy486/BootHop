@@ -98,6 +98,26 @@ fn report() -> Report {
         diagnostics: vec![],
     }
 }
+fn switched(outcome: Stage) -> Report {
+    let stages = if outcome == Stage::RebootUnknown {
+        vec![
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::RebootUnknown,
+            Stage::ResidualPossible,
+        ]
+    } else {
+        vec![Stage::TargetValidated, Stage::BootNextVerified, outcome]
+    };
+    Report {
+        record: RecordDiagnostic::Ready {
+            boot_id: BootId(7),
+            os: Os::Windows,
+        },
+        stages,
+        ..report()
+    }
+}
 fn finish(c: &mut TestController, h: &FakeHelper, e: &Manual, result: Result<Report, ClientError>) {
     h.replies.lock().unwrap().push_back(result);
     e.finish();
@@ -373,9 +393,7 @@ fn accepted_and_unknown_reports_have_distinct_claims_and_stages() {
     ] {
         let (mut c, h, e, cache) = setup(FakeCache::default());
         c.handle(UiIntent::Switch);
-        let mut r = report();
-        r.stages = vec![Stage::TargetValidated, Stage::BootNextVerified, stage];
-        finish(&mut c, &h, &e, Ok(r));
+        finish(&mut c, &h, &e, Ok(switched(stage)));
         assert_eq!(c.state(), &state);
         assert!(c.status().contains(message));
         assert!(c.diagnostic().contains("BootNext 已验证"));
@@ -398,10 +416,16 @@ fn rejected_report_or_flow_failure_never_claims_reboot_accepted() {
     ] {
         let (mut c, h, e, cache) = setup(FakeCache::default());
         c.handle(UiIntent::Switch);
+        let domain_failure = result.is_err();
         finish(&mut c, &h, &e, result);
-        assert_eq!(c.state(), &UiState::Failed);
-        assert!(c.diagnostic().contains("RebootRejected"));
-        assert!(c.diagnostic().contains("可能残留"));
+        if domain_failure {
+            assert_eq!(c.state(), &UiState::Failed);
+            assert!(c.diagnostic().contains("RebootRejected"));
+            assert!(c.diagnostic().contains("可能残留"));
+        } else {
+            assert_eq!(c.state(), &UiState::UnknownResult);
+            assert_eq!(c.diagnostic(), "UnknownAfterSend: Protocol");
+        }
         assert!(!c.status().contains("已被系统接受"));
         assert!(cache.writes.lock().unwrap().is_empty());
     }
@@ -688,20 +712,311 @@ fn successful_switch_displays_report_target_without_rewriting_cache() {
             ..Default::default()
         });
         c.handle(UiIntent::Switch);
+        finish(&mut c, &h, &e, Ok(switched(outcome)));
+        assert_eq!(c.target().unwrap().boot_id, BootId(7));
+        assert!(cache.writes.lock().unwrap().is_empty());
+    }
+}
+
+fn reject_success(intent: UiIntent, response: Report) {
+    let (mut c, h, e, cache) = setup(FakeCache {
+        loaded: Ok(Some(CachedTarget {
+            boot_id: BootId(99),
+            os: Os::Windows,
+            description_utf16: None,
+        })),
+        ..Default::default()
+    });
+    if matches!(intent, UiIntent::Configure(..)) {
+        inspect(&mut c, &h, &e, report());
+        select(&mut c);
+    }
+    let displayed = c.target().cloned();
+    c.handle(intent);
+    finish(&mut c, &h, &e, Ok(response));
+    assert_eq!(c.state(), &UiState::UnknownResult);
+    assert_eq!(
+        c.target(),
+        displayed.as_ref(),
+        "invalid report changed display target"
+    );
+    assert_eq!(c.diagnostic(), "UnknownAfterSend: Protocol");
+    assert!(cache.writes.lock().unwrap().is_empty());
+    assert!(c.candidates().is_empty());
+    assert!(!c.configuration_visible());
+    assert!(!c.can_switch());
+    c.handle(UiIntent::Switch);
+    c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+    assert!(e.0.lock().unwrap().is_empty());
+    c.handle(UiIntent::Inspect);
+    finish(&mut c, &h, &e, Err(ClientError::Cancelled));
+    assert_eq!(c.state(), &UiState::UnknownResult);
+    assert!(!c.can_switch());
+}
+
+#[test]
+fn switch_success_requires_ready_windows_and_one_supported_target_candidate() {
+    let valid = switched(Stage::RebootAccepted);
+    let mut missing = valid.clone();
+    missing.record = RecordDiagnostic::Missing;
+    let mut wrong_os = valid.clone();
+    wrong_os.record = RecordDiagnostic::Ready {
+        boot_id: BootId(7),
+        os: Os::Linux,
+    };
+    let mut absent = valid.clone();
+    absent.candidates.clear();
+    let mut unsupported = valid.clone();
+    unsupported.candidates[0].classification = Classification::Unsupported;
+    let mut duplicate = valid.clone();
+    duplicate.candidates.push(duplicate.candidates[0].clone());
+    for invalid in [missing, wrong_os, absent, unsupported, duplicate] {
+        reject_success(UiIntent::Switch, invalid);
+    }
+}
+
+#[test]
+fn switch_success_rejects_missing_unordered_duplicate_and_contradictory_stages() {
+    use Stage::*;
+    for stages in [
+        vec![],
+        vec![RebootAccepted],
+        vec![BootNextVerified, RebootAccepted],
+        vec![TargetValidated, RebootAccepted],
+        vec![TargetValidated, BootNextVerified],
+        vec![BootNextVerified, TargetValidated, RebootAccepted],
+        vec![
+            TargetValidated,
+            BootNextVerified,
+            RebootAccepted,
+            RebootAccepted,
+        ],
+        vec![
+            TargetValidated,
+            TargetValidated,
+            BootNextVerified,
+            RebootAccepted,
+        ],
+        vec![
+            TargetValidated,
+            BootNextVerified,
+            BootNextVerified,
+            RebootAccepted,
+        ],
+        vec![
+            TargetValidated,
+            BootNextVerified,
+            RebootAccepted,
+            ResidualPossible,
+        ],
+        vec![
+            TargetValidated,
+            BootNextVerified,
+            RebootAccepted,
+            RebootUnknown,
+        ],
+        vec![TargetValidated, BootNextVerified, RebootRejected],
+        vec![TargetValidated, BootNextVerified, RebootUnknown],
+        vec![
+            TargetValidated,
+            BootNextVerified,
+            ResidualPossible,
+            RebootUnknown,
+        ],
+        vec![BootNextVerified, RebootUnknown, ResidualPossible],
+        vec![TargetValidated, RebootUnknown, ResidualPossible],
+        vec![
+            TargetValidated,
+            BootNextVerified,
+            RebootUnknown,
+            ResidualPossible,
+            ResidualPossible,
+        ],
+    ] {
+        reject_success(
+            UiIntent::Switch,
+            Report {
+                stages,
+                ..switched(RebootAccepted)
+            },
+        );
+    }
+}
+
+#[test]
+fn configure_success_requires_exact_record_candidate_and_single_validated_stage() {
+    let valid = Report {
+        stages: vec![Stage::TargetValidated],
+        ..switched(Stage::RebootAccepted)
+    };
+    let mut missing = valid.clone();
+    missing.record = RecordDiagnostic::Missing;
+    let mut wrong_os = valid.clone();
+    wrong_os.record = RecordDiagnostic::Ready {
+        boot_id: BootId(7),
+        os: Os::Linux,
+    };
+    let mut wrong_id = valid.clone();
+    wrong_id.record = RecordDiagnostic::Ready {
+        boot_id: BootId(8),
+        os: Os::Windows,
+    };
+    let mut absent = valid.clone();
+    absent.candidates.clear();
+    let mut unsupported = valid.clone();
+    unsupported.candidates[0].classification = Classification::Unsupported;
+    let mut duplicate = valid.clone();
+    duplicate.candidates.push(duplicate.candidates[0].clone());
+    for invalid in [missing, wrong_os, wrong_id, absent, unsupported, duplicate] {
+        reject_success(UiIntent::Configure(BootId(7), Os::Windows), invalid);
+    }
+    for stages in [
+        vec![],
+        vec![Stage::TargetValidated, Stage::TargetValidated],
+        vec![Stage::BootNextVerified],
+        vec![Stage::TargetValidated, Stage::RebootRejected],
+        vec![Stage::TargetValidated, Stage::RebootAccepted],
+        vec![
+            Stage::TargetValidated,
+            Stage::RebootUnknown,
+            Stage::ResidualPossible,
+        ],
+    ] {
+        reject_success(
+            UiIntent::Configure(BootId(7), Os::Windows),
+            Report {
+                stages,
+                ..valid.clone()
+            },
+        );
+    }
+}
+
+#[test]
+fn inspect_wrong_os_or_any_stages_are_protocol_unknown_before_display_update() {
+    reject_success(
+        UiIntent::Inspect,
+        Report {
+            record: RecordDiagnostic::Ready {
+                boot_id: BootId(7),
+                os: Os::Linux,
+            },
+            ..report()
+        },
+    );
+    for stage in [
+        Stage::TargetValidated,
+        Stage::BootNextVerified,
+        Stage::RebootAccepted,
+        Stage::RebootRejected,
+        Stage::RebootUnknown,
+        Stage::ResidualPossible,
+    ] {
+        reject_success(
+            UiIntent::Inspect,
+            Report {
+                stages: vec![stage],
+                ..report()
+            },
+        );
+    }
+}
+
+#[test]
+fn inspect_changed_target_allows_fresh_explicit_reselection_but_never_switch() {
+    for unsupported in [false, true] {
+        let (mut c, h, e, cache) = setup(FakeCache::default());
+        let mut r = report();
+        r.record = RecordDiagnostic::Ready {
+            boot_id: BootId(99),
+            os: Os::Windows,
+        };
+        if unsupported {
+            r.candidates.push(Candidate {
+                boot_id: BootId(99),
+                classification: Classification::Unsupported,
+                ..r.candidates[0].clone()
+            });
+        }
+        inspect(&mut c, &h, &e, r);
+        assert_eq!(c.state(), &UiState::TargetChanged);
+        assert!(c.configuration_visible());
+        assert!(!c.can_switch());
+        assert!(!c.can_configure());
+        c.handle(UiIntent::Switch);
+        assert!(e.0.lock().unwrap().is_empty());
+        assert!(c.select(BootId(7)));
+        c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+        assert!(e.0.lock().unwrap().is_empty());
+        c.confirm_windows(true);
+        assert!(c.can_configure());
+        c.handle(UiIntent::Configure(BootId(7), Os::Windows));
         finish(
             &mut c,
             &h,
             &e,
             Ok(Report {
-                record: RecordDiagnostic::Ready {
-                    boot_id: BootId(7),
-                    os: Os::Windows,
-                },
-                stages: vec![Stage::TargetValidated, Stage::BootNextVerified, outcome],
-                ..report()
+                stages: vec![Stage::TargetValidated],
+                ..switched(Stage::RebootAccepted)
             }),
         );
-        assert_eq!(c.target().unwrap().boot_id, BootId(7));
-        assert!(cache.writes.lock().unwrap().is_empty());
+        assert_eq!(c.state(), &UiState::Configured);
+        assert!(c.can_switch());
+        assert_eq!(cache.writes.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn prior_identity_change_is_not_cleared_by_inspect_display_only_evidence() {
+    let (mut c, h, e, _) = setup(FakeCache::default());
+    c.handle(UiIntent::Switch);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::IdentityMismatch)),
+    );
+    inspect(
+        &mut c,
+        &h,
+        &e,
+        Report {
+            stages: vec![],
+            ..switched(Stage::RebootAccepted)
+        },
+    );
+    assert_eq!(c.state(), &UiState::TargetChanged);
+    assert!(!c.can_switch());
+    assert!(c.can_select());
+    assert!(!c.can_configure());
+    c.handle(UiIntent::Inspect);
+    finish(&mut c, &h, &e, Err(ClientError::Cancelled));
+    assert_eq!(c.state(), &UiState::TargetChanged);
+    assert!(!c.can_select());
+    assert!(!c.can_switch());
+}
+
+#[test]
+fn failed_reconfiguration_cannot_reenable_switch_for_a_known_changed_target() {
+    for error in [ClientError::Cancelled, ClientError::Domain(Error::Busy)] {
+        let (mut c, h, e, _) = setup(FakeCache::default());
+        inspect(
+            &mut c,
+            &h,
+            &e,
+            Report {
+                record: RecordDiagnostic::Ready {
+                    boot_id: BootId(99),
+                    os: Os::Windows,
+                },
+                ..report()
+            },
+        );
+        select(&mut c);
+        c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+        finish(&mut c, &h, &e, Err(error));
+        assert_eq!(c.state(), &UiState::TargetChanged);
+        assert!(!c.can_switch());
+        assert!(!c.can_select());
     }
 }
