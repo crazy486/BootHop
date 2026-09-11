@@ -16,6 +16,7 @@ pub enum Error {
     TargetMissing,
     NotConfigured,
     BootNextConflict,
+    Busy,
     ReadbackFailed,
     RebootRejected,
     /// Operation is a fixed diagnostic label: open/read/write/metadata/lock/fsync/rename/ipc/reboot.

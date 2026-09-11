@@ -1,0 +1,8 @@
+[package]
+name = "boothop-helper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+boothop-core = { path = "../core" }
+boothop-platform = { path = "../platform" }
