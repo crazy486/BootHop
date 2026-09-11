@@ -420,7 +420,7 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ProtocolError> {
     out.0[..4].copy_from_slice(&length.to_le_bytes());
     Ok(out.0)
 }
-fn decode<T: DeserializeOwned>(frame: &[u8]) -> Result<T, ProtocolError> {
+fn decode<T: DeserializeOwned + Serialize>(frame: &[u8]) -> Result<T, ProtocolError> {
     if frame.len() > MAX_BYTES {
         return Err(ProtocolError::ResourceLimit);
     }
@@ -439,7 +439,22 @@ fn decode<T: DeserializeOwned>(frame: &[u8]) -> Result<T, ProtocolError> {
     if frame.len() != size + 4 {
         return Err(ProtocolError::Invalid);
     }
-    serde_json::from_slice(&frame[4..]).map_err(|_| ProtocolError::Invalid)
+    // Decode the ORIGINAL bytes first: typed visitors must see duplicate and
+    // unknown fields before any Value map can collapse keys. Serde also accepts
+    // sequences for structs and {"UnitVariant": null} for unit enums, so typed
+    // decoding alone is not a strict JSON shape check.
+    let value: T = serde_json::from_slice(&frame[4..]).map_err(|_| ProtocolError::Invalid)?;
+    let received: serde_json::Value =
+        serde_json::from_slice(&frame[4..]).map_err(|_| ProtocolError::Invalid)?;
+    let canonical = serde_json::to_value(&value).map_err(|_| ProtocolError::Invalid)?;
+    // Structural equality enforces the serializer's map-only structs and
+    // string-only unit enums recursively for EVERY reachable DTO, without a
+    // separate shape schema that can drift. Object field ordering, whitespace
+    // and equivalent JSON escapes remain irrelevant; array ordering does not.
+    if received != canonical {
+        return Err(ProtocolError::Invalid);
+    }
+    Ok(value)
 }
 fn version(v: u32) -> Result<(), ProtocolError> {
     if v == PROTOCOL_VERSION {

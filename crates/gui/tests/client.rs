@@ -44,6 +44,42 @@ impl Boundary for Fake {
     }
     fn stop(&mut self) {}
 }
+
+fn json_frame(json: &str) -> Vec<u8> {
+    let mut bytes = (json.len() as u32).to_le_bytes().to_vec();
+    bytes.extend_from_slice(json.as_bytes());
+    bytes
+}
+#[test]
+fn noncanonical_hello_never_enters_send_phase() {
+    let mut client = HelperClient::new(Fake::new(vec![Ok(Event::Stdout(json_frame("[1,true]")))]));
+    assert_eq!(
+        client.run(Request::Inspect),
+        Err(ClientError::BeforeSend(TransportError::Protocol))
+    );
+    assert!(client.into_boundary().writes.is_empty());
+}
+#[test]
+fn noncanonical_response_after_send_is_unknown_not_a_domain_result() {
+    for json in [
+        r#"{"protocol_version":1,"result":{"Err":{"StoreDurabilityUnknown":[5]}}}"#,
+        r#"{"protocol_version":1,"result":{"Ok":[[],"Missing",[],[]]}}"#,
+        r#"{"protocol_version":1,"result":{"Err":{"Busy":null}}}"#,
+    ] {
+        let mut client = HelperClient::new(Fake::new(vec![
+            Ok(Event::Stdout(encode_hello())),
+            Ok(Event::Stdout(json_frame(json))),
+            Ok(Event::Exit(0)),
+        ]));
+        assert_eq!(
+            client.run(Request::Inspect),
+            Err(ClientError::UnknownAfterSend(TransportError::Protocol))
+        );
+        let fake = client.into_boundary();
+        assert_eq!(fake.writes.len(), 1);
+        assert_eq!(fake.specs.len(), 1);
+    }
+}
 #[test]
 fn fixed_spawn_environment_and_126_127_are_presend_only() {
     for (code, expected) in [

@@ -11,6 +11,216 @@ fn frame(json: &str) -> Vec<u8> {
     frame.extend(json.as_bytes());
     frame
 }
+
+#[test]
+fn request_and_hello_require_canonical_object_shapes() {
+    let requests = [
+        r#"[1,"Inspect"]"#,
+        r#"{"protocol_version":1,"request":{"Configure":[7,"Windows"]}}"#,
+        r#"{"protocol_version":1,"request":{"Switch":["Windows"]}}"#,
+        r#"{"protocol_version":1,"request":{"Inspect":null}}"#,
+        r#"{"protocol_version":1,"request":{"Switch":{"os":{"Windows":null}}}}"#,
+        r#"{"protocol_version":1,"request":{"Switch":{"os":{"Linux":null}}}}"#,
+        r#"{"protocol_version":1,"request":["Inspect"]}"#,
+    ];
+    let accepted: Vec<_> = requests
+        .into_iter()
+        .filter(|json| decode_request(&frame(json)).is_ok())
+        .collect();
+    assert!(
+        accepted.is_empty(),
+        "accepted noncanonical requests: {accepted:?}"
+    );
+    assert_eq!(
+        decode_hello(&frame("[1,true]")),
+        Err(ProtocolError::Invalid)
+    );
+}
+
+/// The expected sequence field order is deliberately specified by literals,
+/// independently of serde's serializer. Every reachable struct payload appears.
+#[test]
+fn all_response_struct_payloads_require_maps_including_recursive_errors() {
+    use serde_json::json;
+    let empty_report = json!({"candidates":[],"record":"Missing","stages":[],"diagnostics":[]});
+    let flow = json!({"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","diagnostics":[]}});
+    let cases = [
+        (
+            "response",
+            json!({"protocol_version":1,"result":{"Err":"Busy"}}),
+            "",
+            json!([1,{"Err":"Busy"}]),
+        ),
+        (
+            "report",
+            json!({"protocol_version":1,"result":{"Ok":empty_report}}),
+            "/result/Ok",
+            json!([[], "Missing", [], []]),
+        ),
+        (
+            "candidate",
+            json!({"protocol_version":1,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[65],"classification":"NeedsConfirmation","ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}),
+            "/result/Ok/candidates/0",
+            json!([7, [65], "NeedsConfirmation", false]),
+        ),
+        (
+            "record ready",
+            json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":"Windows"}},"stages":[],"diagnostics":[]}}}),
+            "/result/Ok/record/Ready",
+            json!([7, "Windows"]),
+        ),
+        (
+            "record version error",
+            json!({"protocol_version":1,"result":{"Err":{"UnsupportedRecordVersion":{"found":999}}}}),
+            "/result/Err/UnsupportedRecordVersion",
+            json!([999]),
+        ),
+        (
+            "platform error",
+            json!({"protocol_version":1,"result":{"Err":{"PlatformIo":{"operation":"read","raw_code":5}}}}),
+            "/result/Err/PlatformIo",
+            json!(["read", 5]),
+        ),
+        (
+            "durability error",
+            json!({"protocol_version":1,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5}}}}),
+            "/result/Err/StoreDurabilityUnknown",
+            json!([5]),
+        ),
+        (
+            "flow error",
+            json!({"protocol_version":1,"result":{"Err":flow}}),
+            "/result/Err/FlowFailure",
+            json!(["Busy", [], "NotChecked", []]),
+        ),
+        (
+            "recursive cause",
+            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":flow,"stages":[],"residual_assessment":"NotChecked","diagnostics":[]}}}}),
+            "/result/Err/FlowFailure/cause/FlowFailure",
+            json!(["Busy", [], "NotChecked", []]),
+        ),
+        (
+            "recursive residual",
+            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":{"ReadFailed":{"StoreDurabilityUnknown":{"raw_code":5}}},"diagnostics":[]}}}}),
+            "/result/Err/FlowFailure/residual_assessment/ReadFailed/StoreDurabilityUnknown",
+            json!([5]),
+        ),
+    ];
+    let mut accepted = vec![];
+    for (name, mut original, pointer, malformed) in cases {
+        assert!(
+            decode_response(&frame(&original.to_string())).is_ok(),
+            "invalid canonical fixture: {name}"
+        );
+        // Raw duplicate insertion must still be rejected before Value parsing
+        // could normalize it. Exercise every object shape in the same matrix.
+        let object = original.pointer(pointer).unwrap();
+        let (key, value) = object.as_object().unwrap().iter().next().unwrap();
+        let object_json = object.to_string();
+        let duplicated = format!(
+            "{{{}:{value},{}",
+            serde_json::to_string(key).unwrap(),
+            &object_json[1..]
+        );
+        let duplicate_json = original.to_string().replacen(&object_json, &duplicated, 1);
+        assert!(
+            decode_response(&frame(&duplicate_json)).is_err(),
+            "duplicate accepted: {name}"
+        );
+        *original.pointer_mut(pointer).unwrap() = malformed;
+        if decode_response(&frame(&original.to_string())).is_ok() {
+            accepted.push(name);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted array-for-object: {accepted:?}"
+    );
+}
+
+#[test]
+fn canonical_shape_allows_field_order_whitespace_and_equivalent_escapes() {
+    assert_eq!(
+        decode_request(&frame(
+            r#"{ "request" : { "Switch" : { "os" : "\u0057indows" } }, "protocol_version" : 1 }"#
+        )),
+        Ok(Request::Switch { os: Os::Windows })
+    );
+    assert_eq!(
+        decode_hello(&frame(r#"{ "hello": true, "protocol_version": 1 }"#)),
+        Ok(())
+    );
+    assert_eq!(
+        decode_response(&frame(
+            r#"{ "result" : { "Err" : { "PlatformIo" : { "raw_code": 5, "operation": "read" } } }, "protocol_version": 1 }"#
+        )),
+        Ok(Err(Error::PlatformIo {
+            operation: "read".into(),
+            raw_code: 5
+        }))
+    );
+}
+
+#[test]
+fn all_unit_enum_families_reject_object_and_array_alternatives() {
+    use serde_json::json;
+    let mut cases = vec![];
+    for variant in [
+        "MalformedLoadOption",
+        "MalformedDevicePath",
+        "ResourceLimit",
+        "UnsupportedFormat",
+        "UnsupportedIdentityComponent",
+        "CorruptRecord",
+        "IdentityMismatch",
+        "UnexpectedOs",
+        "TargetMissing",
+        "NotConfigured",
+        "BootNextConflict",
+        "Busy",
+        "ReadbackFailed",
+        "RebootRejected",
+    ] {
+        cases.push((
+            json!({"protocol_version":1,"result":{"Err":variant}}),
+            "/result/Err",
+        ));
+    }
+    for variant in [
+        "TargetValidated",
+        "BootNextVerified",
+        "RebootAccepted",
+        "RebootRejected",
+        "RebootUnknown",
+        "ResidualPossible",
+    ] {
+        cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[variant],"diagnostics":[]}}}), "/result/Ok/stages/0"));
+    }
+    for variant in ["NeedsConfirmation", "Unsupported"] {
+        cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[],"classification":variant,"ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/candidates/0/classification"));
+    }
+    cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/record"));
+    cases.push((json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","diagnostics":[]}}}}), "/result/Err/FlowFailure/residual_assessment"));
+    for variant in ["Windows", "Linux"] {
+        cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":variant}},"stages":[],"diagnostics":[]}}}), "/result/Ok/record/Ready/os"));
+    }
+    let mut accepted = vec![];
+    for (original, pointer) in cases {
+        assert!(decode_response(&frame(&original.to_string())).is_ok());
+        let variant = original.pointer(pointer).unwrap().as_str().unwrap();
+        for malformed in [json!({variant:null}), json!([variant])] {
+            let mut mutated = original.clone();
+            *mutated.pointer_mut(pointer).unwrap() = malformed;
+            if decode_response(&frame(&mutated.to_string())).is_ok() {
+                accepted.push(variant.to_owned());
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted noncanonical unit enums: {accepted:?}"
+    );
+}
 fn report() -> Report {
     Report {
         candidates: vec![
