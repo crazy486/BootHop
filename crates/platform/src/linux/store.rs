@@ -18,6 +18,11 @@ pub struct Metadata {
     pub inode: u64,
     pub device: u64,
     pub size: u64,
+    /// High-resolution change stamps detect observed in-place updates, not a snapshot.
+    pub mtime_seconds: i64,
+    pub mtime_nanoseconds: i64,
+    pub ctime_seconds: i64,
+    pub ctime_nanoseconds: i64,
 }
 
 /// A narrow syscall boundary for trusted backend implementations, not GUI input.
@@ -256,6 +261,10 @@ impl Filesystem for LinuxSyscalls {
             inode: stat.st_ino,
             device: stat.st_dev,
             size: stat.st_size as u64,
+            mtime_seconds: stat.st_mtime,
+            mtime_nanoseconds: stat.st_mtime_nsec as i64,
+            ctime_seconds: stat.st_ctime,
+            ctime_nanoseconds: stat.st_ctime_nsec as i64,
         })
     }
     fn lock(&self, file: &mut Self::Handle) -> Result<(), i32> {
@@ -336,6 +345,24 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn native_metadata_preserves_nanosecond_change_stamps() {
+        let temp = TemporaryDirectory::new();
+        temp.file("record", b"synthetic");
+        let file = File::open(temp.0.join("record")).unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::new(123_456_789, 234_567_890);
+        file.set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let observed = file.metadata().unwrap();
+        let descriptor: OwnedFd = file.into();
+        let snapshot = LinuxSyscalls.metadata(&descriptor).unwrap();
+        assert_eq!(snapshot.mtime_seconds, 123_456_789);
+        assert_eq!(snapshot.mtime_nanoseconds, 234_567_890);
+        assert!(observed.ctime() > 0);
+        assert_eq!(snapshot.ctime_seconds, observed.ctime());
+        assert_eq!(snapshot.ctime_nanoseconds, observed.ctime_nsec());
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub struct State {
     pub temp_metadata: Option<(u32, u32, u32, u64)>,
     pub grow_on_read: Option<Vec<u8>>,
     pub bytes_read: usize,
+    pub rewrite_on_read: Option<(Vec<u8>, usize)>,
 }
 #[derive(Clone, Default)]
 pub struct FakeFs(pub Rc<RefCell<State>>);
@@ -87,6 +88,10 @@ impl FakeFs {
                     inode,
                     device: 1,
                     size: bytes.len() as u64,
+                    mtime_seconds: 100,
+                    mtime_nanoseconds: 10,
+                    ctime_seconds: 200,
+                    ctime_nanoseconds: 20,
                 },
                 bytes,
             })),
@@ -203,6 +208,18 @@ impl Filesystem for FakeFs {
         if let Some(extra) = s.grow_on_read.take() {
             n.bytes.extend(extra);
             n.meta.size = n.bytes.len() as u64;
+        }
+        if let Some((replacement, stamp)) = s.rewrite_on_read.take() {
+            assert_eq!(replacement.len(), n.bytes.len());
+            assert_eq!(&replacement[..file.offset], &n.bytes[..file.offset]);
+            n.bytes = replacement;
+            match stamp {
+                0 => n.meta.mtime_seconds += 1,
+                1 => n.meta.mtime_nanoseconds += 1,
+                2 => n.meta.ctime_seconds += 1,
+                3 => n.meta.ctime_nanoseconds += 1,
+                _ => panic!("unknown synthetic change stamp"),
+            }
         }
         Ok(count)
     }

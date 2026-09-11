@@ -536,3 +536,79 @@ fn maximum_supported_path_is_saved_completely() {
     );
     assert!(fs.record().unwrap().len() <= 1_048_576);
 }
+
+// Catches ignoring second- or nanosecond-resolution mtime/ctime changes during a read.
+#[test]
+fn same_length_in_place_change_during_short_read_is_rejected() {
+    for stamp in 0..4 {
+        let fs = FakeFs::installed();
+        let original = boothop_core::encode_record(&target()).unwrap();
+        let replacement = String::from_utf8(original.clone())
+            .unwrap()
+            .replace("\"boot_id\":7", "\"boot_id\":8")
+            .into_bytes();
+        assert_ne!(replacement, original);
+        assert_eq!(replacement.len(), original.len());
+        fs.set_record(original);
+        let before = fs.0.borrow().nodes["/var/lib/boothop/targets.json"]
+            .borrow()
+            .meta;
+        fs.0.borrow_mut().read_limit = Some(8);
+        fs.0.borrow_mut().rewrite_on_read = Some((replacement.clone(), stamp));
+        let mut store = LockedStore::acquire(fs.clone()).unwrap();
+        let result = store.load();
+        assert_eq!(fs.record(), Some(replacement));
+        let after = fs.0.borrow().nodes["/var/lib/boothop/targets.json"]
+            .borrow()
+            .meta;
+        assert_eq!(
+            (
+                before.uid,
+                before.gid,
+                before.mode,
+                before.links,
+                before.device,
+                before.inode,
+                before.size
+            ),
+            (
+                after.uid,
+                after.gid,
+                after.mode,
+                after.links,
+                after.device,
+                after.inode,
+                after.size
+            )
+        );
+        assert_ne!(before, after); // only the selected change stamp advanced
+        assert_eq!(
+            result,
+            Err(Error::PlatformIo {
+                operation: "read".into(),
+                raw_code: 5
+            }),
+            "timestamp component {stamp}"
+        );
+        drop(store);
+        assert_eq!(fs.0.borrow().open_handles, 0);
+    }
+}
+
+#[test]
+fn unchanged_change_stamps_allow_normal_short_reads() {
+    let fs = FakeFs::installed();
+    fs.set_record(boothop_core::encode_record(&target()).unwrap());
+    fs.0.borrow_mut().read_limit = Some(8);
+    let before = fs.0.borrow().nodes["/var/lib/boothop/targets.json"]
+        .borrow()
+        .meta;
+    let mut store = LockedStore::acquire(fs.clone()).unwrap();
+    assert_eq!(store.load(), Ok(RecordState::Ready(target())));
+    assert_eq!(
+        fs.0.borrow().nodes["/var/lib/boothop/targets.json"]
+            .borrow()
+            .meta,
+        before
+    );
+}
