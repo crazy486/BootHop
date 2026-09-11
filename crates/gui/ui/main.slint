@@ -1,0 +1,70 @@
+import { Button, CheckBox, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct CandidateRow { boot-id: int, label: string, supported: bool, selected: bool }
+
+export component AppWindow inherits Window {
+    title: "BootHop";
+    preferred-width: 660px;
+    preferred-height: 760px;
+    min-width: 460px;
+    min-height: 620px;
+    in property <string> status-text;
+    in property <string> target-text;
+    in property <string> diagnostic-text;
+    in property <string> cache-warning;
+    in property <bool> inspect-enabled;
+    in property <bool> switch-enabled;
+    in property <bool> configuration-visible;
+    in property <bool> configure-enabled;
+    in property <bool> selection-enabled;
+    in property <bool> confirmation-enabled;
+    in property <bool> windows-confirmed;
+    in property <[CandidateRow]> candidates;
+    callback inspect();
+    callback switch-target();
+    callback select-target(int);
+    callback confirm-windows(bool);
+    callback configure();
+    callback completed();
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+        Text { text: "BootHop"; font-size: 26px; font-weight: 700; }
+        Rectangle {
+            background: #fff0d3;
+            border-radius: 6px;
+            min-height: 64px;
+            Text { text: "点击后将立即重启，请先保存工作"; color: #773700; font-weight: 700; font-size: 18px; wrap: word-wrap; x: 12px; y: 8px; width: parent.width - 24px; height: parent.height - 16px; vertical-alignment: center; }
+        }
+        Text { text: root.target-text; wrap: word-wrap; }
+        Button { text: "重启进入 Windows"; enabled: root.switch-enabled; clicked => { root.switch-target(); } }
+        Text { text: root.status-text; wrap: word-wrap; }
+        Text { text: root.cache-warning; wrap: word-wrap; color: #a34e00; visible: root.cache-warning != ""; }
+        Button { text: "检查启动配置"; enabled: root.inspect-enabled; clicked => { root.inspect(); } }
+        if root.configuration-visible: VerticalLayout {
+            spacing: 8px;
+            Text { text: "检查和配置可能分别需要系统授权。请选择目标并确认 Windows 语义。"; wrap: word-wrap; }
+            ScrollView {
+                min-height: 120px;
+                VerticalLayout {
+                    spacing: 4px;
+                    for candidate in root.candidates: Button {
+                        text: (candidate.selected ? "● " : "○ ") + candidate.label;
+                        enabled: root.selection-enabled && candidate.supported;
+                        clicked => { root.select-target(candidate.boot-id); }
+                    }
+                }
+            }
+            CheckBox {
+                text: "我确认所选目标是 Windows";
+                checked: root.windows-confirmed;
+                enabled: root.confirmation-enabled;
+                toggled => { root.confirm-windows(self.checked); }
+            }
+            Button { text: "配置所选目标"; enabled: root.configure-enabled; clicked => { root.configure(); } }
+        }
+        Text { text: "诊断（仅公开编号、阶段和错误；不保证启动链或实际进入目标系统）"; wrap: word-wrap; }
+        diagnostic := TextEdit { text: root.diagnostic-text; read-only: true; min-height: 64px; }
+        Button { text: "复制诊断"; clicked => { diagnostic.select-all(); diagnostic.copy(); } }
+    }
+}
