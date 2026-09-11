@@ -183,11 +183,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "boothop-gui"
+version = "0.1.0"
+dependencies = [
+ "boothop-core",
+ "boothop-helper",
+ "libc",
+]
+
+[[package]]
 name = "boothop-helper"
 version = "0.1.0"
 dependencies = [
  "boothop-core",
  "boothop-platform",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
