@@ -13,8 +13,9 @@ use std::{
 };
 
 use syn::{
-    Attribute, Expr, ExprCall, ExprLit, ExprMacro, ExprMethodCall, ExprPath, File, Item, ItemMod,
-    Lit, Meta, Type, UseTree,
+    Attribute, BinOp, Expr, ExprAssign, ExprBinary, ExprCall, ExprLit, ExprMacro, ExprMethodCall,
+    ExprPath, ExprReturn, File, ImplItem, Item, ItemImpl, ItemMod, ItemTrait, Lit, Meta, Pat, Stmt,
+    TraitItem, Type, UseTree,
     visit::{self, Visit},
 };
 
@@ -31,6 +32,8 @@ struct AuditState {
     issues: Vec<Issue>,
     visited_modules: HashSet<PathBuf>,
     dangerous_functions: HashSet<String>,
+    tainted_functions: HashSet<String>,
+    parameter_boundary_functions: HashSet<String>,
 }
 
 fn main() {
@@ -120,7 +123,14 @@ fn audit_tree(root: &Path) -> Result<usize, Vec<Issue>> {
             }]
         })?;
     }
-    state.dangerous_functions = collect_dangerous_functions(&parsed);
+    state.tainted_functions = collect_tainted_functions(&parsed);
+    state.parameter_boundary_functions =
+        collect_parameter_boundary_functions(&parsed, &state.tainted_functions);
+    state.dangerous_functions = collect_dangerous_functions(
+        &parsed,
+        &state.tainted_functions,
+        &state.parameter_boundary_functions,
+    );
     for path in &files {
         let Some(file) = parsed.get(path) else {
             continue;
@@ -153,60 +163,298 @@ fn audit_tree(root: &Path) -> Result<usize, Vec<Issue>> {
     }
 }
 
-fn collect_dangerous_functions(parsed: &HashMap<PathBuf, File>) -> HashSet<String> {
+#[derive(Clone)]
+struct FunctionDef {
+    name: String,
+    source_path: PathBuf,
+    block: syn::Block,
+    aliases: AliasMap,
+    parameters: HashSet<String>,
+    method_owner: Option<String>,
+    test_only: bool,
+}
+
+fn type_name(ty: &Type) -> Option<String> {
+    let Type::Path(path) = ty else { return None };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn function_key(function: &FunctionDef) -> String {
+    function.method_owner.as_ref().map_or_else(
+        || format!("fn::{}", function.name),
+        |owner| format!("method::{owner}::{}", function.name),
+    )
+}
+
+fn collect_function_defs(parsed: &HashMap<PathBuf, File>) -> Vec<FunctionDef> {
+    fn collect_items(
+        items: &[Item],
+        source_path: &Path,
+        inherited: &AliasMap,
+        test_only: bool,
+        output: &mut Vec<FunctionDef>,
+    ) {
+        let mut aliases = inherited.clone();
+        collect_aliases(items, &mut aliases);
+        for item in items {
+            match item {
+                Item::Fn(function) => output.push(FunctionDef {
+                    name: function.sig.ident.to_string(),
+                    source_path: source_path.to_path_buf(),
+                    block: (*function.block).clone(),
+                    aliases: aliases.clone(),
+                    parameters: signature_parameters(&function.sig),
+                    method_owner: None,
+                    test_only,
+                }),
+                Item::Impl(ItemImpl { self_ty, items, .. }) => {
+                    let method_owner = type_name(self_ty);
+                    for item in items {
+                        let ImplItem::Fn(function) = item else {
+                            continue;
+                        };
+                        output.push(FunctionDef {
+                            name: function.sig.ident.to_string(),
+                            source_path: source_path.to_path_buf(),
+                            block: function.block.clone(),
+                            aliases: aliases.clone(),
+                            parameters: signature_parameters(&function.sig),
+                            method_owner: method_owner.clone(),
+                            test_only,
+                        });
+                    }
+                }
+                Item::Trait(ItemTrait { ident, items, .. }) => {
+                    for item in items {
+                        let TraitItem::Fn(function) = item else {
+                            continue;
+                        };
+                        let Some(block) = &function.default else {
+                            continue;
+                        };
+                        output.push(FunctionDef {
+                            name: function.sig.ident.to_string(),
+                            source_path: source_path.to_path_buf(),
+                            block: block.clone(),
+                            aliases: aliases.clone(),
+                            parameters: signature_parameters(&function.sig),
+                            method_owner: Some(ident.to_string()),
+                            test_only,
+                        });
+                    }
+                }
+                Item::Mod(module) => {
+                    if let Some((_, nested)) = &module.content {
+                        collect_items(
+                            nested,
+                            source_path,
+                            &aliases,
+                            test_only || has_test_cfg(&module.attrs),
+                            output,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    for (path, file) in parsed {
+        let test_only = path.components().any(|part| part.as_os_str() == "tests");
+        collect_items(&file.items, path, &AliasMap::new(), test_only, &mut output);
+    }
+    output
+}
+
+struct TraitImplDef {
+    trait_name: String,
+    owner: String,
+    methods: HashSet<String>,
+}
+
+fn collect_trait_impls(parsed: &HashMap<PathBuf, File>) -> Vec<TraitImplDef> {
+    fn collect_items(items: &[Item], output: &mut Vec<TraitImplDef>) {
+        for item in items {
+            match item {
+                Item::Impl(ItemImpl {
+                    self_ty,
+                    trait_: Some((_, path, _)),
+                    items,
+                    ..
+                }) => {
+                    let Some(owner) = type_name(self_ty) else {
+                        continue;
+                    };
+                    let Some(trait_name) = path.segments.last() else {
+                        continue;
+                    };
+                    let methods = items
+                        .iter()
+                        .filter_map(|item| match item {
+                            ImplItem::Fn(function) => Some(function.sig.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    output.push(TraitImplDef {
+                        trait_name: trait_name.ident.to_string(),
+                        owner,
+                        methods,
+                    });
+                }
+                Item::Mod(module) => {
+                    if let Some((_, nested)) = &module.content {
+                        collect_items(nested, output);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    for file in parsed.values() {
+        collect_items(&file.items, &mut output);
+    }
+    output
+}
+
+fn signature_parameters(signature: &syn::Signature) -> HashSet<String> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => simple_pattern_name(&typed.pat),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect()
+}
+
+fn simple_pattern_name(pattern: &Pat) -> Option<String> {
+    match pattern {
+        Pat::Ident(binding) => Some(binding.ident.to_string()),
+        Pat::Type(typed) => simple_pattern_name(&typed.pat),
+        Pat::Reference(reference) => simple_pattern_name(&reference.pat),
+        _ => None,
+    }
+}
+
+fn audit_function_body(
+    function: &FunctionDef,
+    dangerous_functions: &HashSet<String>,
+    tainted_functions: &HashSet<String>,
+    parameter_boundary_functions: &HashSet<String>,
+) -> (bool, bool, bool) {
+    let mut issues = Vec::new();
+    let mut visitor = ExprAudit::new(
+        &function.aliases,
+        function.source_path.as_path(),
+        &mut issues,
+        dangerous_functions,
+        tainted_functions,
+        parameter_boundary_functions,
+        &function.parameters,
+        false,
+        false,
+    );
+    visitor.visit_block(&function.block);
+    let return_tainted = visitor.return_tainted;
+    let parameter_boundary = visitor.parameter_boundary;
+    drop(visitor);
+    (!issues.is_empty(), return_tainted, parameter_boundary)
+}
+
+fn collect_tainted_functions(parsed: &HashMap<PathBuf, File>) -> HashSet<String> {
+    let functions = collect_function_defs(parsed);
+    let mut tainted = HashSet::new();
+    loop {
+        let mut additions = HashSet::new();
+        for function in &functions {
+            if function.test_only {
+                continue;
+            }
+            let (_, returns_tainted, _) =
+                audit_function_body(function, &HashSet::new(), &tainted, &HashSet::new());
+            if returns_tainted {
+                additions.insert(function_key(function));
+            }
+        }
+        let previous = tainted.len();
+        tainted.extend(additions);
+        if tainted.len() == previous {
+            return tainted;
+        }
+    }
+}
+
+fn collect_parameter_boundary_functions(
+    parsed: &HashMap<PathBuf, File>,
+    tainted_functions: &HashSet<String>,
+) -> HashSet<String> {
+    let functions = collect_function_defs(parsed);
+    let mut parameter_boundaries = HashSet::new();
+    for function in &functions {
+        if function.test_only {
+            continue;
+        }
+        let (_, _, uses_parameter) = audit_function_body(
+            function,
+            &HashSet::new(),
+            tainted_functions,
+            &parameter_boundaries,
+        );
+        if uses_parameter {
+            parameter_boundaries.insert(function_key(function));
+        }
+    }
+    parameter_boundaries
+}
+
+fn collect_dangerous_functions(
+    parsed: &HashMap<PathBuf, File>,
+    tainted_functions: &HashSet<String>,
+    parameter_boundary_functions: &HashSet<String>,
+) -> HashSet<String> {
+    let functions = collect_function_defs(parsed);
+    let trait_impls = collect_trait_impls(parsed);
     let mut dangerous = HashSet::new();
     loop {
         let known = dangerous.clone();
         let mut additions = HashSet::new();
-        for (path, file) in parsed {
-            let mut aliases = AliasMap::new();
-            collect_aliases(&file.items, &mut aliases);
-            collect_nested_aliases(&file.items, &mut aliases);
-            let mut probe = FunctionProbe {
-                aliases: &aliases,
-                source_path: path,
-                known_dangerous: &known,
-                additions: &mut additions,
-            };
-            probe.visit_file(file);
+        for function in &functions {
+            if function.test_only {
+                continue;
+            }
+            let (is_dangerous, _, _) = audit_function_body(
+                function,
+                &known,
+                tainted_functions,
+                parameter_boundary_functions,
+            );
+            if is_dangerous {
+                additions.insert(function_key(function));
+            }
         }
         let previous = dangerous.len();
         dangerous.extend(additions);
+        for implementation in &trait_impls {
+            for default_key in dangerous.clone() {
+                let Some(method) =
+                    default_key.strip_prefix(&format!("method::{}::", implementation.trait_name))
+                else {
+                    continue;
+                };
+                if !implementation.methods.contains(method) {
+                    dangerous.insert(format!("method::{}::{method}", implementation.owner));
+                }
+            }
+        }
         if dangerous.len() == previous {
             return dangerous;
         }
-    }
-}
-
-struct FunctionProbe<'a> {
-    aliases: &'a AliasMap,
-    source_path: &'a Path,
-    known_dangerous: &'a HashSet<String>,
-    additions: &'a mut HashSet<String>,
-}
-
-impl FunctionProbe<'_> {
-    fn body_is_dangerous(&mut self, name: &syn::Ident, block: &syn::Block) {
-        let mut issues = Vec::new();
-        let mut visitor = ExprAudit {
-            aliases: self.aliases,
-            source_path: self.source_path,
-            issues: &mut issues,
-            dangerous_functions: self.known_dangerous,
-            tainted_bindings: HashSet::new(),
-            boot_order_bindings: HashSet::new(),
-        };
-        visitor.visit_block(block);
-        if !issues.is_empty() {
-            self.additions.insert(name.to_string());
-        }
-    }
-}
-
-impl Visit<'_> for FunctionProbe<'_> {
-    fn visit_item_fn(&mut self, item: &syn::ItemFn) {
-        self.body_is_dangerous(&item.sig.ident, &item.block);
-        visit::visit_item_fn(self, item);
     }
 }
 
@@ -293,17 +541,24 @@ fn audit_test_items(
 ) {
     let mut aliases = inherited.clone();
     collect_aliases(items, &mut aliases);
-    collect_nested_aliases(items, &mut aliases);
-    let mut visitor = ExprAudit {
-        aliases: &aliases,
-        source_path,
-        issues: &mut state.issues,
-        dangerous_functions: &state.dangerous_functions,
-        tainted_bindings: HashSet::new(),
-        boot_order_bindings: HashSet::new(),
-    };
+    let no_parameters = HashSet::new();
     for item in items {
-        visit::Visit::visit_item(&mut visitor, item);
+        // Child modules are visited below with a fresh lexical alias scope;
+        // visiting them here would leak their imports into sibling modules.
+        if !matches!(item, Item::Mod(_)) {
+            let mut visitor = ExprAudit::new(
+                &aliases,
+                source_path,
+                &mut state.issues,
+                &state.dangerous_functions,
+                &state.tainted_functions,
+                &state.parameter_boundary_functions,
+                &no_parameters,
+                true,
+                true,
+            );
+            visit::Visit::visit_item(&mut visitor, item);
+        }
     }
     for item in items {
         let Item::Mod(module) = item else { continue };
@@ -317,31 +572,6 @@ fn audit_test_items(
             };
             audit_test_items(&file.items, &path, root, &aliases, parsed, state);
         }
-    }
-}
-
-fn collect_nested_aliases(items: &[Item], aliases: &mut AliasMap) {
-    struct Collector<'a> {
-        aliases: &'a mut AliasMap,
-    }
-    impl Visit<'_> for Collector<'_> {
-        fn visit_item_use(&mut self, item: &syn::ItemUse) {
-            collect_use_tree(None, &item.tree, self.aliases);
-            visit::visit_item_use(self, item);
-        }
-
-        fn visit_item_type(&mut self, item: &syn::ItemType) {
-            if let Type::Path(type_path) = &*item.ty
-                && let Some(path) = resolve_path(&type_path.path, self.aliases)
-            {
-                self.aliases.insert(item.ident.to_string(), path);
-            }
-            visit::visit_item_type(self, item);
-        }
-    }
-    let mut collector = Collector { aliases };
-    for item in items {
-        collector.visit_item(item);
     }
 }
 
@@ -541,8 +771,185 @@ fn resolve_path(path: &syn::Path, aliases: &AliasMap) -> Option<Vec<String>> {
     Some(result)
 }
 
+fn resolve_scoped_path(path: &syn::Path, scopes: &[AliasMap]) -> Option<Vec<String>> {
+    let first = path.segments.first()?.ident.to_string();
+    let mut result = scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get(&first).cloned())
+        .unwrap_or_else(|| vec![first]);
+    let mut expanded = HashSet::new();
+    while let Some(head) = result.first().cloned() {
+        if !expanded.insert(head.clone()) {
+            break;
+        }
+        let Some(replacement) = scopes.iter().rev().find_map(|scope| scope.get(&head)) else {
+            break;
+        };
+        let mut next = replacement.clone();
+        next.extend(result.into_iter().skip(1));
+        result = next;
+    }
+    result.extend(
+        path.segments
+            .iter()
+            .skip(1)
+            .map(|segment| segment.ident.to_string()),
+    );
+    Some(result)
+}
+
+fn split_macro_tokens(tokens: proc_macro2::TokenStream) -> Vec<proc_macro2::TokenStream> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut parts = vec![proc_macro2::TokenStream::new()];
+    for token in tokens {
+        if let proc_macro2::TokenTree::Punct(punct) = &token
+            && punct.as_char() == ','
+            && punct.spacing() == proc_macro2::Spacing::Alone
+        {
+            parts.push(proc_macro2::TokenStream::new());
+        } else if let Some(part) = parts.last_mut() {
+            part.extend(std::iter::once(token));
+        }
+    }
+    if parts.last().is_some_and(proc_macro2::TokenStream::is_empty) {
+        parts.pop();
+    }
+    parts
+}
+
+fn split_macro_semicolon(tokens: proc_macro2::TokenStream) -> Vec<proc_macro2::TokenStream> {
+    let mut parts = vec![proc_macro2::TokenStream::new()];
+    for token in tokens {
+        if let proc_macro2::TokenTree::Punct(punct) = &token
+            && punct.as_char() == ';'
+            && punct.spacing() == proc_macro2::Spacing::Alone
+        {
+            parts.push(proc_macro2::TokenStream::new());
+        } else if let Some(part) = parts.last_mut() {
+            part.extend(std::iter::once(token));
+        }
+    }
+    if parts.last().is_some_and(proc_macro2::TokenStream::is_empty) {
+        parts.pop();
+    }
+    parts
+}
+
+fn split_macro_colon(tokens: proc_macro2::TokenStream) -> Vec<proc_macro2::TokenStream> {
+    let mut parts = vec![proc_macro2::TokenStream::new()];
+    let mut previous_colon_was_joint = false;
+    for token in tokens {
+        let current_colon_is_joint = matches!(&token, proc_macro2::TokenTree::Punct(punct)
+            if punct.as_char() == ':' && punct.spacing() == proc_macro2::Spacing::Joint);
+        let separator = matches!(&token, proc_macro2::TokenTree::Punct(punct)
+            if punct.as_char() == ':'
+                && punct.spacing() == proc_macro2::Spacing::Alone
+                && !previous_colon_was_joint);
+        if separator {
+            parts.push(proc_macro2::TokenStream::new());
+        } else if let Some(part) = parts.last_mut() {
+            part.extend(std::iter::once(token));
+        }
+        previous_colon_was_joint = current_colon_is_joint;
+    }
+    parts
+}
+
+fn parse_json_macro_exprs(mac: &syn::Macro) -> Result<Vec<Expr>, ()> {
+    fn collect(stream: proc_macro2::TokenStream, output: &mut Vec<Expr>) -> Result<(), ()> {
+        for part in split_macro_tokens(stream) {
+            if part.is_empty() {
+                continue;
+            }
+            let colon = split_macro_colon(part.clone());
+            let candidate = colon.last().cloned().ok_or(())?;
+            if colon.len() > 1 {
+                if collect(candidate.clone(), output).is_err() {
+                    return Err(());
+                }
+                continue;
+            }
+            if let Ok(expr) = syn::parse2::<Expr>(candidate.clone()) {
+                output.push(expr);
+                continue;
+            }
+            let mut found_group = false;
+            for token in candidate.clone() {
+                if let proc_macro2::TokenTree::Group(group) = token {
+                    found_group = true;
+                    collect(group.stream(), output)?;
+                }
+            }
+            if !found_group {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = Vec::new();
+    collect(mac.tokens.clone(), &mut output)?;
+    Ok(output)
+}
+
+fn parse_macro_exprs(mac: &syn::Macro) -> Result<Vec<Expr>, ()> {
+    let name = mac
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string());
+    if name.as_deref() == Some("json") {
+        return parse_json_macro_exprs(mac);
+    }
+    let mut expressions = Vec::new();
+    for part in split_macro_tokens(mac.tokens.clone()) {
+        let semicolon_parts = split_macro_semicolon(part);
+        if name.as_deref() == Some("matches") {
+            // `matches!` has a pattern (not an expression) after the first
+            // comma. Its expression is the only part relevant to boundary
+            // execution; the pattern is syntax-checked by syn itself.
+            if let Some(first) = semicolon_parts.first()
+                && let Ok(expr) = syn::parse2::<Expr>(first.clone())
+            {
+                expressions.push(expr);
+            }
+            break;
+        }
+        for segment in semicolon_parts {
+            if segment.is_empty() {
+                return Err(());
+            }
+            expressions.push(syn::parse2::<Expr>(segment).map_err(|_| ())?);
+        }
+    }
+    Ok(expressions)
+}
+
+fn macro_literal_concat(mac: &syn::Macro) -> Option<String> {
+    if mac.path.segments.last()?.ident != "concat" {
+        return None;
+    }
+    let exprs = parse_macro_exprs(mac).ok()?;
+    let mut output = String::new();
+    for expr in exprs {
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) = expr
+        else {
+            return None;
+        };
+        output.push_str(&value.value());
+    }
+    Some(output)
+}
+
 struct PathTaint<'a> {
     tainted_bindings: &'a HashSet<String>,
+    tainted_functions: &'a HashSet<String>,
     found: bool,
 }
 
@@ -566,13 +973,30 @@ impl Visit<'_> for PathTaint<'_> {
         visit::visit_expr_path(self, expr);
     }
 
+    fn visit_expr_call(&mut self, expr: &ExprCall) {
+        if let Expr::Path(path) = &*expr.func
+            && path.path.segments.last().is_some_and(|segment| {
+                self.tainted_functions
+                    .contains(&format!("fn::{}", segment.ident))
+            })
+        {
+            self.found = true;
+        }
+        visit::visit_expr_call(self, expr);
+    }
+
     fn visit_expr_macro(&mut self, expr: &ExprMacro) {
         let text = expr.mac.tokens.to_string();
         self.found |= is_system_path(&text)
             || text
                 .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
                 .any(|name| self.tainted_bindings.contains(name));
-        visit::visit_expr_macro(self, expr);
+        self.found |= macro_literal_concat(&expr.mac).is_some_and(|value| is_system_path(&value));
+        if let Ok(arguments) = parse_macro_exprs(&expr.mac) {
+            for argument in arguments {
+                self.visit_expr(&argument);
+            }
+        }
     }
 }
 
@@ -603,20 +1027,64 @@ impl Visit<'_> for BootOrderTaint<'_> {
     fn visit_expr_macro(&mut self, expr: &ExprMacro) {
         let text = expr.mac.tokens.to_string();
         self.found |= text.contains("BootOrder") || text.contains("BootCurrent");
-        visit::visit_expr_macro(self, expr);
+        self.found |= macro_literal_concat(&expr.mac)
+            .is_some_and(|value| value.contains("BootOrder") || value.contains("BootCurrent"));
+        if let Ok(arguments) = parse_macro_exprs(&expr.mac) {
+            for argument in arguments {
+                self.visit_expr(&argument);
+            }
+        }
     }
 }
 
 struct ExprAudit<'a> {
-    aliases: &'a AliasMap,
+    alias_scopes: Vec<AliasMap>,
     source_path: &'a Path,
     issues: &'a mut Vec<Issue>,
     dangerous_functions: &'a HashSet<String>,
+    tainted_functions: &'a HashSet<String>,
+    parameter_boundary_functions: &'a HashSet<String>,
+    parameters: &'a HashSet<String>,
     tainted_bindings: HashSet<String>,
     boot_order_bindings: HashSet<String>,
+    receiver_types: HashMap<String, String>,
+    return_tainted: bool,
+    parameter_boundary: bool,
+    report_parameter_boundary: bool,
+    report_unresolved_wrappers: bool,
 }
 
 impl ExprAudit<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn new<'a>(
+        aliases: &AliasMap,
+        source_path: &'a Path,
+        issues: &'a mut Vec<Issue>,
+        dangerous_functions: &'a HashSet<String>,
+        tainted_functions: &'a HashSet<String>,
+        parameter_boundary_functions: &'a HashSet<String>,
+        parameters: &'a HashSet<String>,
+        report_parameter_boundary: bool,
+        report_unresolved_wrappers: bool,
+    ) -> ExprAudit<'a> {
+        ExprAudit {
+            alias_scopes: vec![aliases.clone()],
+            source_path,
+            issues,
+            dangerous_functions,
+            tainted_functions,
+            parameter_boundary_functions,
+            parameters,
+            tainted_bindings: HashSet::new(),
+            boot_order_bindings: HashSet::new(),
+            receiver_types: HashMap::new(),
+            return_tainted: false,
+            parameter_boundary: false,
+            report_parameter_boundary,
+            report_unresolved_wrappers,
+        }
+    }
+
     fn report(&mut self, message: impl Into<String>) {
         let file = self.source_path.display().to_string();
         let message = message.into();
@@ -630,10 +1098,10 @@ impl ExprAudit<'_> {
     }
 
     fn path(&self, path: &syn::Path) -> Vec<String> {
-        resolve_path(path, self.aliases).unwrap_or_default()
+        resolve_scoped_path(path, &self.alias_scopes).unwrap_or_default()
     }
 
-    fn check_path(&mut self, path: &syn::Path, args: Option<&[Expr]>) {
+    fn check_path(&mut self, path: &syn::Path, args: Option<&[Expr]>, check_wrappers: bool) {
         let canonical = self.path(path);
         if is_process_command(&canonical) {
             self.report("test code references std::process::Command");
@@ -657,15 +1125,33 @@ impl ExprAudit<'_> {
             );
             return;
         }
-        if canonical
-            .last()
-            .is_some_and(|name| self.dangerous_functions.contains(name))
+        if check_wrappers
+            && canonical
+                .last()
+                .is_some_and(|name| self.dangerous_functions.contains(&format!("fn::{name}")))
         {
             self.report("test code calls a wrapper whose body crosses a protected system boundary");
             return;
         }
         if is_filesystem_path_api(&canonical)
-            && args.is_some_and(|args| args.iter().any(|arg| self.has_system_path(arg)))
+            && args.is_some_and(|args| {
+                args.iter()
+                    .any(|arg| self.has_system_path(arg) || self.has_parameter(arg))
+            })
+        {
+            let parameter = args.is_some_and(|args| args.iter().any(|arg| self.has_parameter(arg)));
+            if parameter {
+                self.parameter_boundary = true;
+            }
+            if !parameter || self.report_parameter_boundary {
+                self.report("test code accesses a protected system path through a filesystem API");
+            }
+        }
+        if self.parameter_boundary_functions.iter().any(|name| {
+            canonical
+                .last()
+                .is_some_and(|last| name == &format!("fn::{last}"))
+        }) && args.is_some_and(|args| args.iter().any(|arg| self.has_system_path(arg)))
         {
             self.report("test code accesses a protected system path through a filesystem API");
         }
@@ -679,6 +1165,33 @@ impl ExprAudit<'_> {
     fn has_system_path(&self, expr: &Expr) -> bool {
         let mut visitor = PathTaint {
             tainted_bindings: &self.tainted_bindings,
+            tainted_functions: self.tainted_functions,
+            found: false,
+        };
+        visitor.visit_expr(expr);
+        visitor.found
+    }
+
+    fn has_parameter(&self, expr: &Expr) -> bool {
+        struct ParameterUse<'a> {
+            parameters: &'a HashSet<String>,
+            found: bool,
+        }
+        impl Visit<'_> for ParameterUse<'_> {
+            fn visit_expr_path(&mut self, path: &ExprPath) {
+                if path
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|segment| self.parameters.contains(&segment.ident.to_string()))
+                {
+                    self.found = true;
+                }
+                visit::visit_expr_path(self, path);
+            }
+        }
+        let mut visitor = ParameterUse {
+            parameters: self.parameters,
             found: false,
         };
         visitor.visit_expr(expr);
@@ -707,23 +1220,161 @@ impl ExprAudit<'_> {
         visitor.visit_expr(expr);
         visitor.found
     }
+
+    fn current_aliases(&mut self) -> &mut AliasMap {
+        self.alias_scopes
+            .last_mut()
+            .expect("ExprAudit always has a module alias scope")
+    }
+
+    fn receiver_type(&self, expression: &Expr) -> Option<String> {
+        match expression {
+            Expr::Path(path) => {
+                let first = path.path.segments.first()?.ident.to_string();
+                let last = path.path.segments.last()?.ident.to_string();
+                self.receiver_types
+                    .get(&first)
+                    .cloned()
+                    .or_else(|| self.receiver_types.get(&last).cloned())
+                    .or_else(|| {
+                        last.chars()
+                            .next()
+                            .filter(|character| character.is_uppercase())
+                            .map(|_| last)
+                    })
+            }
+            Expr::Reference(reference) => self.receiver_type(&reference.expr),
+            Expr::Paren(paren) => self.receiver_type(&paren.expr),
+            Expr::Group(group) => self.receiver_type(&group.expr),
+            Expr::Struct(structure) => type_name(&Type::Path(syn::TypePath {
+                qself: None,
+                path: structure.path.clone(),
+            })),
+            _ => None,
+        }
+    }
+
+    fn mark_pattern(&mut self, pattern: &Pat, tainted: bool, boot_order: bool) {
+        match pattern {
+            Pat::Ident(binding) => {
+                if tainted {
+                    self.tainted_bindings.insert(binding.ident.to_string());
+                }
+                if boot_order {
+                    self.boot_order_bindings.insert(binding.ident.to_string());
+                }
+                if let Some((_, subpattern)) = &binding.subpat {
+                    self.mark_pattern(subpattern, tainted, boot_order);
+                }
+            }
+            Pat::Type(typed) => self.mark_pattern(&typed.pat, tainted, boot_order),
+            Pat::Reference(reference) => self.mark_pattern(&reference.pat, tainted, boot_order),
+            Pat::Paren(paren) => self.mark_pattern(&paren.pat, tainted, boot_order),
+            Pat::Tuple(tuple) => {
+                for element in &tuple.elems {
+                    self.mark_pattern(element, tainted, boot_order);
+                }
+            }
+            Pat::TupleStruct(tuple) => {
+                for element in &tuple.elems {
+                    self.mark_pattern(element, tainted, boot_order);
+                }
+            }
+            Pat::Struct(structure) => {
+                for field in &structure.fields {
+                    self.mark_pattern(&field.pat, tainted, boot_order);
+                }
+            }
+            Pat::Slice(slice) => {
+                for element in &slice.elems {
+                    self.mark_pattern(element, tainted, boot_order);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_assignment_target(&mut self, expression: &Expr, tainted: bool, boot_order: bool) {
+        match expression {
+            Expr::Path(path) => {
+                if let Some(binding) = path.path.segments.last() {
+                    if tainted {
+                        self.tainted_bindings.insert(binding.ident.to_string());
+                    }
+                    if boot_order {
+                        self.boot_order_bindings.insert(binding.ident.to_string());
+                    }
+                }
+            }
+            Expr::Tuple(tuple) => {
+                for element in &tuple.elems {
+                    self.mark_assignment_target(element, tainted, boot_order);
+                }
+            }
+            Expr::Array(array) => {
+                for element in &array.elems {
+                    self.mark_assignment_target(element, tainted, boot_order);
+                }
+            }
+            Expr::Paren(paren) => self.mark_assignment_target(&paren.expr, tainted, boot_order),
+            Expr::Group(group) => self.mark_assignment_target(&group.expr, tainted, boot_order),
+            _ => {}
+        }
+    }
+
+    fn inspect_macro(&mut self, mac: &syn::Macro) {
+        let canonical = self.path(&mac.path);
+        if !is_allowed_test_macro(&canonical) {
+            self.report("test code invokes an unallowlisted macro that cannot be audited");
+            return;
+        }
+        if canonical.last().is_some_and(|name| name == "include_str")
+            && is_system_path(&mac.tokens.to_string())
+        {
+            self.report("test code includes a protected system path through a macro");
+        }
+        let Ok(arguments) = parse_macro_exprs(mac) else {
+            self.report("allowlisted macro cannot be parsed for boundary audit");
+            return;
+        };
+        for argument in arguments {
+            self.visit_expr(&argument);
+        }
+    }
 }
 
 impl Visit<'_> for ExprAudit<'_> {
     fn visit_expr_call(&mut self, call: &ExprCall) {
         if let Expr::Path(path) = &*call.func {
             let args = call.args.iter().cloned().collect::<Vec<_>>();
-            self.check_path(&path.path, Some(&args));
-            if is_unqualified_dangerous_wrapper(&self.path(&path.path)) {
+            self.check_path(&path.path, Some(&args), true);
+            if self.report_unresolved_wrappers
+                && is_unqualified_dangerous_wrapper(&self.path(&path.path))
+            {
                 self.report("test code calls an unresolved process/system wrapper");
             }
-            if self
-                .path(&path.path)
-                .last()
-                .is_some_and(|name| name == "write_next")
+            if is_boot_next_write_api(self.path(&path.path).last().map(String::as_str))
                 && args.iter().any(|arg| self.has_boot_order(arg))
             {
                 self.report("fake write assertion may target BootNext only");
+            }
+            let method_owner = path
+                .qself
+                .as_ref()
+                .and_then(|qself| type_name(&qself.ty))
+                .or_else(|| {
+                    let canonical = self.path(&path.path);
+                    (canonical.len() >= 2).then(|| canonical[canonical.len() - 2].clone())
+                });
+            if method_owner.is_some_and(|owner| {
+                self.dangerous_functions.contains(&format!(
+                    "method::{owner}::{}",
+                    path.path.segments.last().unwrap().ident
+                ))
+            }) {
+                self.report(
+                    "test code calls a wrapper whose body crosses a protected system boundary",
+                );
             }
         }
         visit::visit_expr_call(self, call);
@@ -738,8 +1389,19 @@ impl Visit<'_> for ExprAudit<'_> {
         {
             self.report("test code executes a std::process::Command");
         }
-        if call.method == "write_next" && call.args.iter().any(|arg| self.has_boot_order(arg)) {
+        if is_boot_next_write_api(Some(&call.method.to_string()))
+            && call.args.iter().any(|arg| self.has_boot_order(arg))
+        {
             self.report("fake write assertion may target BootNext only");
+        }
+        if self.receiver_type(&call.receiver).is_some_and(|owner| {
+            self.dangerous_functions
+                .contains(&format!("method::{owner}::{}", call.method))
+        }) {
+            self.report(format!(
+                "test code calls a wrapper whose body crosses a protected system boundary: {}",
+                call.method
+            ));
         }
         if let Expr::Path(path) = &*call.receiver {
             let canonical = self.path(&path.path);
@@ -747,7 +1409,10 @@ impl Visit<'_> for ExprAudit<'_> {
             if is_filesystem_path_api(&canonical)
                 && args.iter().any(|arg| self.has_system_path(arg))
             {
-                self.report("test code accesses a protected system path through a filesystem API");
+                self.report(format!(
+                    "test code accesses a protected system path through a filesystem API: {}",
+                    canonical.join("::")
+                ));
             }
         }
         if matches!(
@@ -774,57 +1439,101 @@ impl Visit<'_> for ExprAudit<'_> {
     }
 
     fn visit_expr_macro(&mut self, expr: &ExprMacro) {
-        let canonical = self.path(&expr.mac.path);
-        if !is_allowed_test_macro(&canonical) {
-            self.report("test code invokes an unallowlisted macro that cannot be audited");
-        }
-        if canonical.last().is_some_and(|name| name == "include_str")
-            && is_system_path(&expr.mac.tokens.to_string())
-        {
-            self.report("test code includes a protected system path through a macro");
-        }
-        visit::visit_expr_macro(self, expr);
+        self.inspect_macro(&expr.mac);
     }
 
     fn visit_item_macro(&mut self, item: &syn::ItemMacro) {
-        let canonical = self.path(&item.mac.path);
-        if !is_allowed_test_macro(&canonical) {
-            self.report("test code invokes an unallowlisted item macro that cannot be audited");
-        }
-        visit::visit_item_macro(self, item);
+        self.inspect_macro(&item.mac);
     }
 
     fn visit_macro(&mut self, mac: &syn::Macro) {
-        let canonical = self.path(&mac.path);
-        if !is_allowed_test_macro(&canonical) {
-            self.report("test code invokes an unallowlisted macro that cannot be audited");
-        }
-        if canonical.last().is_some_and(|name| name == "include_str")
-            && (is_system_path(&mac.tokens.to_string())
-                || mac
-                    .tokens
-                    .to_string()
-                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                    .any(|name| self.tainted_bindings.contains(name)))
+        self.inspect_macro(mac);
+    }
+
+    fn visit_item_use(&mut self, item: &syn::ItemUse) {
+        collect_use_tree(None, &item.tree, self.current_aliases());
+    }
+
+    fn visit_item_type(&mut self, item: &syn::ItemType) {
+        if let Type::Path(type_path) = &*item.ty
+            && let Some(path) = resolve_scoped_path(&type_path.path, &self.alias_scopes)
         {
-            self.report("test code includes a protected system path through a macro");
+            self.current_aliases().insert(item.ident.to_string(), path);
         }
-        visit::visit_macro(self, mac);
+        visit::visit_item_type(self, item);
+    }
+
+    fn visit_block(&mut self, block: &syn::Block) {
+        self.alias_scopes.push(AliasMap::new());
+        visit::visit_block(self, block);
+        self.alias_scopes.pop();
+        if let Some(Stmt::Expr(expression, None)) = block.stmts.last()
+            && self.has_system_path(expression)
+        {
+            self.return_tainted = true;
+        }
+    }
+
+    fn visit_expr_return(&mut self, expression: &ExprReturn) {
+        if expression
+            .expr
+            .as_deref()
+            .is_some_and(|expr| self.has_system_path(expr))
+        {
+            self.return_tainted = true;
+        }
+        visit::visit_expr_return(self, expression);
+    }
+
+    fn visit_expr_assign(&mut self, expression: &ExprAssign) {
+        let system_path = self.has_system_path(&expression.right);
+        let boot_order = self.has_boot_order(&expression.right);
+        self.mark_assignment_target(&expression.left, system_path, boot_order);
+        visit::visit_expr_assign(self, expression);
+    }
+
+    fn visit_expr_binary(&mut self, expression: &ExprBinary) {
+        if matches!(expression.op, BinOp::AddAssign(_))
+            && let Expr::Path(path) = &*expression.left
+        {
+            if self.has_system_path(&expression.right)
+                && let Some(binding) = path.path.segments.last()
+            {
+                self.tainted_bindings.insert(binding.ident.to_string());
+            }
+            if self.has_boot_order(&expression.right)
+                && let Some(binding) = path.path.segments.last()
+            {
+                self.boot_order_bindings.insert(binding.ident.to_string());
+            }
+        }
+        visit::visit_expr_binary(self, expression);
     }
 
     fn visit_expr_path(&mut self, path: &ExprPath) {
-        self.check_path(&path.path, None);
+        self.check_path(&path.path, None, false);
         visit::visit_expr_path(self, path);
     }
 
     fn visit_local(&mut self, local: &syn::Local) {
-        if let (syn::Pat::Ident(binding), Some(init)) = (&local.pat, &local.init) {
-            if self.has_system_path(&init.expr) {
-                self.tainted_bindings.insert(binding.ident.to_string());
-            }
-            if self.has_boot_order(&init.expr) {
-                self.boot_order_bindings.insert(binding.ident.to_string());
-            }
+        if let Pat::Ident(binding) = &local.pat
+            && let Some(init) = &local.init
+            && let Some(owner) = self.receiver_type(&init.expr)
+        {
+            self.receiver_types.insert(binding.ident.to_string(), owner);
+        }
+        if let Pat::Type(typed) = &local.pat
+            && let Pat::Ident(binding) = &*typed.pat
+            && let Some(owner) = type_name(&typed.ty)
+        {
+            self.receiver_types.insert(binding.ident.to_string(), owner);
+        }
+        if let Some(init) = &local.init {
+            self.mark_pattern(
+                &local.pat,
+                self.has_system_path(&init.expr),
+                self.has_boot_order(&init.expr),
+            );
         }
         visit::visit_local(self, local);
     }
@@ -844,7 +1553,7 @@ impl Visit<'_> for ExprAudit<'_> {
     }
 
     fn visit_type_path(&mut self, path: &syn::TypePath) {
-        self.check_path(&path.path, None);
+        self.check_path(&path.path, None, false);
         visit::visit_type_path(self, path);
     }
 }
@@ -929,10 +1638,7 @@ fn is_libc_system_call(path: &[String]) -> bool {
         && (path
             .first()
             .is_some_and(|first| first == "libc" || first == "rustix" || first == "nix")
-            || path.windows(2).any(|window| window == ["std", "process"])
-            // Reboot APIs in crates such as `nix` are often nested below a
-            // module path, so the terminal operation is itself denylisted.
-            || path.last().is_some_and(|name| name == "reboot"))
+            || path.windows(2).any(|window| window == ["std", "process"]))
 }
 
 fn is_libc_path_api(path: &[String]) -> bool {
@@ -1062,6 +1768,17 @@ fn is_unqualified_dangerous_wrapper(path: &[String]) -> bool {
     })
 }
 
+fn is_boot_next_write_api(name: Option<&str>) -> bool {
+    let Some(name) = name else { return false };
+    let name = name.to_ascii_lowercase();
+    name == "write_next"
+        || name.contains("write_next")
+        || name.contains("write_boot_next")
+        || name.contains("set_boot_next")
+        || name.contains("write_boot_variable")
+        || name.contains("set_boot_variable")
+}
+
 fn is_system_path(value: &str) -> bool {
     let normalized = value.replace('\\', "/");
     [
@@ -1094,7 +1811,14 @@ fn audit_source(source: &str, label: &str) -> Result<(), String> {
     let mut state = AuditState::default();
     let mut parsed = HashMap::new();
     parsed.insert(path.clone(), file);
-    state.dangerous_functions = collect_dangerous_functions(&parsed);
+    state.tainted_functions = collect_tainted_functions(&parsed);
+    state.parameter_boundary_functions =
+        collect_parameter_boundary_functions(&parsed, &state.tainted_functions);
+    state.dangerous_functions = collect_dangerous_functions(
+        &parsed,
+        &state.tainted_functions,
+        &state.parameter_boundary_functions,
+    );
     let file = parsed.get(&path).expect("just inserted source");
     audit_test_items(
         &file.items,
@@ -1262,6 +1986,154 @@ mod tests {
             }
             fn fake_store() -> FakeStore { FakeStore }
             struct FakeStore;
+        "#;
+        assert!(super::audit_source(source, "fixture.rs").is_err());
+    }
+
+    #[test]
+    fn allowlisted_macros_are_recursively_audited() {
+        let source = r#"
+            #[cfg(test)]
+            mod tests {
+                fn evil() {
+                    assert!(format!("{:?}", std::process::Command::new("helper")).is_empty());
+                    let _ = vec![zbus::blocking::Connection::session()];
+                    assert_eq!(concat!("re", "boot"), libc::reboot(0));
+                }
+            }
+        "#;
+        assert!(super::audit_source(source, "fixture.rs").is_err());
+    }
+
+    #[test]
+    fn impl_trait_and_ufcs_methods_propagate_boundary_summaries() {
+        let source = r#"
+            struct Runner;
+            impl Runner {
+                fn hidden(&self) {
+                    std::process::Command::new("helper").status().unwrap();
+                }
+            }
+            trait Bus {
+                fn hidden_bus(&self) {
+                    let _ = zbus::blocking::Connection::session();
+                }
+            }
+            struct Device;
+            impl Bus for Device {}
+            #[cfg(test)]
+            mod tests {
+                fn invoke() {
+                    let runner = super::Runner;
+                    runner.hidden();
+                    let device = super::Device;
+                    device.hidden_bus();
+                    <super::Device as super::Bus>::hidden_bus(&device);
+                }
+            }
+        "#;
+        let file = syn::parse_file(source).unwrap();
+        let path = std::path::PathBuf::from("fixture.rs");
+        let mut parsed = std::collections::HashMap::new();
+        parsed.insert(path.clone(), file);
+        let tainted = super::collect_tainted_functions(&parsed);
+        let parameter_boundaries = super::collect_parameter_boundary_functions(&parsed, &tainted);
+        let dangerous =
+            super::collect_dangerous_functions(&parsed, &tainted, &parameter_boundaries);
+        assert!(dangerous.contains("method::Runner::hidden"));
+        assert!(dangerous.contains("method::Bus::hidden_bus"));
+        assert!(dangerous.contains("method::Device::hidden_bus"));
+
+        let root = std::path::Path::new(".").canonicalize().unwrap();
+        let file = parsed.get(&path).unwrap();
+        let mut state = super::AuditState {
+            dangerous_functions: dangerous,
+            tainted_functions: tainted,
+            parameter_boundary_functions: parameter_boundaries,
+            ..Default::default()
+        };
+        super::audit_cfg_modules(
+            &file.items,
+            &path,
+            &root,
+            &super::AliasMap::new(),
+            &parsed,
+            &mut state,
+        );
+        assert!(!state.issues.is_empty());
+    }
+
+    #[test]
+    fn aliases_are_lexically_scoped_and_later_safe_aliases_cannot_hide_danger() {
+        let source = r#"
+            fn dangerous() {
+                use std::process::Command as C;
+                let _ = C::new("helper");
+            }
+            fn safe() {
+                use safe::Thing as C;
+                let _ = C::new();
+            }
+        "#;
+        assert!(super::audit_source(source, "fixture.rs").is_err());
+    }
+
+    #[test]
+    fn unrelated_function_alias_does_not_poison_safe_function() {
+        let source = r#"
+            fn safe() {
+                use safe::Thing as C;
+                let _ = C::new();
+            }
+            fn unrelated() {
+                use std::process::Command as C;
+            }
+        "#;
+        assert!(super::audit_source(source, "fixture.rs").is_ok());
+    }
+
+    #[test]
+    fn taint_tracks_updates_destructuring_returns_and_cross_function_parameters() {
+        let source = r#"
+            fn source_path() -> &'static str { concat!("/", "sys") }
+            fn read_path(path: &str) { let _ = std::fs::read(path); }
+            fn evil() {
+                let mut path = "/tmp";
+                path = source_path();
+                let (first, _second) = (path, "/tmp");
+                read_path(first);
+            }
+        "#;
+        let result = super::audit_source(source, "fixture.rs");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tuple_assignment_updates_path_taint() {
+        let source = r#"
+            fn source_path() -> &'static str { concat!("/", "sys") }
+            fn read_path(path: &str) { let _ = std::fs::read(path); }
+            fn evil() {
+                let mut assigned = "/tmp";
+                let mut untouched = "/tmp";
+                (assigned, untouched) = (source_path(), untouched);
+                read_path(assigned);
+            }
+        "#;
+        assert!(super::audit_source(source, "fixture.rs").is_err());
+    }
+
+    #[test]
+    fn boot_order_concat_rejects_boot_next_write_api_variants() {
+        let source = r#"
+            struct Fake;
+            impl Fake {
+                fn write_boot_next(&mut self, _: &str) {}
+            }
+            fn evil(fake: &mut Fake) {
+                let target = concat!("Boot", "Order");
+                fake.write_boot_next(target);
+            }
         "#;
         assert!(super::audit_source(source, "fixture.rs").is_err());
     }
