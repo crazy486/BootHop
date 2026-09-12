@@ -1,3 +1,9 @@
 [workspace]
-members = ["crates/core", "crates/platform", "crates/helper", "crates/gui"]
+members = [
+    "crates/core",
+    "crates/platform",
+    "crates/helper",
+    "crates/gui",
+    "tools/isolation-audit",
+]
 resolver = "2"

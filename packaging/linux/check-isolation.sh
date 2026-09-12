@@ -27,35 +27,15 @@ if (( ! skip_tree )); then
   done
 fi
 
-mapfile -t test_files < <(find "$root/crates" -type f -path '*/tests/*' -name '*.rs' -print)
-mapfile -t cfg_test_files < <(rg -l '#\[cfg\(test\)\]' "$root/crates" -g '*.rs' || true)
-[[ ${#test_files[@]} -gt 0 ]] || { echo "no test fixtures found" >&2; exit 1; }
-printf 'Audited test fixtures (%s) and cfg(test) sources (%s)\n' "${#test_files[@]}" "${#cfg_test_files[@]}"
-if rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess::system|production\s*\(|std::process::Command::new|/sys/firmware/efi|zbus::blocking::Connection' "${test_files[@]}"; then
-  echo "tests must not construct production adapters or installed helpers" >&2
-  exit 1
-fi
-
-# By repository convention inline cfg(test) modules are at the end of a source
-# file. Start at the first inline marker and scan through EOF, covering every
-# test module (including earlier modules); path-only cfg(test) imports are not
-# inline modules. A marker without an inline module is rejected fail-closed.
-cfg_extract=$(mktemp "${TMPDIR:-/tmp}/boothop-cfg-audit.XXXXXX")
-cfg_code=$(mktemp "${TMPDIR:-/tmp}/boothop-cfg-code.XXXXXX")
-trap 'rm -f "$cfg_extract" "$cfg_code"' EXIT
-for file in "${cfg_test_files[@]}"; do
-  start=$(rg -n -U '#\[cfg\(test\)\][[:space:]]*(#\[path[^]]+\][[:space:]]*)?mod[[:space:]]+[A-Za-z_]+[[:space:]]*\{' "$file" | head -n 1 | cut -d: -f1)
-  [[ -n "$start" ]] || { echo "cfg(test) marker has no inline module: $file" >&2; exit 1; }
-  sed -n "${start},\$p" "$file" >> "$cfg_extract"
-done
-grep -Ev '^[[:space:]]*//' "$cfg_extract" > "$cfg_code" || true
-if [[ -s "$cfg_code" ]] && rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess::system|with_linux_operation|native_reboot\(|std::process::Command(::new|::spawn)|/sys/firmware/efi|/var/lib/boothop|/usr/lib/boothop|zbus::blocking::Connection|Connection::(system|session)|DBUS_SYSTEM_BUS_ADDRESS|/run/dbus|slint::run_event_loop|AppWindow::run' "$cfg_code"; then
-  echo "cfg(test) sources must not construct production adapters or installed helpers" >&2
-  exit 1
-fi
-if rg -n -U 'Boot(Order|Current)[\s\S]{0,120}(write_next|\.write\(|write\()|(?:write_next|\.write\(|write\()[\s\S]{0,120}Boot(Order|Current)' "${test_files[@]}" "$cfg_extract"; then
-  echo "fake write assertions may target BootNext only" >&2
-  exit 1
+audit_manifest="${BOOTHOP_ISOLATION_AUDIT_MANIFEST:-}"
+if [[ -n "$audit_manifest" ]]; then
+  cargo run --manifest-path "$audit_manifest" --locked -- --root "$root"
+else
+  [[ -f "$root/Cargo.toml" ]] || {
+    echo "isolation audit requires a workspace Cargo.toml or BOOTHOP_ISOLATION_AUDIT_MANIFEST" >&2
+    exit 1
+  }
+  cargo run -p boothop-isolation-audit --locked -- --root "$root"
 fi
 if rg -ni 'pkexec|sudo|runas' packaging/linux/boothop.desktop; then
   echo "desktop launch must not be privileged" >&2
