@@ -14,13 +14,16 @@ mkdir -p "$out"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/boothop-package-stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
-# CI supplies these exact task-local locations. Defaults keep the script
-# usable from this worktree without changing a user's global Cargo install.
-export CARGO_HOME="${CARGO_HOME:-$root/.superpowers/sdd/2026-09-08-boothop/tools/cargo}"
-export RUSTUP_HOME="${RUSTUP_HOME:-$root/.superpowers/sdd/2026-09-08-boothop/tools/rustup}"
-export PATH="$CARGO_HOME/bin:$PATH"
+# In the task worktree these exact local homes are available. On a clean CI
+# runner, preserve the toolchain environment supplied by the runner instead.
+local_cargo="$root/.superpowers/sdd/2026-09-08-boothop/tools/cargo"
+local_rustup="$root/.superpowers/sdd/2026-09-08-boothop/tools/rustup"
+if [[ -z "${CARGO_HOME:-}" && -d "$local_cargo" ]]; then export CARGO_HOME="$local_cargo"; fi
+if [[ -z "${RUSTUP_HOME:-}" && -d "$local_rustup" ]]; then export RUSTUP_HOME="$local_rustup"; fi
+if [[ -n "${CARGO_HOME:-}" ]]; then export PATH="$CARGO_HOME/bin:$PATH"; fi
+export BOOTHOP_TEST_STAGING=1
 
-cargo build --workspace --release
+cargo build --workspace --release --locked
 "$root/packaging/linux/install.sh" install --destdir "$stage" \
   --payload "$root/target/release" --test-staging
 

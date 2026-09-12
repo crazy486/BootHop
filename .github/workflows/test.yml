@@ -16,6 +16,8 @@ jobs:
       # not run a desktop event loop, installed helper, firmware, or reboot.
       - name: Static dependency and fake-fixture isolation
         run: packaging/linux/check-isolation.sh
+      - name: Isolation checker adversarial fixture
+        run: packaging/linux/tests/isolation_checker_fake.sh
       - name: Workspace tests
         run: cargo test --workspace
       - name: Formatting
@@ -24,3 +26,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Fake package layout tests
         run: packaging/linux/tests/installer_fake.sh
+      - name: Development package archive smoke test
+        run: packaging/linux/package-smoke.sh

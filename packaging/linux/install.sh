@@ -41,11 +41,40 @@ done
 }
 case "$action" in install|upgrade|inspect|uninstall) ;; *) usage ;; esac
 
+die() { echo "boothop installer: $*" >&2; exit 1; }
+
+# Walk every supplied path component without resolving symlinks. A symlink in
+# DESTDIR or a package parent is an escape from the intended root.
+assert_no_symlink_components() {
+  local supplied=$1 absolute component current
+  case "$supplied" in
+    /*) absolute=$supplied ;;
+    *) absolute="$PWD/$supplied" ;;
+  esac
+  current=/
+  local -a components
+  IFS=/ read -ra components <<< "${absolute#/}"
+  for component in "${components[@]}"; do
+    [[ -z "$component" || "$component" == "." ]] && continue
+    [[ "$component" != ".." ]] || die "parent traversal is not allowed"
+    current="$current/$component"
+    [[ ! -L "$current" ]] || die "symlink path component is not allowed: $current"
+  done
+}
+
+assert_no_symlink_components "$destdir"
+[[ -d "$destdir" && ! -L "$destdir" ]] || die "destination must be an existing directory"
+if (( test_staging )); then
+  # This escape hatch is exclusively for unprivileged temporary fake tests.
+  [[ ${BOOTHOP_TEST_STAGING:-} == 1 && $(id -u) -ne 0 ]] || die "test staging is not a package-install mode"
+fi
+if [[ "$action" == install || "$action" == upgrade ]]; then
+  [[ -n "$payload" ]] || die "a complete payload directory is required"
+fi
+
 layout="$destdir/var/lib/boothop"
 lock="$layout/operation.lock"
 record="$layout/targets.json"
-
-die() { echo "boothop installer: $*" >&2; exit 1; }
 
 set_root_owner() {
   (( test_staging )) && return 0
@@ -59,7 +88,26 @@ mode_is() {
   [[ $(stat -c '%a' -- "$path") == "$expected" ]] || die "unexpected mode on $path"
 }
 
+ensure_directory() {
+  local path=$1 mode=${2:-755}
+  assert_no_symlink_components "$path"
+  if [[ -e "$path" || -L "$path" ]]; then
+    [[ -d "$path" && ! -L "$path" ]] || die "path is not a directory: $path"
+  else
+    mkdir "$path" || die "cannot create directory: $path"
+    chmod "$mode" "$path" || die "cannot set directory mode: $path"
+  fi
+}
+
+require_directory() {
+  local path=$1
+  assert_no_symlink_components "$path"
+  [[ -d "$path" && ! -L "$path" ]] || die "directory is missing or linked: $path"
+}
+
 validate_layout() {
+  require_directory "$destdir/var"
+  require_directory "$destdir/var/lib"
   [[ -d "$layout" && ! -L "$layout" ]] || die "protected layout is missing"
   mode_is "$layout" 700
   if (( ! test_staging )); then
@@ -77,8 +125,8 @@ create_layout() {
     validate_layout
     return 0
   }
-  mkdir -p "$destdir/var/lib"
-  chmod 755 "$destdir/var" "$destdir/var/lib" 2>/dev/null || true
+  ensure_directory "$destdir/var"
+  ensure_directory "$destdir/var/lib"
   mkdir "$layout"
   chmod 700 "$layout"
   set_root_owner "$layout"
@@ -93,14 +141,34 @@ create_layout() {
 }
 
 copy_payload() {
-  [[ -z "$payload" ]] && return 0
-  [[ -d "$payload" ]] || die "payload directory is missing"
-  install -d -m 755 "$destdir/usr/bin" "$destdir/usr/lib/boothop" \
-    "$destdir/usr/share/applications" "$destdir/usr/share/polkit-1/actions"
-  [[ -f "$payload/boothop-gui" ]] && install -m 755 "$payload/boothop-gui" "$destdir/usr/bin/boothop-gui"
-  [[ -f "$payload/boothop-helper" ]] && install -m 755 "$payload/boothop-helper" "$destdir/usr/lib/boothop/boothop-helper"
-  install -m 644 "$(dirname "$0")/boothop.desktop" "$destdir/usr/share/applications/org.boothop.desktop"
-  install -m 644 "$(dirname "$0")/org.boothop.helper.policy" "$destdir/usr/share/polkit-1/actions/org.boothop.helper.policy"
+  assert_no_symlink_components "$payload"
+  [[ -d "$payload" && ! -L "$payload" ]] || die "payload directory is missing"
+  for name in boothop-gui boothop-helper; do
+    [[ -f "$payload/$name" && ! -L "$payload/$name" ]] || die "payload binary is missing or linked: $name"
+  done
+  ensure_directory "$destdir/usr"
+  ensure_directory "$destdir/usr/bin"
+  ensure_directory "$destdir/usr/lib"
+  ensure_directory "$destdir/usr/lib/boothop"
+  ensure_directory "$destdir/usr/share"
+  ensure_directory "$destdir/usr/share/applications"
+  ensure_directory "$destdir/usr/share/polkit-1"
+  ensure_directory "$destdir/usr/share/polkit-1/actions"
+  for name in boothop-gui boothop-helper; do
+    local destination
+    if [[ "$name" == boothop-gui ]]; then
+      destination="$destdir/usr/bin/$name"
+    else
+      destination="$destdir/usr/lib/boothop/$name"
+    fi
+    [[ ! -L "$destination" ]] || die "package destination is linked: $destination"
+    install -m 755 "$payload/$name" "$destination"
+  done
+  local desktop="$destdir/usr/share/applications/org.boothop.desktop"
+  local policy="$destdir/usr/share/polkit-1/actions/org.boothop.helper.policy"
+  [[ ! -L "$desktop" && ! -L "$policy" ]] || die "package metadata destination is linked"
+  install -m 644 "$(dirname "$0")/boothop.desktop" "$desktop"
+  install -m 644 "$(dirname "$0")/org.boothop.helper.policy" "$policy"
 }
 
 case "$action" in
@@ -118,7 +186,7 @@ case "$action" in
     ;;
   inspect)
     validate_layout
-    [[ -f "$record" ]] && echo Ready || echo Missing
+    [[ -f "$record" ]] && echo Present || echo Absent
     ;;
   uninstall)
     validate_layout
