@@ -136,7 +136,7 @@ StoreDurabilityUnknown是上述普通PlatformIo的明确例外：store.save→ex
 
 一个request_id对应一条白名单意图：Inspect、Configure{boot_id,os}、Switch{os}；严格拒绝未知/重复字段、额外命令、GUI注入digest或路径。授权/连接等待120秒，建立后读写30秒，重启RPC回复30秒；这些是产品deadline，不承诺能中断内核固件调用。未发送操作可证明则NotAttempted；发送后断连/超时/丢终态→相关阶段Unknown，保留已知阶段/可能残留，不自动重试switch或杀进程当Rejected。
 
-Linux启动使用固定argv `/usr/bin/pkexec --disable-internal-agent /usr/lib/boothop/boothop-helper`，无shell，无GUI控制的helper路径。helper验证euid=0、管道对象、受限环境与消息；GUI不提权/不凭PKEXEC_UID信任参数。pkexec126=取消，127=授权失败或其他错误而非确定缺agent；普通打开GUI不调用helper。[pkexec官方手册](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html)沿用已核对契约。
+Linux启动使用固定argv `/usr/bin/pkexec --disable-internal-agent /usr/lib/boothop/boothop-helper`，无shell，无GUI控制的helper路径。helper验证euid=0、管道对象、受限环境与消息；GUI不提权/不凭PKEXEC_UID信任参数。仅 pre-hello exit 126 归类为已知用户取消；127 一律保持中性的授权未完成或 helper 启动/环境失败，不能推断取消、认证失败或缺少代理。当前 Arch/KDE 取消可能呈现为 127，GUI 显示“授权未完成或 helper 启动失败；请求尚未发送。”，诊断可保留 raw exit 127；stderr、journal、时序和 KDE 日志不作产品分类依据。普通打开GUI不调用helper。[pkexec官方手册](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html)沿用已核对契约。
 
 logind固定系统总线/org/freedesktop/login1/Manager `RebootWithFlags(uint64 1)`，最低systemd255，flag仅SD_LOGIND_ROOT_CHECK_INHIBITORS，不退回Reboot/syscall/force。写BootNext前检查方法/版本支持；失败停止。明确D-Bus拒绝→Rejected；明确成功reply→Accepted；发送后丢reply/断连→Unknown，不由PrepareForShutdown信号替代关联回复。block与delay、261的block-weak分别验收；root不允许绕过，delay仍有logind自身超时。Accepted/Unknown不回滚；Rejected也不在缺CAS时写恢复值。官方v255/v257/v261来源见platform-contracts；本轮无D-Bus调用。
 

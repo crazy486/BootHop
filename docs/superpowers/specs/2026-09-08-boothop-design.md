@@ -98,7 +98,7 @@ BootHop 自身并发操作应串行化，但内部互斥不能阻止其他固件
 
 Windows 优先使用 GetFirmwareEnvironmentVariableExW / SetFirmwareEnvironmentVariableExW 等官方固件变量接口；读取也需要相应权限，因此首次 inspect 可要求 UAC。枚举入口、权限启用、正常重启 API 和 IPC 的具体选择应在平台实现计划中明确。
 
-Linux 优先通过 efivarfs 访问变量，解析其四字节变量属性前缀。systemd/logind 只负责正常重启集成，polkit/pkexec 负责提权。使用 pkexec --disable-internal-agent 禁止退回内部文本代理。不能仅凭通用失败码把所有授权失败都诊断为缺少代理；明确区分已知取消、授权失败及无法进一步确定的环境问题。
+Linux 优先通过 efivarfs 访问变量，解析其四字节变量属性前缀。systemd/logind 只负责正常重启集成，polkit/pkexec 负责提权。使用 pkexec --disable-internal-agent 禁止退回内部文本代理。只有 pre-hello exit 126 归类为已知用户取消；exit 127 一律是中性的授权未完成或 helper 启动/环境失败，不能推断取消、认证失败或缺少代理。当前 Arch/KDE 取消可能呈现为 127，因此界面保守显示“授权未完成或 helper 启动失败；请求尚未发送。”并保留 raw exit 诊断。不能解析 stderr、journal、时序或 KDE 日志来细分原因。
 
 helper 不能通过 root 身份或所选 API 隐式绕过用户要求的正常关机语义；logind inhibitors、Windows 应用阻止关机及异步返回语义须纳入平台验收。
 

@@ -84,7 +84,10 @@ fn noncanonical_response_after_send_is_unknown_not_a_domain_result() {
 fn fixed_spawn_environment_and_126_127_are_presend_only() {
     for (code, expected) in [
         (126, ClientError::Cancelled),
-        (127, ClientError::AuthorizationOrLaunchFailed),
+        (
+            127,
+            ClientError::AuthorizationOrLaunchFailed { raw_code: 127 },
+        ),
         (1, ClientError::BeforeSend(TransportError::Exit)),
     ] {
         let mut client = HelperClient::new(Fake::new(vec![Ok(Event::Exit(code))]));
@@ -104,6 +107,40 @@ fn fixed_spawn_environment_and_126_127_are_presend_only() {
         assert!(fake.writes.is_empty());
         assert_eq!(fake.deadlines, [Duration::from_secs(120)]);
     }
+}
+
+#[test]
+fn kde_authorization_dialog_shape_exit_127_is_generic_and_not_sent() {
+    let mut client = HelperClient::new(Fake::new(vec![
+        Ok(Event::Stderr(b"Not authorized\n".to_vec())),
+        Ok(Event::Exit(127)),
+    ]));
+    assert_eq!(
+        client.run(Request::Inspect),
+        Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 })
+    );
+    let fake = client.into_boundary();
+    assert!(fake.writes.is_empty());
+}
+
+#[test]
+fn prehello_exit_126_is_known_cancel_and_not_sent() {
+    let mut client = HelperClient::new(Fake::new(vec![Ok(Event::Exit(126))]));
+    assert_eq!(client.run(Request::Inspect), Err(ClientError::Cancelled));
+    assert!(client.into_boundary().writes.is_empty());
+}
+
+#[test]
+fn non_cancellation_exit_127_is_same_generic_prehello_failure() {
+    let mut client = HelperClient::new(Fake::new(vec![
+        Ok(Event::Stderr(b"helper failed before protocol\n".to_vec())),
+        Ok(Event::Exit(127)),
+    ]));
+    assert_eq!(
+        client.run(Request::Inspect),
+        Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 })
+    );
+    assert!(client.into_boundary().writes.is_empty());
 }
 #[test]
 fn hello_then_timeout_is_unknown_without_retry() {
@@ -192,6 +229,25 @@ fn all_postsend_failure_shapes_remain_unknown_and_never_retry() {
             client.run(Request::Inspect),
             Err(ClientError::UnknownAfterSend(_))
         ));
+        let fake = client.into_boundary();
+        assert_eq!(fake.writes.len(), 1);
+        assert_eq!(fake.specs.len(), 1);
+    }
+}
+
+#[test]
+fn posthello_exit_126_and_127_are_unknown_after_send_without_retry() {
+    for code in [126, 127] {
+        let mut client = HelperClient::new(Fake::new(vec![
+            Ok(Event::Stdout(encode_hello())),
+            Ok(Event::Exit(code)),
+        ]));
+        assert_eq!(
+            client.run(Request::Switch {
+                os: boothop_core::Os::Windows,
+            }),
+            Err(ClientError::UnknownAfterSend(TransportError::Exit))
+        );
         let fake = client.into_boundary();
         assert_eq!(fake.writes.len(), 1);
         assert_eq!(fake.specs.len(), 1);

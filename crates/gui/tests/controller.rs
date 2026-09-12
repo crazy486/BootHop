@@ -468,7 +468,7 @@ fn client_failures_preserve_phase_and_dont_replay() {
     for (error, diagnostic) in [
         (ClientError::Cancelled, "Cancelled"),
         (
-            ClientError::AuthorizationOrLaunchFailed,
+            ClientError::AuthorizationOrLaunchFailed { raw_code: 127 },
             "AuthorizationOrLaunchFailed",
         ),
         (ClientError::BeforeSend(TransportError::Io), "BeforeSend"),
@@ -482,6 +482,25 @@ fn client_failures_preserve_phase_and_dont_replay() {
         assert!(e.0.lock().unwrap().is_empty());
         assert!(cache.writes.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn authorization_launch_exit_127_is_neutral_and_explicitly_not_sent() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 }),
+    );
+    assert_eq!(c.state(), &UiState::Failed);
+    assert_eq!(c.status(), "授权未完成或 helper 启动失败；请求尚未发送。");
+    assert!(c.diagnostic().contains("127"));
+    assert!(c.diagnostic().contains("请求尚未发送"));
+    assert!(!c.diagnostic().contains("取消"));
+    assert!(cache.writes.lock().unwrap().is_empty());
+    assert!(e.0.lock().unwrap().is_empty());
 }
 #[test]
 fn inspect_record_is_display_only_and_does_not_update_cache() {

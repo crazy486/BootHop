@@ -182,6 +182,13 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             UiState::Failed if self.cache_warning.is_some() => {
                 "本地展示缓存不可用；尚未检查受保护配置。"
             }
+            UiState::Failed
+                if self
+                    .diagnostic
+                    .starts_with("AuthorizationOrLaunchFailed: raw exit 127") =>
+            {
+                "授权未完成或 helper 启动失败；请求尚未发送。"
+            }
             UiState::Failed => "操作失败。请查看诊断；不会自动重试或回滚。",
             UiState::RebootRequested => "重启请求已被系统接受",
             UiState::UnknownResult => {
@@ -329,8 +336,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
                 self.diagnostic = "Cancelled".into();
                 UiState::Failed
             }
-            ClientError::AuthorizationOrLaunchFailed => {
-                self.diagnostic = "AuthorizationOrLaunchFailed".into();
+            ClientError::AuthorizationOrLaunchFailed { raw_code } => {
+                self.diagnostic =
+                    format!("AuthorizationOrLaunchFailed: raw exit {raw_code}；请求尚未发送");
                 UiState::Failed
             }
             ClientError::Domain(error) => {

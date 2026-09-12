@@ -23,7 +23,11 @@ pub enum TransportError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientError {
     Cancelled,
-    AuthorizationOrLaunchFailed,
+    /// pkexec/helper failed before the protocol hello. `raw_code` is retained
+    /// for bounded diagnostics only; it does not identify the underlying cause.
+    AuthorizationOrLaunchFailed {
+        raw_code: i32,
+    },
     BeforeSend(TransportError),
     /// The helper may have set BootNext or accepted reboot. Never retry automatically.
     UnknownAfterSend(TransportError),
@@ -88,7 +92,9 @@ impl<B: Boundary> HelperClient<B> {
             }
             match event {
                 Event::Exit(126) => return Err(ClientError::Cancelled),
-                Event::Exit(127) => return Err(ClientError::AuthorizationOrLaunchFailed),
+                Event::Exit(127) => {
+                    return Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 });
+                }
                 Event::Exit(_) => return Err(ClientError::BeforeSend(TransportError::Exit)),
                 event => collect(event, &mut used, &mut stdout).map_err(ClientError::BeforeSend)?,
             }

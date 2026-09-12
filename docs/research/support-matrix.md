@@ -7,7 +7,7 @@
 | 环境 | 地位与架构 | 已知实际版本 / 缺口 | 验收范围 |
 |---|---|---|---|
 | Windows 11 | 主要实机，x86-64 / x86_64-pc-windows-msvc | 用户确认其真实启动项语义；原始项由Arch读取。具体版本、build、固件未知；未在Windows运行API | UAC 双账户情形、MSI 安装/卸载/ACL、应用阻止重启、中文/Unicode/高 DPI、实际进 Arch |
-| 当前 Arch Linux KDE Plasma Wayland | 主要实机，x86-64 / x86_64-unknown-linux-gnu | 当前执行环境只读查询：kernel 7.2.3-zen1-3-zen；systemd 261.2-1；glibc 2.44+r24+g16be1518495f-1；polkit 127-3；plasma-desktop 6.7.4-1；plasma-workspace 6.7.4-3；kwin 6.7.4-7。Wayland 是用户指定，未自行读取活动会话验证 | 原生 Arch 包、图形认证代理、root inhibitor 行为、Unicode/缩放、实际进 Windows |
+| 当前 Arch Linux KDE Plasma Wayland | 主要实机，x86-64 / x86_64-unknown-linux-gnu | 当前执行环境只读查询：kernel 7.2.3-zen1-3-zen；systemd 261.2-1；glibc 2.44+r24+g16be1518495f-1；polkit 127-3；plasma-desktop 6.7.4-1；plasma-workspace 6.7.4-3；kwin 6.7.4-7。Wayland 是用户指定，未自行读取活动会话验证。已观察到 KDE 认证对话框取消可呈现 pre-hello exit 127；该码保持中性，不能反推取消/认证失败/缺代理 | 原生 Arch 包、图形认证代理、root inhibitor 行为、Unicode/缩放、实际进 Windows |
 | Ubuntu 24.04 LTS | 稳定参考和 UEFI VM，x86-64，Wayland/X11 | 官方 noble 包基线 systemd 255、glibc 2.39；实际 VM 的 kernel、包修订、桌面、固件版本缺失 | .deb、systemd255 inhibitor、Wayland/X11、OVMF/UEFI VM 图形、双向切换；虚拟机不替代实机 |
 
 Arch 记录来源：2026-09-08 本工作环境运行 `cat /etc/os-release`、`uname -r`、`systemctl --version`、`pacman -Q glibc systemd polkit plasma-desktop plasma-workspace kwin rust cargo`；最后命令因 rust/cargo 不归 pacman 管理退出 1，其余包结果如上。不等于 Rust 不存在。Ubuntu 依据：[systemd 包](https://packages.ubuntu.com/noble/systemd)、[libc6 包](https://packages.ubuntu.com/noble/libc6)。不扩大为所有 systemd 发行版，不包含 ARM、传统 BIOS、共享单条多 OS 引导项。
