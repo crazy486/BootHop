@@ -488,7 +488,13 @@ fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
     else {
         panic!("mutation evidence must remain terminal")
     };
-    assert_eq!(*cause, Error::ResourceLimit);
+    assert_eq!(
+        *cause,
+        Error::PlatformIo {
+            operation: "write".into(),
+            raw_code: 32,
+        }
+    );
     assert_eq!(
         stages,
         [
@@ -500,6 +506,99 @@ fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
     assert_eq!(
         residual_assessment,
         ResidualAssessment::Observed(Some(BootId(7)))
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn oversized_configure_failure_preserves_bounded_terminal_cause() {
+    let error = Error::FlowFailure {
+        cause: Box::new(Error::StoreDurabilityUnknown { raw_code: 28 }),
+        stages: vec![Stage::TargetValidated],
+        residual_assessment: ResidualAssessment::NotChecked,
+        diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
+    };
+    let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
+    assert!(frame.len() + encode_hello().len() <= MAX_BYTES);
+    let Err(Error::FlowFailure {
+        cause,
+        stages,
+        residual_assessment,
+        diagnostics,
+    }) = decode_response(&frame).unwrap()
+    else {
+        panic!("oversized configure failure must remain a domain failure")
+    };
+    assert_eq!(*cause, Error::StoreDurabilityUnknown { raw_code: 28 });
+    assert_eq!(stages, [Stage::TargetValidated]);
+    assert_eq!(residual_assessment, ResidualAssessment::NotChecked);
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn oversized_failure_preserves_reboot_rejected_cause_without_residual_fabrication() {
+    let error = Error::FlowFailure {
+        cause: Box::new(Error::RebootRejected),
+        stages: vec![
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::RebootRejected,
+        ],
+        residual_assessment: ResidualAssessment::Observed(None),
+        diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
+    };
+    let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
+    let Err(Error::FlowFailure {
+        cause,
+        stages,
+        residual_assessment,
+        diagnostics,
+    }) = decode_response(&frame).unwrap()
+    else {
+        panic!("oversized reboot rejection must remain a domain failure")
+    };
+    assert_eq!(*cause, Error::RebootRejected);
+    assert_eq!(
+        stages,
+        [
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::RebootRejected
+        ]
+    );
+    assert_eq!(residual_assessment, ResidualAssessment::Observed(None));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn compaction_bounds_recursive_cause_and_preserves_nested_errno_evidence() {
+    let error = Error::FlowFailure {
+        cause: Box::new(Error::FlowFailure {
+            cause: Box::new(Error::StoreDurabilityUnknown { raw_code: 5 }),
+            stages: vec![Stage::TargetValidated],
+            residual_assessment: ResidualAssessment::NotChecked,
+            diagnostics: vec![],
+        }),
+        stages: vec![Stage::TargetValidated, Stage::BootNextVerified],
+        residual_assessment: ResidualAssessment::ReadFailed(Box::new(
+            Error::StoreDurabilityUnknown { raw_code: 28 },
+        )),
+        diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
+    };
+    let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
+    let Err(Error::FlowFailure {
+        cause,
+        residual_assessment,
+        diagnostics,
+        ..
+    }) = decode_response(&frame).unwrap()
+    else {
+        panic!("oversized nested failure must remain a domain failure")
+    };
+    assert_eq!(*cause, Error::ResourceLimit);
+    assert_eq!(
+        residual_assessment,
+        ResidualAssessment::ReadFailed(Box::new(Error::StoreDurabilityUnknown { raw_code: 28 }))
     );
     assert!(diagnostics.is_empty());
 }

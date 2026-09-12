@@ -100,7 +100,7 @@ validate_trusted_components() {
   for component in "${components[@]}"; do
     [[ -z "$component" || "$component" == "." ]] && continue
     current="$current/$component"
-    [[ -e "$current" && ! -L "$current" ]] || die "destination component is missing"
+    [[ -d "$current" && ! -L "$current" ]] || die "destination component is missing or not a directory"
     [[ $(stat -c '%u:%g' -- "$current") == 0:0 ]] || die "destination component is not root-owned"
     permissions=$(stat -c '%A' -- "$current")
     [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]] || die "destination component is group/other writable"
@@ -138,8 +138,7 @@ validate_secure_existing() {
   for component in "${components[@]}"; do
     [[ -z "$component" || "$component" == "." ]] && continue
     current="$current/$component"
-    [[ -e "$current" && ! -L "$current" ]] || die "package parent is missing or linked: $current"
-    [[ -d "$current" ]] || die "package parent is not a directory: $current"
+    [[ -d "$current" && ! -L "$current" ]] || die "package parent is missing, linked, or not a directory: $current"
     [[ $(stat -c '%u:%g' -- "$current") == 0:0 ]] || die "package parent is not root-owned: $current"
     permissions=$(stat -c '%A' -- "$current")
     [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]] || die "package parent is group/other writable: $current"
@@ -173,6 +172,24 @@ require_directory() {
   local path=$1
   assert_no_symlink_components "$path"
   [[ -d "$path" && ! -L "$path" ]] || die "directory is missing or linked: $path"
+  if (( ! test_staging )); then
+    validate_secure_existing "$path"
+  fi
+}
+
+validate_package_parent_chain() {
+  local path
+  for path in \
+    "$destdir/usr" \
+    "$destdir/usr/bin" \
+    "$destdir/usr/lib" \
+    "$destdir/usr/lib/boothop" \
+    "$destdir/usr/share" \
+    "$destdir/usr/share/applications" \
+    "$destdir/usr/share/polkit-1" \
+    "$destdir/usr/share/polkit-1/actions"; do
+    require_directory "$path"
+  done
 }
 
 validate_layout() {
@@ -239,6 +256,7 @@ copy_payload() {
   [[ ! -L "$desktop" && ! -L "$policy" ]] || die "package metadata destination is linked"
   install -m 644 "$(dirname "$0")/boothop.desktop" "$desktop"
   install -m 644 "$(dirname "$0")/org.boothop.helper.policy" "$policy"
+  validate_package_parent_chain
 }
 
 case "$action" in
@@ -252,14 +270,17 @@ case "$action" in
     ;;
   upgrade)
     validate_layout
+    validate_package_parent_chain
     copy_payload
     ;;
   inspect)
     validate_layout
+    validate_package_parent_chain
     [[ -f "$record" ]] && echo Present || echo Absent
     ;;
   uninstall)
     validate_layout
+    validate_package_parent_chain
     # Records and the persistent lock are deliberately retained. Only known
     # package-owned files are removed; unknown files are left for inspection.
     rm -f -- "$destdir/usr/bin/boothop-gui" \

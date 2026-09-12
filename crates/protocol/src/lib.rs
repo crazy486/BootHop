@@ -4,6 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 pub const MAX_BYTES: usize = 65_536;
 pub const PROTOCOL_VERSION: u32 = 1;
+const MAX_COMPACT_STAGES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
     Invalid,
@@ -519,14 +520,14 @@ pub fn budgeted_response(
                     encode_response(Ok(compact_report(report)))
                 }
                 Err(c::Error::FlowFailure {
-                    cause: _,
+                    cause,
                     stages,
                     residual_assessment,
                     ..
                 }) if !stages.is_empty() => encode_response(Err(c::Error::FlowFailure {
-                    cause: Box::new(c::Error::ResourceLimit),
-                    stages,
-                    residual_assessment,
+                    cause: Box::new(compact_cause(*cause)),
+                    stages: compact_stages(stages),
+                    residual_assessment: compact_residual_assessment(residual_assessment),
                     diagnostics: Vec::new(),
                 })),
                 _ => Err(ProtocolError::ResourceLimit),
@@ -539,6 +540,43 @@ pub fn budgeted_response(
             }
         }
     }
+}
+
+/// Keep the terminal domain classification when it is a bounded, trusted
+/// value. Recursive failures and free-form payloads are collapsed so the
+/// fallback itself cannot become another oversized response.
+fn compact_cause(error: c::Error) -> c::Error {
+    match error {
+        c::Error::PlatformIo {
+            operation,
+            raw_code,
+        } if matches!(
+            operation.as_str(),
+            "open" | "read" | "write" | "metadata" | "lock" | "fsync" | "rename" | "ipc" | "reboot"
+        ) =>
+        {
+            c::Error::PlatformIo {
+                operation,
+                raw_code,
+            }
+        }
+        c::Error::FlowFailure { .. } | c::Error::PlatformIo { .. } => c::Error::ResourceLimit,
+        other => other,
+    }
+}
+
+fn compact_residual_assessment(assessment: c::ResidualAssessment) -> c::ResidualAssessment {
+    match assessment {
+        c::ResidualAssessment::NotChecked => c::ResidualAssessment::NotChecked,
+        c::ResidualAssessment::Observed(boot_id) => c::ResidualAssessment::Observed(boot_id),
+        c::ResidualAssessment::ReadFailed(error) => {
+            c::ResidualAssessment::ReadFailed(Box::new(compact_cause(*error)))
+        }
+    }
+}
+
+fn compact_stages(stages: Vec<c::Stage>) -> Vec<c::Stage> {
+    stages.into_iter().take(MAX_COMPACT_STAGES).collect()
 }
 
 fn compact_report(report: c::Report) -> c::Report {

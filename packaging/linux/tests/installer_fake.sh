@@ -98,10 +98,54 @@ destination_security_checks_are_read_only() {
   [[ ! -e "$writable/var" ]] || fail "security check modified writable destination"
 }
 
+uninstall_rejects_symlinked_package_parents_before_removal() {
+  local dest="$ROOT/uninstall-symlink-usr" outside="$ROOT/uninstall-outside"
+  mkdir "$dest" "$outside"
+  "$INSTALLER" install --destdir "$dest" --payload "$INITIAL_PAYLOAD" --test-staging
+  mkdir -p "$outside/bin" "$outside/lib/boothop" "$outside/share/applications" \
+    "$outside/share/polkit-1/actions"
+  printf sentinel > "$outside/bin/boothop-gui"
+  printf sentinel > "$outside/lib/boothop/boothop-helper"
+  printf sentinel > "$outside/share/applications/org.boothop.desktop"
+  printf sentinel > "$outside/share/polkit-1/actions/org.boothop.helper.policy"
+  mv "$dest/usr" "$dest/usr-real"
+  ln -s "$outside" "$dest/usr"
+  if "$INSTALLER" uninstall --destdir "$dest" --test-staging >/dev/null 2>&1; then
+    fail "uninstall accepted a symlinked usr parent"
+  fi
+  [[ -e "$outside/bin/boothop-gui" ]] || fail "symlink target GUI was removed"
+  [[ -e "$outside/lib/boothop/boothop-helper" ]] || fail "symlink target helper was removed"
+  [[ -e "$outside/share/applications/org.boothop.desktop" ]] || fail "symlink target desktop was removed"
+  [[ -e "$outside/share/polkit-1/actions/org.boothop.helper.policy" ]] || fail "symlink target policy was removed"
+
+  local deep="$ROOT/uninstall-symlink-deep" deep_outside="$ROOT/uninstall-deep-outside"
+  mkdir "$deep" "$deep_outside"
+  "$INSTALLER" install --destdir "$deep" --payload "$INITIAL_PAYLOAD" --test-staging
+  mkdir -p "$deep_outside/boothop"
+  printf sentinel > "$deep_outside/boothop/boothop-helper"
+  mv "$deep/usr/lib" "$deep/usr/lib-real"
+  ln -s "$deep_outside" "$deep/usr/lib"
+  if "$INSTALLER" uninstall --destdir "$deep" --test-staging >/dev/null 2>&1; then
+    fail "uninstall accepted a symlinked deep package parent"
+  fi
+  [[ -e "$deep_outside/boothop/boothop-helper" ]] || fail "deep symlink target helper was removed"
+
+  local missing="$ROOT/uninstall-missing-parent"
+  mkdir "$missing"
+  "$INSTALLER" install --destdir "$missing" --payload "$INITIAL_PAYLOAD" --test-staging
+  rm "$missing/usr/lib/boothop/boothop-helper"
+  rmdir "$missing/usr/lib/boothop"
+  if "$INSTALLER" uninstall --destdir "$missing" --test-staging >/dev/null 2>&1; then
+    fail "uninstall accepted a missing package parent"
+  fi
+  [[ -f "$missing/var/lib/boothop/operation.lock" ]] || fail "lock was not retained after validation failure"
+}
+
 installer_precreates_layout_first_inspect_reports_missing_record
 upgrade_preserves_lock_inode
 parent_symlinks_are_rejected_without_touching_the_target
 payload_must_contain_two_regular_binaries
 test_staging_marker_cannot_be_used_as_install_mode
 destination_security_checks_are_read_only
-echo "installer fake tests: 6 passed"
+uninstall_rejects_symlinked_package_parents_before_removal
+echo "installer fake tests: 7 passed"
