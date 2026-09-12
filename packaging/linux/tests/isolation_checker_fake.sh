@@ -12,11 +12,16 @@ printf '%s\n' \
   'fn benign_fixture() {}' > "$ROOT/crates/fake/tests/evil.rs"
 printf '%s\n' \
   '#[cfg(test)]' \
-  'mod tests {' \
+  'mod first_tests {' \
   '    #[test]' \
   '    fn malicious_cfg_test() {' \
   '        let _ = SystemLinuxCalls::new();' \
   '    }' \
+  '}' \
+  '#[cfg(test)]' \
+  'mod second_tests {' \
+  '    #[test]' \
+  '    fn benign_cfg_test() {}' \
   '}' > "$ROOT/crates/fake/src/lib.rs"
 if "$ROOT/packaging/linux/check-isolation.sh" --skip-tree --root "$ROOT" >/dev/null 2>&1; then
   echo "isolation checker accepted malicious cfg(test) source" >&2

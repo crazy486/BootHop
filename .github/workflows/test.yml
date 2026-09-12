@@ -9,7 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml pins compiler 1.98.1; this action ref matches it.
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
       # These are the complete ordinary checks. They compile OS code but do
@@ -19,11 +20,11 @@ jobs:
       - name: Isolation checker adversarial fixture
         run: packaging/linux/tests/isolation_checker_fake.sh
       - name: Workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Fake package layout tests
         run: packaging/linux/tests/installer_fake.sh
       - name: Development package archive smoke test

@@ -36,19 +36,20 @@ if rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess:
   exit 1
 fi
 
-# A file can contain production code followed by a cfg(test) module. Extract
-# only the final cfg(test) section (the last marker is the module under test)
-# so production D-Bus types in the same source file are not misclassified.
+# By repository convention inline cfg(test) modules are at the end of a source
+# file. Start at the first inline marker and scan through EOF, covering every
+# test module (including earlier modules); path-only cfg(test) imports are not
+# inline modules. A marker without an inline module is rejected fail-closed.
 cfg_extract=$(mktemp "${TMPDIR:-/tmp}/boothop-cfg-audit.XXXXXX")
 cfg_code=$(mktemp "${TMPDIR:-/tmp}/boothop-cfg-code.XXXXXX")
 trap 'rm -f "$cfg_extract" "$cfg_code"' EXIT
 for file in "${cfg_test_files[@]}"; do
-  start=$(rg -n '#\[cfg\(test\)\]' "$file" | tail -n 1 | cut -d: -f1)
-  [[ -n "$start" ]] || continue
+  start=$(rg -n -U '#\[cfg\(test\)\][[:space:]]*(#\[path[^]]+\][[:space:]]*)?mod[[:space:]]+[A-Za-z_]+[[:space:]]*\{' "$file" | head -n 1 | cut -d: -f1)
+  [[ -n "$start" ]] || { echo "cfg(test) marker has no inline module: $file" >&2; exit 1; }
   sed -n "${start},\$p" "$file" >> "$cfg_extract"
 done
 grep -Ev '^[[:space:]]*//' "$cfg_extract" > "$cfg_code" || true
-if [[ -s "$cfg_code" ]] && rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess::system|production\s*\(|std::process::Command::new|/sys/firmware/efi|zbus::blocking::Connection' "$cfg_code"; then
+if [[ -s "$cfg_code" ]] && rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess::system|with_linux_operation|native_reboot\(|std::process::Command(::new|::spawn)|/sys/firmware/efi|/var/lib/boothop|/usr/lib/boothop|zbus::blocking::Connection|Connection::(system|session)|DBUS_SYSTEM_BUS_ADDRESS|/run/dbus|slint::run_event_loop|AppWindow::run' "$cfg_code"; then
   echo "cfg(test) sources must not construct production adapters or installed helpers" >&2
   exit 1
 fi

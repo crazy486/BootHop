@@ -1,7 +1,7 @@
 # Release readiness record
 
 Status: **DEVELOPMENT PACKAGE ONLY — NOT A RELEASE**. This record separates
-reproducible build facts from the still-missing signing, installation, GUI and
+local build facts from the still-missing signing, installation, GUI and
 real firmware evidence.
 
 ## Locked inputs
@@ -9,7 +9,7 @@ real firmware evidence.
 | Item | Value / status |
 |---|---|
 | BootHop version | `0.1.0` (workspace manifests) |
-| Rust toolchain | 1.98.1 stable candidate; exact CI pin and `Cargo.lock` review required |
+| Rust toolchain | Exact repository pin `1.98.1` (`rust-toolchain.toml`); CI action ref `dtolnay/rust-toolchain@1.98.1`; dependencies locked by `Cargo.lock` |
 | Slint / slint-build | 1.17.1 / 1.17.1; attribution review **not completed** |
 | Linux package | tarball build recipe exists; release artifact **not measured** |
 | Windows MSI | **Not implemented in 11L; not built** |
@@ -23,12 +23,16 @@ removes known package files but retains the protected record and
 
 ## Release checklist
 
-- [ ] Re-run `cargo test --workspace`, `cargo fmt --check`, and
-  `cargo clippy --workspace --all-targets -- -D warnings` in the task-local
+- [ ] Re-run `cargo test --workspace --locked`, `cargo fmt --check`, and
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` in the task-local
   toolchain, and archive complete output.
 - [ ] Build the Linux tarball in a clean staging directory; record archive
   SHA-256, compressed/uncompressed bytes, installed file list, and additional
   runtime dependencies. Do not call the package an installed-system result.
+- [ ] Keep the compiler pin (`rust-toolchain.toml`) distinct from the GitHub
+  Actions action reference: the former selects Rust 1.98.1, while the latter
+  selects the action implementation and is not a claim that runner OS or action
+  internals are reproducible.
 - [ ] Recheck all Slint attribution/license notices against the exact locked
   dependency tree and include them in release materials.
 - [ ] Publish a download page with a truthful development/acceptance badge;

@@ -69,6 +69,8 @@ assert_no_symlink_components() {
 
 assert_no_symlink_components "$destdir"
 [[ -d "$destdir" && ! -L "$destdir" ]] || die "destination must be an existing directory"
+canonical_destdir=$(realpath -e -- "$destdir") || die "destination cannot be canonicalized"
+[[ "$canonical_destdir" != "/" ]] || die "live root destination is not allowed"
 if (( test_staging )); then
   # This escape hatch is exclusively for unprivileged temporary fake tests.
   [[ ${BOOTHOP_TEST_STAGING:-} == 1 && $(id -u) -ne 0 ]] || die "test staging is not a package-install mode"

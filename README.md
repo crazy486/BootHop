@@ -24,9 +24,9 @@ cross-platform release and does not claim that a machine has booted another OS.
 Run from the repository with the task-local Cargo/Rustup toolchain configured:
 
 ```sh
-cargo test --workspace
+cargo test --workspace --locked
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 packaging/linux/check-isolation.sh
 packaging/linux/tests/installer_fake.sh
 ```

@@ -86,6 +86,9 @@ destination_security_checks_are_read_only() {
     if "$INSTALLER" check-destdir --destdir "$alias" --production >/dev/null 2>&1; then
       fail "live-root alias was accepted: $alias"
     fi
+    if "$INSTALLER" check-destdir --destdir "$alias" --test-staging >/dev/null 2>&1; then
+      fail "live-root alias was accepted in staging mode: $alias"
+    fi
   done
   mkdir "$writable"
   chmod 777 "$writable"

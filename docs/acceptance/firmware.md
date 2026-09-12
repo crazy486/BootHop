@@ -50,9 +50,9 @@ Linux), package checksum, and operator. Do not replace a missing value with
 The ordinary commands below are intentionally not this procedure:
 
 ```text
-cargo test --workspace
+cargo test --workspace --locked
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 packaging/linux/tests/installer_fake.sh
 ```
 
