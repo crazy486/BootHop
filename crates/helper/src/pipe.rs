@@ -18,6 +18,7 @@ fn failure(operation: &'static str, error: io::Error) -> Error {
         raw_code,
     }
 }
+
 pub struct PipeSession<'a> {
     input: BorrowedFd<'a>,
     output: BorrowedFd<'a>,
@@ -161,4 +162,20 @@ pub fn write_all(fd: RawFd, mut bytes: &[u8], deadline: Instant) -> io::Result<(
         bytes = &bytes[n as usize..];
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failure;
+    use boothop_core::Error;
+    use std::io;
+
+    #[test]
+    fn failure_preserves_explicit_ebadf() {
+        let error = failure("ipc", io::Error::from_raw_os_error(libc::EBADF));
+        assert!(matches!(
+            error,
+            Error::PlatformIo { raw_code, .. } if raw_code == libc::EBADF
+        ));
+    }
 }

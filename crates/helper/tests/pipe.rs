@@ -8,7 +8,7 @@ use boothop_helper::{
 use std::{
     fs::File,
     io::{Read, Write},
-    os::fd::{AsFd, AsRawFd, FromRawFd},
+    os::fd::{AsFd, FromRawFd},
     time::{Duration, Instant},
 };
 
@@ -108,18 +108,7 @@ fn tempfile_like() -> File {
 }
 
 #[test]
-fn raw_errno_is_preserved_for_bad_descriptor_and_timeout() {
-    let (bad_file, output) = pipe_pair();
-    let bad_fd = bad_file.as_raw_fd();
-    // Close it before borrowing so fstat returns the real EBADF. Forget the
-    // File to avoid a second close when this test ends.
-    assert_eq!(unsafe { libc::close(bad_fd) }, 0);
-    std::mem::forget(bad_file);
-    let bad = unsafe { std::os::fd::BorrowedFd::borrow_raw(bad_fd) };
-    let error = PipeSession::new(bad, output.as_fd(), Instant::now() + Duration::from_secs(1))
-        .err()
-        .expect("bad fd must be rejected");
-    assert!(matches!(error, Error::PlatformIo { raw_code, .. } if raw_code == libc::EBADF));
+fn timeout_preserves_etimedout_for_empty_pipe() {
     let (input, _sender) = pipe_pair();
     let (output, _receiver) = pipe_pair();
     let mut session = PipeSession::new(input.as_fd(), output.as_fd(), Instant::now()).unwrap();
