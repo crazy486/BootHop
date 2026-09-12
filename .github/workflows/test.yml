@@ -1,0 +1,26 @@
+name: Linux checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # These are the complete ordinary checks. They compile OS code but do
+      # not run a desktop event loop, installed helper, firmware, or reboot.
+      - name: Static dependency and fake-fixture isolation
+        run: packaging/linux/check-isolation.sh
+      - name: Workspace tests
+        run: cargo test --workspace
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Fake package layout tests
+        run: packaging/linux/tests/installer_fake.sh

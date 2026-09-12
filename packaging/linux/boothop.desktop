@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BootHop
+Comment=Select a registered boot target
+Exec=/usr/bin/boothop-gui
+Icon=boot-hop
+Terminal=false
+Categories=System;
+StartupNotify=true
