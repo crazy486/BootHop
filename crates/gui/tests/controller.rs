@@ -554,6 +554,31 @@ fn prehello_127_overrides_unsupported_record_recovery_status_without_unlocking()
     assert!(c.diagnostic().contains("请求尚未发送"));
     assert!(cache.writes.lock().unwrap().is_empty());
 }
+
+#[test]
+fn invalid_configure_does_not_clear_prehello_127_notice_or_schedule_work() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 }),
+    );
+    let status = c.status();
+    let diagnostic = c.diagnostic().to_owned();
+    assert_eq!(status, "授权未完成或 helper 启动失败；请求尚未发送。");
+    assert!(diagnostic.contains("127"));
+    assert!(diagnostic.contains("请求尚未发送"));
+
+    c.handle(UiIntent::Configure(BootId(999), Os::Windows));
+
+    assert_eq!(c.state(), &UiState::Failed);
+    assert_eq!(c.status(), status);
+    assert_eq!(c.diagnostic(), diagnostic);
+    assert!(e.0.lock().unwrap().is_empty());
+    assert!(cache.writes.lock().unwrap().is_empty());
+}
 #[test]
 fn inspect_record_is_display_only_and_does_not_update_cache() {
     let (mut c, h, e, cache) = setup(FakeCache::default());

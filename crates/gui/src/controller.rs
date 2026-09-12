@@ -217,7 +217,6 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         if self.state == UiState::Busy || (self.inspect_only() && intent != UiIntent::Inspect) {
             return;
         }
-        self.failure_notice = None;
         let request = match intent {
             UiIntent::Inspect => Request::Inspect,
             UiIntent::Switch if self.can_switch() => Request::Switch { os: Os::Windows },
@@ -233,6 +232,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             }
             UiIntent::Configure(_, _) => return,
         };
+        self.failure_notice = None;
         // Keep unresolved evidence across failed inspection or attempted reconfiguration.
         if (intent == UiIntent::Inspect && self.inspect_only())
             || self.state == UiState::TargetChanged
