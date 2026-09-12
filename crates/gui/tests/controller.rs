@@ -502,6 +502,58 @@ fn authorization_launch_exit_127_is_neutral_and_explicitly_not_sent() {
     assert!(cache.writes.lock().unwrap().is_empty());
     assert!(e.0.lock().unwrap().is_empty());
 }
+
+#[test]
+fn prehello_127_overrides_target_changed_recovery_status_without_unlocking() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Switch);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::IdentityMismatch)),
+    );
+    assert_eq!(c.state(), &UiState::TargetChanged);
+
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 }),
+    );
+    assert_eq!(c.state(), &UiState::TargetChanged);
+    assert_eq!(c.status(), "授权未完成或 helper 启动失败；请求尚未发送。");
+    assert!(c.diagnostic().contains("127"));
+    assert!(c.diagnostic().contains("请求尚未发送"));
+    assert!(cache.writes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn prehello_127_overrides_unsupported_record_recovery_status_without_unlocking() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::UnsupportedIdentityComponent)),
+    );
+    assert_eq!(c.state(), &UiState::UnsupportedRecord);
+
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 }),
+    );
+    assert_eq!(c.state(), &UiState::UnsupportedRecord);
+    assert_eq!(c.status(), "授权未完成或 helper 启动失败；请求尚未发送。");
+    assert!(c.diagnostic().contains("127"));
+    assert!(c.diagnostic().contains("请求尚未发送"));
+    assert!(cache.writes.lock().unwrap().is_empty());
+}
 #[test]
 fn inspect_record_is_display_only_and_does_not_update_cache() {
     let (mut c, h, e, cache) = setup(FakeCache::default());

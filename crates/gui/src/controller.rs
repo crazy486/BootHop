@@ -53,6 +53,19 @@ pub enum UiIntent {
     Configure(BootId, Os),
     Switch,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FailureNotice {
+    PreHelloAuthorizationOrLaunch { raw_code: i32 },
+}
+impl FailureNotice {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::PreHelloAuthorizationOrLaunch { .. } => {
+                "授权未完成或 helper 启动失败；请求尚未发送。"
+            }
+        }
+    }
+}
 type Completion = (Request, Result<Report, ClientError>);
 pub struct Controller<H, E, C> {
     helper: Arc<Mutex<H>>,
@@ -67,6 +80,7 @@ pub struct Controller<H, E, C> {
     confirmed: bool,
     target: Option<CachedTarget>,
     diagnostic: String,
+    failure_notice: Option<FailureNotice>,
     cache_warning: Option<CacheError>,
     inspected: bool,
     recovery_state: Option<UiState>,
@@ -92,6 +106,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             confirmed: false,
             target,
             diagnostic: String::new(),
+            failure_notice: None,
             cache_warning: warning,
             inspected: false,
             recovery_state: None,
@@ -169,6 +184,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
     }
     pub fn status(&self) -> &'static str {
+        if let Some(notice) = &self.failure_notice {
+            return notice.status();
+        }
         match self.state {
             UiState::Unconfigured if self.inspected => {
                 "检查完成：未发现登记记录。请选择并确认 Windows；未验证启动链。"
@@ -181,13 +199,6 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             UiState::TargetChanged => "目标启动配置已变化，请重新选择并确认目标。",
             UiState::Failed if self.cache_warning.is_some() => {
                 "本地展示缓存不可用；尚未检查受保护配置。"
-            }
-            UiState::Failed
-                if self
-                    .diagnostic
-                    .starts_with("AuthorizationOrLaunchFailed: raw exit 127") =>
-            {
-                "授权未完成或 helper 启动失败；请求尚未发送。"
             }
             UiState::Failed => "操作失败。请查看诊断；不会自动重试或回滚。",
             UiState::RebootRequested => "重启请求已被系统接受",
@@ -206,6 +217,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         if self.state == UiState::Busy || (self.inspect_only() && intent != UiIntent::Inspect) {
             return;
         }
+        self.failure_notice = None;
         let request = match intent {
             UiIntent::Inspect => Request::Inspect,
             UiIntent::Switch if self.can_switch() => Request::Switch { os: Os::Windows },
@@ -315,6 +327,14 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
     }
     fn fail(&mut self, error: ClientError) {
+        self.failure_notice = match &error {
+            ClientError::AuthorizationOrLaunchFailed { raw_code } => {
+                Some(FailureNotice::PreHelloAuthorizationOrLaunch {
+                    raw_code: *raw_code,
+                })
+            }
+            _ => None,
+        };
         if self.state == UiState::TargetChanged {
             self.latch_recovery_state(UiState::TargetChanged);
         }
