@@ -2,7 +2,7 @@ use boothop_core::{Error, Request};
 use boothop_gui::helper_client::{
     Boundary, ClientError, Event, HelperClient, SpawnSpec, TransportError,
 };
-use boothop_helper::protocol::encode_hello;
+use boothop_protocol::encode_hello;
 use std::{collections::VecDeque, time::Duration};
 struct Fake {
     events: VecDeque<Result<Event, TransportError>>,
@@ -131,10 +131,9 @@ fn hello_then_timeout_is_unknown_without_retry() {
 }
 #[test]
 fn valid_domain_error_is_preserved() {
-    let response = boothop_helper::protocol::encode_response(Err(Error::StoreDurabilityUnknown {
-        raw_code: 5,
-    }))
-    .unwrap();
+    let response =
+        boothop_protocol::encode_response(Err(Error::StoreDurabilityUnknown { raw_code: 5 }))
+            .unwrap();
     let mut client = HelperClient::new(Fake::new(vec![
         Ok(Event::Stdout(encode_hello())),
         Ok(Event::Stdout(response)),
@@ -180,7 +179,7 @@ fn all_postsend_failure_shapes_remain_unknown_and_never_retry() {
         vec![Ok(Event::Stdout(vec![0; 4])), Ok(Event::Exit(0))],
         vec![Ok(Event::Stdout(65533_u32.to_le_bytes().to_vec()))],
         vec![Ok(Event::Stdout(
-            boothop_helper::protocol::encode_response(Err(Error::Busy))
+            boothop_protocol::encode_response(Err(Error::Busy))
                 .unwrap()
                 .repeat(2),
         ))],
@@ -202,7 +201,7 @@ fn all_postsend_failure_shapes_remain_unknown_and_never_retry() {
 fn fragmented_frames_and_stderr_share_one_exact_budget() {
     let hello = encode_hello();
     let result = Err(Error::IdentityMismatch);
-    let response = boothop_helper::protocol::encode_response(result).unwrap();
+    let response = boothop_protocol::encode_response(result).unwrap();
     for excess in [0, 1] {
         let stderr = vec![0; 65536 - hello.len() - response.len() + excess];
         let mut client = HelperClient::new(Fake::new(vec![
@@ -255,7 +254,7 @@ fn success_returns_only_the_received_stages() {
         ],
         diagnostics: vec![],
     };
-    let response = boothop_helper::protocol::encode_response(Ok(report.clone())).unwrap();
+    let response = boothop_protocol::encode_response(Ok(report.clone())).unwrap();
     let mut client = HelperClient::new(Fake::new(vec![
         Ok(Event::Stdout(encode_hello())),
         Ok(Event::Stdout(response)),

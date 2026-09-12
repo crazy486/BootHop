@@ -25,6 +25,11 @@ if (( ! skip_tree )); then
       exit 1
     fi
   done
+  gui_tree=$(cargo tree -p boothop-gui --locked)
+  if grep -Eiq '(^|[[:space:]])(boothop-helper|boothop-platform)([[:space:]]|$)' <<<"$gui_tree"; then
+    echo "boothop-gui must depend only on boothop-protocol, not helper/platform" >&2
+    exit 1
+  fi
 fi
 
 audit_manifest="${BOOTHOP_ISOLATION_AUDIT_MANIFEST:-}"
@@ -54,5 +59,10 @@ paths = [node.text for node in actions[0].findall("annotate")
          if node.get("key") == "org.freedesktop.policykit.exec.path"]
 if paths != ["/usr/lib/boothop/boothop-helper"]:
     raise SystemExit("policy executable path is not the fixed helper")
+for defaults in actions[0].find("defaults"):
+    if defaults.text and "keep" in defaults.text:
+        raise SystemExit("policy must require fresh admin authentication")
+    if defaults.tag in {"allow_any", "allow_inactive", "allow_active"} and defaults.text != "auth_admin":
+        raise SystemExit("policy authorization must be auth_admin without keep")
 PY
 echo "Linux dependency and fake-fixture isolation checks passed"

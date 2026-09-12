@@ -445,13 +445,63 @@ fn oversized_report_becomes_complete_resource_limit_within_total_budget() {
     );
     let bytes = budgeted_response(Ok(r), encode_hello().len()).unwrap();
     assert!(bytes.len() + encode_hello().len() <= 65536);
-    assert_eq!(decode_response(&bytes), Ok(Err(Error::ResourceLimit)));
+    let compact = decode_response(&bytes).unwrap().unwrap();
+    assert_eq!(compact.stages, report().stages);
+    assert_eq!(compact.diagnostics, []);
+    assert!(compact.candidates[0].description_utf16.is_empty());
     assert!(budgeted_response(Err(Error::Busy), 65536).is_err());
     let normal = encode_response(Ok(report())).unwrap();
+    let bounded = budgeted_response(Ok(report()), 65536 - normal.len() + 1).unwrap();
+    assert!(matches!(decode_response(&bounded), Ok(Ok(_))));
+    let mut inspect = report();
+    inspect.stages.clear();
+    inspect.candidates[0].description_utf16 = vec![65535; 65536];
     assert_eq!(
-        decode_response(&budgeted_response(Ok(report()), 65536 - normal.len() + 1).unwrap()),
+        decode_response(&budgeted_response(Ok(inspect), encode_hello().len()).unwrap()),
         Ok(Err(Error::ResourceLimit))
     );
+}
+
+#[test]
+fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
+    let error = Error::FlowFailure {
+        cause: Box::new(Error::PlatformIo {
+            operation: "write".into(),
+            raw_code: 32,
+        }),
+        stages: vec![
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::ResidualPossible,
+        ],
+        residual_assessment: ResidualAssessment::Observed(Some(BootId(7))),
+        diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
+    };
+    let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
+    assert!(frame.len() + encode_hello().len() <= MAX_BYTES);
+    let Err(Error::FlowFailure {
+        cause,
+        stages,
+        residual_assessment,
+        diagnostics,
+    }) = decode_response(&frame).unwrap()
+    else {
+        panic!("mutation evidence must remain terminal")
+    };
+    assert_eq!(*cause, Error::ResourceLimit);
+    assert_eq!(
+        stages,
+        [
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::ResidualPossible
+        ]
+    );
+    assert_eq!(
+        residual_assessment,
+        ResidualAssessment::Observed(Some(BootId(7)))
+    );
+    assert!(diagnostics.is_empty());
 }
 
 #[test]

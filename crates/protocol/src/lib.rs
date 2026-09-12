@@ -506,15 +506,63 @@ pub fn budgeted_response(
     result: Result<c::Report, c::Error>,
     used: usize,
 ) -> Result<Vec<u8>, ProtocolError> {
-    match encode_response(result) {
+    match encode_response(result.clone()) {
         Ok(frame) if frame.len() <= MAX_BYTES.saturating_sub(used) => Ok(frame),
         _ => {
-            let frame = encode_response(Err(c::Error::ResourceLimit))?;
+            // Once a mutation stage exists, replacing the result with a plain
+            // ResourceLimit would erase whether BootNext/reboot was attempted.
+            // Keep a bounded terminal witness instead. Empty-stage reports are
+            // pre-mutation inspection results and may safely use the generic
+            // limit response.
+            let compact = match result {
+                Ok(report) if !report.stages.is_empty() => {
+                    encode_response(Ok(compact_report(report)))
+                }
+                Err(c::Error::FlowFailure {
+                    cause: _,
+                    stages,
+                    residual_assessment,
+                    ..
+                }) if !stages.is_empty() => encode_response(Err(c::Error::FlowFailure {
+                    cause: Box::new(c::Error::ResourceLimit),
+                    stages,
+                    residual_assessment,
+                    diagnostics: Vec::new(),
+                })),
+                _ => Err(ProtocolError::ResourceLimit),
+            };
+            let frame = compact.or_else(|_| encode_response(Err(c::Error::ResourceLimit)))?;
             if frame.len() <= MAX_BYTES.saturating_sub(used) {
                 Ok(frame)
             } else {
                 Err(ProtocolError::ResourceLimit)
             }
         }
+    }
+}
+
+fn compact_report(report: c::Report) -> c::Report {
+    let target = match report.record {
+        c::RecordDiagnostic::Ready { boot_id, .. } => Some(boot_id),
+        c::RecordDiagnostic::Missing => None,
+    };
+    let candidates = target
+        .and_then(|boot_id| {
+            report
+                .candidates
+                .into_iter()
+                .find(|candidate| candidate.boot_id == boot_id)
+        })
+        .map(|mut candidate| {
+            candidate.description_utf16.clear();
+            candidate
+        })
+        .into_iter()
+        .collect();
+    c::Report {
+        candidates,
+        record: report.record,
+        stages: report.stages,
+        diagnostics: Vec::new(),
     }
 }

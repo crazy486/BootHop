@@ -7,10 +7,15 @@ use std::{
     time::Instant,
 };
 
-fn failure(_: io::Error) -> Error {
+fn failure(operation: &'static str, error: io::Error) -> Error {
+    let raw_code = error.raw_os_error().unwrap_or_else(|| match error.kind() {
+        io::ErrorKind::TimedOut => libc::ETIMEDOUT,
+        io::ErrorKind::WriteZero => libc::EPIPE,
+        _ => libc::EIO,
+    });
     Error::PlatformIo {
-        operation: "ipc".into(),
-        raw_code: 5,
+        operation: operation.into(),
+        raw_code,
     }
 }
 pub struct PipeSession<'a> {
@@ -24,8 +29,10 @@ impl<'a> PipeSession<'a> {
         output: BorrowedFd<'a>,
         deadline: Instant,
     ) -> Result<Self, Error> {
-        nonblocking(input.as_raw_fd()).map_err(failure)?;
-        nonblocking(output.as_raw_fd()).map_err(failure)?;
+        validate_pipe(input.as_raw_fd()).map_err(|e| failure("ipc", e))?;
+        validate_pipe(output.as_raw_fd()).map_err(|e| failure("ipc", e))?;
+        nonblocking(input.as_raw_fd()).map_err(|e| failure("ipc", e))?;
+        nonblocking(output.as_raw_fd()).map_err(|e| failure("ipc", e))?;
         Ok(Self {
             input,
             output,
@@ -45,7 +52,7 @@ impl SessionIo for PipeSession<'_> {
                 }],
                 self.deadline,
             )
-            .map_err(failure)?;
+            .map_err(|e| failure("ipc", e))?;
             let mut buf = [0; 4096];
             match read(self.input.as_raw_fd(), &mut buf) {
                 Ok(0) => return Ok(out),
@@ -66,13 +73,24 @@ impl SessionIo for PipeSession<'_> {
                         e.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) => {}
-                Err(e) => return Err(failure(e)),
+                Err(e) => return Err(failure("ipc", e)),
             }
         }
     }
     fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        write_all(self.output.as_raw_fd(), bytes, self.deadline).map_err(failure)
+        write_all(self.output.as_raw_fd(), bytes, self.deadline).map_err(|e| failure("ipc", e))
     }
+}
+fn validate_pipe(fd: RawFd) -> io::Result<()> {
+    // SAFETY: fstat writes one stat record for this borrowed descriptor.
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+        return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+    }
+    Ok(())
 }
 
 pub fn nonblocking(fd: RawFd) -> io::Result<()> {
@@ -87,7 +105,7 @@ pub fn wait(fds: &mut [libc::pollfd], deadline: Instant) -> io::Result<()> {
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .ok_or(io::ErrorKind::TimedOut)?;
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ETIMEDOUT))?;
         let ms = remaining
             .as_millis()
             .saturating_add(1)
@@ -98,7 +116,7 @@ pub fn wait(fds: &mut [libc::pollfd], deadline: Instant) -> io::Result<()> {
             return Ok(());
         }
         if result == 0 {
-            return Err(io::ErrorKind::TimedOut.into());
+            return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
@@ -138,7 +156,7 @@ pub fn write_all(fd: RawFd, mut bytes: &[u8], deadline: Instant) -> io::Result<(
             return Err(e);
         }
         if n == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
+            return Err(io::Error::from_raw_os_error(libc::EPIPE));
         }
         bytes = &bytes[n as usize..];
     }

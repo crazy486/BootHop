@@ -8,7 +8,9 @@ set -euo pipefail
   exit 64
 }
 out=$1
-[[ "$out" != "/" && -n "$out" ]] || { echo "refusing live root" >&2; exit 2; }
+[[ -n "$out" ]] || { echo "refusing empty output" >&2; exit 2; }
+canonical_out=$(realpath -m -- "$out") || { echo "cannot canonicalize output" >&2; exit 2; }
+[[ "$canonical_out" != "/" ]] || { echo "refusing live root" >&2; exit 2; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$out"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/boothop-package-stage.XXXXXX")

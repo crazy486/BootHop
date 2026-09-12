@@ -489,7 +489,7 @@ name = "boothop-gui"
 version = "0.1.0"
 dependencies = [
  "boothop-core",
- "boothop-helper",
+ "boothop-protocol",
  "libc",
  "serde",
  "serde_json",
@@ -503,8 +503,8 @@ version = "0.1.0"
 dependencies = [
  "boothop-core",
  "boothop-platform",
+ "boothop-protocol",
  "libc",
- "serde",
  "serde_json",
 ]
 
@@ -524,6 +524,15 @@ dependencies = [
  "roxmltree",
  "rustix 1.1.4",
  "zbus",
+]
+
+[[package]]
+name = "boothop-protocol"
+version = "0.1.0"
+dependencies = [
+ "boothop-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -445,6 +445,18 @@ fn root_cause(mut error: &Error) -> &Error {
     error
 }
 fn domain_state(error: &Error) -> UiState {
+    if let Error::FlowFailure { stages, .. } = error {
+        // A malformed/oversize terminal response can still carry trusted
+        // mutation evidence. Never expose it as an ordinary retryable
+        // failure; switching stays closed until an explicit inspection.
+        if stages
+            .iter()
+            .any(|stage| !matches!(stage, Stage::TargetValidated))
+            && !matches!(root_cause(error), Error::StoreDurabilityUnknown { .. })
+        {
+            return UiState::UnknownResult;
+        }
+    }
     match root_cause(error) {
         Error::IdentityMismatch | Error::TargetMissing => UiState::TargetChanged,
         Error::UnsupportedRecordVersion { .. } | Error::UnsupportedIdentityComponent => {

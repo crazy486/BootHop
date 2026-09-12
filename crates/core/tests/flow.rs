@@ -434,14 +434,14 @@ fn explicit_reconfirm_saves_new_baseline() {
 }
 
 #[test]
-fn configure_failure_preserves_stages_and_store_durability_unknown() {
+fn configure_failure_preserves_store_durability_without_firmware_residual() {
     let cause = Error::StoreDurabilityUnknown { raw_code: 5 };
     let mut p = FakePlatform::missing();
     p.failure = Some((3, cause.clone()));
     assert_failure(
         execute(requests()[1], Os::Linux, &mut p).unwrap_err(),
         cause,
-        &[Stage::TargetValidated, Stage::ResidualPossible],
+        &[Stage::TargetValidated],
         ResidualAssessment::NotChecked,
     );
     assert_eq!(
@@ -750,12 +750,12 @@ fn every_inspect_and_configure_call_failure_stops_and_retains_raw_code() {
             if index < 3 {
                 assert_eq!(error, cause);
             } else {
-                assert_failure(
-                    error,
-                    cause,
-                    &[Stage::TargetValidated, Stage::ResidualPossible],
-                    ResidualAssessment::NotChecked,
-                );
+                let stages = if matches!(request, Request::Configure { .. }) {
+                    &[Stage::TargetValidated][..]
+                } else {
+                    &[Stage::TargetValidated, Stage::ResidualPossible][..]
+                };
+                assert_failure(error, cause, stages, ResidualAssessment::NotChecked);
             }
             assert_eq!(p.events, events[..=index]);
         }

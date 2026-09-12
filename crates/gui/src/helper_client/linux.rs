@@ -1,12 +1,80 @@
 //! Explicit production process boundary. Construction alone has no OS side effects.
 use super::{Boundary, Event, HelperClient, SpawnSpec, TransportError};
-use boothop_helper::pipe;
 use std::{
     io,
     os::fd::AsRawFd,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+mod pipe {
+    use std::{io, os::fd::RawFd, time::Instant};
+    pub fn nonblocking(fd: RawFd) -> io::Result<()> {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    pub fn wait(fds: &mut [libc::pollfd], deadline: Instant) -> io::Result<()> {
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::ETIMEDOUT))?;
+            let ms = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+            if result > 0 {
+                return Ok(());
+            }
+            if result == 0 {
+                return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    pub fn read(fd: RawFd, bytes: &mut [u8]) -> io::Result<usize> {
+        let result = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result as usize)
+        }
+    }
+    pub fn write_all(fd: RawFd, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+        while !bytes.is_empty() {
+            wait(
+                &mut [libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                }],
+                deadline,
+            )?;
+            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if n == 0 {
+                return Err(io::Error::from_raw_os_error(libc::EPIPE));
+            }
+            bytes = &bytes[n as usize..];
+        }
+        Ok(())
+    }
+}
 
 pub struct SystemProcess {
     epoch: Instant,

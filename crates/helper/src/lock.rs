@@ -179,7 +179,7 @@ mod tests {
             panic!("flow stage context missing")
         };
         assert_eq!(*cause, Error::StoreDurabilityUnknown { raw_code: 5 });
-        assert_eq!(stages, [Stage::TargetValidated, Stage::ResidualPossible]);
+        assert_eq!(stages, [Stage::TargetValidated]);
         assert_eq!(
             boothop_core::decode_record(&fs.record().unwrap()),
             Ok(support::target())

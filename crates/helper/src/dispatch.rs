@@ -1,6 +1,6 @@
 //! One-shot trusted dispatch. Transport input is intent only.
-use crate::protocol;
 use boothop_core::{Error, Os, Platform, Report, Request};
+use boothop_protocol as protocol;
 
 pub type SendResult<'a> = dyn FnMut(Result<Report, Error>) -> Result<(), Error> + 'a;
 /// Implementations enforce a single 30s deadline across receive and send.

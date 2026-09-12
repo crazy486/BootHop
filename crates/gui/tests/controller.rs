@@ -134,15 +134,10 @@ fn select(c: &mut TestController) {
 fn nested(error: Error) -> Error {
     Error::FlowFailure {
         cause: Box::new(error),
-        stages: vec![
-            Stage::TargetValidated,
-            Stage::BootNextVerified,
-            Stage::ResidualPossible,
-        ],
-        residual_assessment: ResidualAssessment::ReadFailed(Box::new(Error::PlatformIo {
-            operation: "read".into(),
-            raw_code: 5,
-        })),
+        // This fixture models a pre-mutation validation failure. Mutation
+        // evidence is covered separately by the accepted/unknown tests.
+        stages: vec![Stage::TargetValidated],
+        residual_assessment: ResidualAssessment::NotChecked,
         diagnostics: vec![],
     }
 }
@@ -421,7 +416,7 @@ fn rejected_report_or_flow_failure_never_claims_reboot_accepted() {
         if domain_failure {
             assert_eq!(c.state(), &UiState::Failed);
             assert!(c.diagnostic().contains("RebootRejected"));
-            assert!(c.diagnostic().contains("可能残留"));
+            assert!(!c.diagnostic().contains("已被系统接受"));
         } else {
             assert_eq!(c.state(), &UiState::UnknownResult);
             assert_eq!(c.diagnostic(), "UnknownAfterSend: Protocol");
@@ -559,7 +554,6 @@ fn public_diagnostics_are_bounded_and_redact_untrusted_operation_strings() {
     assert!(c.diagnostic().len() <= 4096);
     assert!(!c.diagnostic().contains("secret"));
     assert!(c.diagnostic().contains("42"));
-    assert!(c.diagnostic().contains("5"));
 }
 #[test]
 fn completion_notifies_but_only_poll_mutates_ui_state() {

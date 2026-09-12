@@ -94,7 +94,10 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
             report.stages.push(Stage::TargetValidated);
             platform
                 .save_record(&target)
-                .map_err(|error| failure(error, &report, true))?;
+                // A record durability failure is a store outcome only. No
+                // firmware mutation has happened, so do not claim a possible
+                // BootNext residual here.
+                .map_err(|error| failure(error, &report, false))?;
             report.record = RecordDiagnostic::Ready { boot_id, os };
             Ok(report)
         }

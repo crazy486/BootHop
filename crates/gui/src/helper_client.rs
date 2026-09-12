@@ -1,5 +1,5 @@
 use boothop_core::{Error, Report, Request};
-use boothop_helper::protocol::{self, MAX_BYTES};
+use boothop_protocol::{self as protocol, MAX_BYTES};
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 pub mod linux;

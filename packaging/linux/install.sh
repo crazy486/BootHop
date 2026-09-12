@@ -126,6 +126,26 @@ set_root_owner() {
   chown root:root "$1" || die "cannot set root ownership on $1"
 }
 
+validate_secure_existing() {
+  local supplied=$1 absolute component current permissions
+  case "$supplied" in
+    /*) absolute=$supplied ;;
+    *) absolute="$PWD/$supplied" ;;
+  esac
+  current=/
+  local -a components
+  IFS=/ read -ra components <<< "${absolute#/}"
+  for component in "${components[@]}"; do
+    [[ -z "$component" || "$component" == "." ]] && continue
+    current="$current/$component"
+    [[ -e "$current" && ! -L "$current" ]] || die "package parent is missing or linked: $current"
+    [[ -d "$current" ]] || die "package parent is not a directory: $current"
+    [[ $(stat -c '%u:%g' -- "$current") == 0:0 ]] || die "package parent is not root-owned: $current"
+    permissions=$(stat -c '%A' -- "$current")
+    [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]] || die "package parent is group/other writable: $current"
+  done
+}
+
 mode_is() {
   local path=$1 expected=$2
   [[ -e "$path" && ! -L "$path" ]] || die "missing or linked path: $path"
@@ -140,6 +160,12 @@ ensure_directory() {
   else
     mkdir "$path" || die "cannot create directory: $path"
     chmod "$mode" "$path" || die "cannot set directory mode: $path"
+    set_root_owner "$path"
+  fi
+  if (( ! test_staging )); then
+    # Check every ancestor immediately before this directory is used, not
+    # merely DESTDIR and the eventual protected state directory.
+    validate_secure_existing "$path"
   fi
 }
 
