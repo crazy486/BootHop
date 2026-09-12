@@ -996,6 +996,134 @@ fn prior_identity_change_is_not_cleared_by_inspect_display_only_evidence() {
     assert!(!c.can_switch());
 }
 
+fn supported_same_id_inspect() -> Report {
+    Report {
+        record: RecordDiagnostic::Ready {
+            boot_id: BootId(7),
+            os: Os::Windows,
+        },
+        ..report()
+    }
+}
+
+#[test]
+fn changed_target_latch_survives_unknown_configure_then_supported_inspect() {
+    let (mut c, h, e, _) = setup(FakeCache::default());
+    c.handle(UiIntent::Switch);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::IdentityMismatch)),
+    );
+    assert_eq!(c.state(), &UiState::TargetChanged);
+
+    inspect(&mut c, &h, &e, supported_same_id_inspect());
+    select(&mut c);
+    c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+    );
+    assert_eq!(c.state(), &UiState::UnknownResult);
+    assert!(c.diagnostic().contains("UnknownAfterSend"));
+
+    inspect(&mut c, &h, &e, supported_same_id_inspect());
+    assert_eq!(c.state(), &UiState::TargetChanged);
+    assert!(!c.can_switch());
+    assert!(c.diagnostic().contains("UnknownAfterSend"));
+}
+
+#[test]
+fn changed_target_latch_survives_unknown_inspect_then_supported_inspect() {
+    let (mut c, h, e, _) = setup(FakeCache::default());
+    c.handle(UiIntent::Switch);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::IdentityMismatch)),
+    );
+    assert_eq!(c.state(), &UiState::TargetChanged);
+
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+    );
+    assert_eq!(c.state(), &UiState::UnknownResult);
+    assert!(c.diagnostic().contains("UnknownAfterSend"));
+
+    inspect(&mut c, &h, &e, supported_same_id_inspect());
+    assert_eq!(c.state(), &UiState::TargetChanged);
+    assert!(!c.can_switch());
+    assert!(c.diagnostic().contains("UnknownAfterSend"));
+}
+
+#[test]
+fn changed_target_latch_preserves_unknown_or_failure_diagnostic() {
+    for (error, reason) in [
+        (
+            ClientError::UnknownAfterSend(TransportError::Timeout),
+            "UnknownAfterSend",
+        ),
+        (ClientError::Domain(Error::CorruptRecord), "CorruptRecord"),
+    ] {
+        let (mut c, h, e, _) = setup(FakeCache::default());
+        c.handle(UiIntent::Switch);
+        finish(
+            &mut c,
+            &h,
+            &e,
+            Err(ClientError::Domain(Error::IdentityMismatch)),
+        );
+        inspect(&mut c, &h, &e, supported_same_id_inspect());
+        select(&mut c);
+        c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+        finish(&mut c, &h, &e, Err(error));
+        assert!(c.diagnostic().contains(reason));
+
+        inspect(&mut c, &h, &e, supported_same_id_inspect());
+        assert_eq!(c.state(), &UiState::TargetChanged);
+        assert!(!c.can_switch());
+        assert!(c.diagnostic().contains(reason));
+    }
+}
+
+#[test]
+fn only_determinate_configure_success_clears_changed_target_latch() {
+    let (mut c, h, e, _) = setup(FakeCache::default());
+    c.handle(UiIntent::Switch);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::IdentityMismatch)),
+    );
+    inspect(&mut c, &h, &e, supported_same_id_inspect());
+    select(&mut c);
+    c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Ok(Report {
+            record: RecordDiagnostic::Ready {
+                boot_id: BootId(7),
+                os: Os::Windows,
+            },
+            stages: vec![Stage::TargetValidated],
+            ..report()
+        }),
+    );
+    assert_eq!(c.state(), &UiState::Configured);
+    assert!(c.can_switch());
+}
+
 #[test]
 fn failed_reconfiguration_cannot_reenable_switch_for_a_known_changed_target() {
     for error in [ClientError::Cancelled, ClientError::Domain(Error::Busy)] {

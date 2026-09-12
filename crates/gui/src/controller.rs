@@ -218,12 +218,14 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         if (intent == UiIntent::Inspect && self.inspect_only())
             || self.state == UiState::TargetChanged
         {
-            self.recovery_state = Some(self.state.clone());
+            self.latch_recovery_state(self.state.clone());
         }
         self.state = UiState::Busy;
         self.selected = None;
         self.confirmed = false;
-        self.diagnostic.clear();
+        if self.recovery_state != Some(UiState::TargetChanged) {
+            self.diagnostic.clear();
+        }
         self.cache_warning = None;
         let helper = self.helper.clone();
         let tx = self.tx.clone();
@@ -264,11 +266,15 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             return;
         };
         self.target = display_target(&report);
+        let previous_diagnostic = std::mem::take(&mut self.diagnostic);
         self.diagnostic = stages_text(&report.stages);
         match outcome {
             ValidatedReport::Inspected | ValidatedReport::InspectedChanged => {
                 // Inspect exposes no identity evidence that can clear an earlier mismatch.
                 let previously_changed = self.recovery_state == Some(UiState::TargetChanged);
+                if previously_changed && self.diagnostic.is_empty() {
+                    self.diagnostic = previous_diagnostic;
+                }
                 self.recovery_state = None;
                 self.inspected = true;
                 self.state =
@@ -303,7 +309,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
     }
     fn fail(&mut self, error: ClientError) {
         if self.state == UiState::TargetChanged {
-            self.recovery_state = Some(UiState::TargetChanged);
+            self.latch_recovery_state(UiState::TargetChanged);
         }
         self.candidates.clear();
         self.selected = None;
@@ -346,6 +352,11 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             && let Some(previous) = &self.recovery_state
         {
             self.state = previous.clone();
+        }
+    }
+    fn latch_recovery_state(&mut self, state: UiState) {
+        if state == UiState::TargetChanged || self.recovery_state != Some(UiState::TargetChanged) {
+            self.recovery_state = Some(state);
         }
     }
 }
