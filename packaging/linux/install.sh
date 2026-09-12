@@ -5,9 +5,11 @@ set -euo pipefail
 # private DESTDIR; no command in this file invokes a package manager or configures
 # a target. The repository's build path always uses a temporary staging directory.
 usage() {
-  echo "usage: $0 {install|upgrade|inspect|uninstall|check-destdir} --destdir DIR [--payload DIR] [--test-staging|--production]" >&2
+  echo "usage: $0 {install|upgrade|inspect|uninstall|check-destdir} --destdir DIR [--payload DIR] [--test-staging|--production] [--live-root]" >&2
   exit 64
 }
+
+die() { echo "boothop installer: $*" >&2; exit 1; }
 
 [[ $# -ge 3 ]] || usage
 action=$1
@@ -16,6 +18,7 @@ destdir=
 payload=
 test_staging=0
 production_check=0
+live_root=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --destdir)
@@ -36,17 +39,34 @@ while [[ $# -gt 0 ]]; do
       production_check=1
       shift
       ;;
+    --live-root)
+      live_root=1
+      shift
+      ;;
     *) usage ;;
   esac
 done
 
-[[ -n "$destdir" && "$destdir" != "/" ]] || {
+[[ -n "$destdir" ]] || {
   echo "refusing an empty or live-root destination" >&2
   exit 2
 }
 case "$action" in install|upgrade|inspect|uninstall|check-destdir) ;; *) usage ;; esac
 
-die() { echo "boothop installer: $*" >&2; exit 1; }
+if (( live_root )); then
+  [[ "$destdir" == "/" ]] || die "live-root mode requires the exact destination /"
+  (( production_check )) || die "live-root mode requires production mode"
+  (( ! test_staging )) || die "live-root mode cannot be combined with test staging"
+else
+  [[ "$destdir" != "/" ]] || {
+    echo "refusing an empty or live-root destination" >&2
+    exit 2
+  }
+fi
+
+if (( live_root )) && [[ "$action" != check-destdir && "$action" != inspect ]]; then
+  [[ $(id -u) -eq 0 ]] || die "live-root mutation requires uid 0"
+fi
 
 # Walk every supplied path component without resolving symlinks. A symlink in
 # DESTDIR or a package parent is an escape from the intended root.
@@ -70,7 +90,9 @@ assert_no_symlink_components() {
 assert_no_symlink_components "$destdir"
 [[ -d "$destdir" && ! -L "$destdir" ]] || die "destination must be an existing directory"
 canonical_destdir=$(realpath -e -- "$destdir") || die "destination cannot be canonicalized"
-[[ "$canonical_destdir" != "/" ]] || die "live root destination is not allowed"
+if [[ "$canonical_destdir" == "/" ]]; then
+  (( live_root )) || die "live root destination is not allowed"
+fi
 if (( test_staging )); then
   # This escape hatch is exclusively for unprivileged temporary fake tests.
   [[ ${BOOTHOP_TEST_STAGING:-} == 1 && $(id -u) -ne 0 ]] || die "test staging is not a package-install mode"
@@ -82,14 +104,22 @@ if [[ "$action" == install || "$action" == upgrade ]]; then
   [[ -n "$payload" ]] || die "a complete payload directory is required"
 fi
 
-layout="$destdir/var/lib/boothop"
+target_root=$destdir
+(( live_root )) && target_root=
+layout="$target_root/var/lib/boothop"
 lock="$layout/operation.lock"
 record="$layout/targets.json"
 
 validate_trusted_components() {
   local supplied=$1 absolute component current canonical permissions
   canonical=$(realpath -e -- "$supplied") || die "destination cannot be canonicalized"
-  [[ "$canonical" != "/" ]] || die "live root destination is not allowed"
+  if [[ "$canonical" == "/" ]]; then
+    (( live_root )) && [[ "$supplied" == "/" ]] || die "live root destination is not allowed"
+    [[ $(stat -c '%u:%g' -- /) == 0:0 ]] || die "destination component is not root-owned"
+    permissions=$(stat -c '%A' -- /)
+    [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]] || die "destination component is group/other writable"
+    return 0
+  fi
   case "$supplied" in
     /*) absolute=$supplied ;;
     *) absolute="$PWD/$supplied" ;;
@@ -180,21 +210,21 @@ require_directory() {
 validate_package_parent_chain() {
   local path
   for path in \
-    "$destdir/usr" \
-    "$destdir/usr/bin" \
-    "$destdir/usr/lib" \
-    "$destdir/usr/lib/boothop" \
-    "$destdir/usr/share" \
-    "$destdir/usr/share/applications" \
-    "$destdir/usr/share/polkit-1" \
-    "$destdir/usr/share/polkit-1/actions"; do
+    "$target_root/usr" \
+    "$target_root/usr/bin" \
+    "$target_root/usr/lib" \
+    "$target_root/usr/lib/boothop" \
+    "$target_root/usr/share" \
+    "$target_root/usr/share/applications" \
+    "$target_root/usr/share/polkit-1" \
+    "$target_root/usr/share/polkit-1/actions"; do
     require_directory "$path"
   done
 }
 
 validate_layout() {
-  require_directory "$destdir/var"
-  require_directory "$destdir/var/lib"
+  require_directory "$target_root/var"
+  require_directory "$target_root/var/lib"
   [[ -d "$layout" && ! -L "$layout" ]] || die "protected layout is missing"
   mode_is "$layout" 700
   if (( ! test_staging )); then
@@ -212,8 +242,8 @@ create_layout() {
     validate_layout
     return 0
   }
-  ensure_directory "$destdir/var"
-  ensure_directory "$destdir/var/lib"
+  ensure_directory "$target_root/var"
+  ensure_directory "$target_root/var/lib"
   mkdir "$layout"
   chmod 700 "$layout"
   set_root_owner "$layout"
@@ -233,26 +263,26 @@ copy_payload() {
   for name in boothop-gui boothop-helper; do
     [[ -f "$payload/$name" && ! -L "$payload/$name" ]] || die "payload binary is missing or linked: $name"
   done
-  ensure_directory "$destdir/usr"
-  ensure_directory "$destdir/usr/bin"
-  ensure_directory "$destdir/usr/lib"
-  ensure_directory "$destdir/usr/lib/boothop"
-  ensure_directory "$destdir/usr/share"
-  ensure_directory "$destdir/usr/share/applications"
-  ensure_directory "$destdir/usr/share/polkit-1"
-  ensure_directory "$destdir/usr/share/polkit-1/actions"
+  ensure_directory "$target_root/usr"
+  ensure_directory "$target_root/usr/bin"
+  ensure_directory "$target_root/usr/lib"
+  ensure_directory "$target_root/usr/lib/boothop"
+  ensure_directory "$target_root/usr/share"
+  ensure_directory "$target_root/usr/share/applications"
+  ensure_directory "$target_root/usr/share/polkit-1"
+  ensure_directory "$target_root/usr/share/polkit-1/actions"
   for name in boothop-gui boothop-helper; do
     local destination
     if [[ "$name" == boothop-gui ]]; then
-      destination="$destdir/usr/bin/$name"
+      destination="$target_root/usr/bin/$name"
     else
-      destination="$destdir/usr/lib/boothop/$name"
+      destination="$target_root/usr/lib/boothop/$name"
     fi
     [[ ! -L "$destination" ]] || die "package destination is linked: $destination"
     install -m 755 "$payload/$name" "$destination"
   done
-  local desktop="$destdir/usr/share/applications/org.boothop.desktop"
-  local policy="$destdir/usr/share/polkit-1/actions/org.boothop.helper.policy"
+  local desktop="$target_root/usr/share/applications/org.boothop.desktop"
+  local policy="$target_root/usr/share/polkit-1/actions/org.boothop.helper.policy"
   [[ ! -L "$desktop" && ! -L "$policy" ]] || die "package metadata destination is linked"
   install -m 644 "$(dirname "$0")/boothop.desktop" "$desktop"
   install -m 644 "$(dirname "$0")/org.boothop.helper.policy" "$policy"
@@ -283,9 +313,9 @@ case "$action" in
     validate_package_parent_chain
     # Records and the persistent lock are deliberately retained. Only known
     # package-owned files are removed; unknown files are left for inspection.
-    rm -f -- "$destdir/usr/bin/boothop-gui" \
-      "$destdir/usr/lib/boothop/boothop-helper" \
-      "$destdir/usr/share/applications/org.boothop.desktop" \
-      "$destdir/usr/share/polkit-1/actions/org.boothop.helper.policy"
+    rm -f -- "$target_root/usr/bin/boothop-gui" \
+      "$target_root/usr/lib/boothop/boothop-helper" \
+      "$target_root/usr/share/applications/org.boothop.desktop" \
+      "$target_root/usr/share/polkit-1/actions/org.boothop.helper.policy"
     ;;
 esac

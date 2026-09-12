@@ -98,6 +98,44 @@ destination_security_checks_are_read_only() {
   [[ ! -e "$writable/var" ]] || fail "security check modified writable destination"
 }
 
+live_root_opt_in_is_explicit_and_non_root_mutation_is_rejected() {
+  "$INSTALLER" check-destdir --destdir / --production --live-root >/dev/null \
+    || fail "explicit production live-root check was rejected"
+
+  if "$INSTALLER" check-destdir --destdir / --production >/dev/null 2>&1; then
+    fail "bare production live-root destination was accepted"
+  fi
+  for alias in /. //; do
+    if "$INSTALLER" check-destdir --destdir "$alias" --production --live-root >/dev/null 2>&1; then
+      fail "live-root alias was accepted: $alias"
+    fi
+  done
+  if "$INSTALLER" check-destdir --destdir / --production --test-staging --live-root >/dev/null 2>&1; then
+    fail "live-root test-staging combination was accepted"
+  fi
+  if "$INSTALLER" check-destdir --destdir "$ROOT" --production --live-root >/dev/null 2>&1; then
+    fail "live-root non-root destination was accepted"
+  fi
+
+  local fakebin="$ROOT/fake-bin" mutation_log="$ROOT/live-mutation.log"
+  mkdir "$fakebin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [[ ${1:-} == -u ]]; then echo 1000; else /usr/bin/id "$@"; fi' \
+    > "$fakebin/id"
+  chmod 755 "$fakebin/id"
+  for command in mkdir chmod chown install rm; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "printf '%s\\n' '$command' >> '$mutation_log'" \
+      'exit 99' > "$fakebin/$command"
+    chmod 755 "$fakebin/$command"
+  done
+  if PATH="$fakebin:$PATH" "$INSTALLER" install --destdir / --production --live-root \
+      --payload "$INITIAL_PAYLOAD" >/dev/null 2>&1; then
+    fail "non-root live-root mutation was accepted"
+  fi
+  [[ ! -e "$mutation_log" ]] || fail "non-root live-root mutation reached a filesystem writer"
+}
+
 uninstall_rejects_symlinked_package_parents_before_removal() {
   local dest="$ROOT/uninstall-symlink-usr" outside="$ROOT/uninstall-outside"
   mkdir "$dest" "$outside"
@@ -147,5 +185,6 @@ parent_symlinks_are_rejected_without_touching_the_target
 payload_must_contain_two_regular_binaries
 test_staging_marker_cannot_be_used_as_install_mode
 destination_security_checks_are_read_only
+live_root_opt_in_is_explicit_and_non_root_mutation_is_rejected
 uninstall_rejects_symlinked_package_parents_before_removal
-echo "installer fake tests: 7 passed"
+echo "installer fake tests: 8 passed"
