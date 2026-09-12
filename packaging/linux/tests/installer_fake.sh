@@ -78,9 +78,27 @@ test_staging_marker_cannot_be_used_as_install_mode() {
   [[ ! -e "$unmarked/var" ]] || fail "unmarked staging was modified"
 }
 
+destination_security_checks_are_read_only() {
+  local writable="$ROOT/writable-parent"
+  "$INSTALLER" check-destdir --destdir "$ROOT" --test-staging >/dev/null \
+    || fail "safe staging destination was rejected"
+  for alias in /. //; do
+    if "$INSTALLER" check-destdir --destdir "$alias" --production >/dev/null 2>&1; then
+      fail "live-root alias was accepted: $alias"
+    fi
+  done
+  mkdir "$writable"
+  chmod 777 "$writable"
+  if "$INSTALLER" check-destdir --destdir "$writable" --production >/dev/null 2>&1; then
+    fail "writable production destination was accepted"
+  fi
+  [[ ! -e "$writable/var" ]] || fail "security check modified writable destination"
+}
+
 installer_precreates_layout_first_inspect_reports_missing_record
 upgrade_preserves_lock_inode
 parent_symlinks_are_rejected_without_touching_the_target
 payload_must_contain_two_regular_binaries
 test_staging_marker_cannot_be_used_as_install_mode
-echo "installer fake tests: 5 passed"
+destination_security_checks_are_read_only
+echo "installer fake tests: 6 passed"

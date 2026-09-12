@@ -5,7 +5,7 @@ set -euo pipefail
 # private DESTDIR; no command in this file invokes a package manager or configures
 # a target. The repository's build path always uses a temporary staging directory.
 usage() {
-  echo "usage: $0 {install|upgrade|inspect|uninstall} --destdir DIR [--payload DIR] [--test-staging]" >&2
+  echo "usage: $0 {install|upgrade|inspect|uninstall|check-destdir} --destdir DIR [--payload DIR] [--test-staging|--production]" >&2
   exit 64
 }
 
@@ -15,6 +15,7 @@ shift
 destdir=
 payload=
 test_staging=0
+production_check=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --destdir)
@@ -31,6 +32,10 @@ while [[ $# -gt 0 ]]; do
       test_staging=1
       shift
       ;;
+    --production)
+      production_check=1
+      shift
+      ;;
     *) usage ;;
   esac
 done
@@ -39,7 +44,7 @@ done
   echo "refusing an empty or live-root destination" >&2
   exit 2
 }
-case "$action" in install|upgrade|inspect|uninstall) ;; *) usage ;; esac
+case "$action" in install|upgrade|inspect|uninstall|check-destdir) ;; *) usage ;; esac
 
 die() { echo "boothop installer: $*" >&2; exit 1; }
 
@@ -68,6 +73,9 @@ if (( test_staging )); then
   # This escape hatch is exclusively for unprivileged temporary fake tests.
   [[ ${BOOTHOP_TEST_STAGING:-} == 1 && $(id -u) -ne 0 ]] || die "test staging is not a package-install mode"
 fi
+if (( production_check && test_staging )); then
+  die "production and test staging modes are mutually exclusive"
+fi
 if [[ "$action" == install || "$action" == upgrade ]]; then
   [[ -n "$payload" ]] || die "a complete payload directory is required"
 fi
@@ -75,6 +83,40 @@ fi
 layout="$destdir/var/lib/boothop"
 lock="$layout/operation.lock"
 record="$layout/targets.json"
+
+validate_trusted_components() {
+  local supplied=$1 absolute component current canonical permissions
+  canonical=$(realpath -e -- "$supplied") || die "destination cannot be canonicalized"
+  [[ "$canonical" != "/" ]] || die "live root destination is not allowed"
+  case "$supplied" in
+    /*) absolute=$supplied ;;
+    *) absolute="$PWD/$supplied" ;;
+  esac
+  current=/
+  local -a components
+  IFS=/ read -ra components <<< "${absolute#/}"
+  for component in "${components[@]}"; do
+    [[ -z "$component" || "$component" == "." ]] && continue
+    current="$current/$component"
+    [[ -e "$current" && ! -L "$current" ]] || die "destination component is missing"
+    [[ $(stat -c '%u:%g' -- "$current") == 0:0 ]] || die "destination component is not root-owned"
+    permissions=$(stat -c '%A' -- "$current")
+    [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]] || die "destination component is group/other writable"
+  done
+}
+
+if [[ "$action" == check-destdir ]]; then
+  if (( test_staging )); then
+    [[ ${BOOTHOP_TEST_STAGING:-} == 1 && $(id -u) -ne 0 ]] || die "test staging is not a package-install mode"
+  else
+    validate_trusted_components "$destdir"
+  fi
+  echo valid
+  exit 0
+fi
+if (( ! test_staging )); then
+  validate_trusted_components "$destdir"
+fi
 
 set_root_owner() {
   (( test_staging )) && return 0

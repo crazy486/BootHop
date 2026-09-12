@@ -29,14 +29,30 @@ fi
 
 mapfile -t test_files < <(find "$root/crates" -type f -path '*/tests/*' -name '*.rs' -print)
 mapfile -t cfg_test_files < <(rg -l '#\[cfg\(test\)\]' "$root/crates" -g '*.rs' || true)
-scan_files=("${test_files[@]}" "${cfg_test_files[@]}")
 [[ ${#test_files[@]} -gt 0 ]] || { echo "no test fixtures found" >&2; exit 1; }
 printf 'Audited test fixtures (%s) and cfg(test) sources (%s)\n' "${#test_files[@]}" "${#cfg_test_files[@]}"
 if rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess::system|production\s*\(|std::process::Command::new|/sys/firmware/efi|zbus::blocking::Connection' "${test_files[@]}"; then
   echo "tests must not construct production adapters or installed helpers" >&2
   exit 1
 fi
-if rg -n -U 'Boot(Order|Current)[\s\S]{0,120}(write_next|\.write\(|write\()|(?:write_next|\.write\(|write\()[\s\S]{0,120}Boot(Order|Current)' "${test_files[@]}"; then
+
+# A file can contain production code followed by a cfg(test) module. Extract
+# only the final cfg(test) section (the last marker is the module under test)
+# so production D-Bus types in the same source file are not misclassified.
+cfg_extract=$(mktemp "${TMPDIR:-/tmp}/boothop-cfg-audit.XXXXXX")
+cfg_code=$(mktemp "${TMPDIR:-/tmp}/boothop-cfg-code.XXXXXX")
+trap 'rm -f "$cfg_extract" "$cfg_code"' EXIT
+for file in "${cfg_test_files[@]}"; do
+  start=$(rg -n '#\[cfg\(test\)\]' "$file" | tail -n 1 | cut -d: -f1)
+  [[ -n "$start" ]] || continue
+  sed -n "${start},\$p" "$file" >> "$cfg_extract"
+done
+grep -Ev '^[[:space:]]*//' "$cfg_extract" > "$cfg_code" || true
+if [[ -s "$cfg_code" ]] && rg -n 'SystemLinuxCalls|LinuxStore::open|LinuxPlatform::system|SystemProcess::system|production\s*\(|std::process::Command::new|/sys/firmware/efi|zbus::blocking::Connection' "$cfg_code"; then
+  echo "cfg(test) sources must not construct production adapters or installed helpers" >&2
+  exit 1
+fi
+if rg -n -U 'Boot(Order|Current)[\s\S]{0,120}(write_next|\.write\(|write\()|(?:write_next|\.write\(|write\()[\s\S]{0,120}Boot(Order|Current)' "${test_files[@]}" "$cfg_extract"; then
   echo "fake write assertions may target BootNext only" >&2
   exit 1
 fi
