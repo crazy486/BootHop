@@ -1,6 +1,8 @@
 mod collect;
 mod evidence;
 mod model;
+#[cfg(windows)]
+mod windows;
 
 use std::path::PathBuf;
 
@@ -10,6 +12,8 @@ pub use model::{
     Args, CallError, FirmwareType, INITIAL_BUFFER_BYTES, MAX_PAYLOAD_BYTES, MAX_SUMMARY_BYTES,
     PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
 };
+#[cfg(windows)]
+pub use windows::WindowsBackend;
 
 pub const ACKNOWLEDGEMENT: &str = "--acknowledge=WINDOWS1W_NATIVE_READ_ONLY_AUTHORIZED";
 
