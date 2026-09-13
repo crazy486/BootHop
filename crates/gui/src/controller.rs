@@ -397,7 +397,9 @@ enum ValidatedReport {
 }
 
 /// Public report semantics guaranteed by core::execute on a Linux host.
-/// Inspect deliberately does not validate the saved identity against current options.
+/// The GUI does not independently validate or receive identity material; it trusts
+/// the privileged helper/core contract that a successful Inspect matched saved and
+/// live canonical identities.
 fn validate_report(request: Request, report: &Report) -> Option<ValidatedReport> {
     let target = match report.record {
         RecordDiagnostic::Missing => None,
