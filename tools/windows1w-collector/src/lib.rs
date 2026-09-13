@@ -4,11 +4,11 @@ mod model;
 
 use std::path::PathBuf;
 
-pub use collect::{CollectorError, collect_with};
-pub use evidence::{Attempt, Evidence, OptionEvidence};
+pub use collect::{CollectionFailure, CollectorError, collect_with};
+pub use evidence::{Attempt, Evidence, OptionEvidence, TerminalOutcome};
 pub use model::{
     Args, CallError, FirmwareType, INITIAL_BUFFER_BYTES, MAX_PAYLOAD_BYTES, MAX_SUMMARY_BYTES,
-    PrivilegeState, ReadOutcome, VariableName, WindowsCalls,
+    PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
 };
 
 pub const ACKNOWLEDGEMENT: &str = "--acknowledge=WINDOWS1W_NATIVE_READ_ONLY_AUTHORIZED";
@@ -39,13 +39,12 @@ where
         return Err(ArgumentError::WrongShape);
     };
     validate_run_id(run_id)?;
-    Ok(Args {
-        run_id: run_id.to_owned(),
-    })
+    Ok(Args::new(run_id.to_owned()))
 }
 
-pub fn evidence_path(args: &Args) -> PathBuf {
-    PathBuf::from(".superpowers/sdd/2026-09-08-boothop/private/windows1w").join(&args.run_id)
+pub fn evidence_path(args: &Args) -> Result<PathBuf, ArgumentError> {
+    validate_run_id(args.run_id())?;
+    Ok(PathBuf::from(".superpowers/sdd/2026-09-08-boothop/private/windows1w").join(args.run_id()))
 }
 
 fn validate_run_id(run_id: &str) -> Result<(), ArgumentError> {
@@ -74,4 +73,15 @@ fn validate_run_id(run_id: &str) -> Result<(), ArgumentError> {
         return Err(ArgumentError::InvalidRunId);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forged_args_cannot_escape_private_evidence_root() {
+        let forged = Args::forged_for_test("..\\escape");
+        assert_eq!(evidence_path(&forged), Err(ArgumentError::InvalidRunId));
+    }
 }

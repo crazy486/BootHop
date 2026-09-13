@@ -2,8 +2,8 @@ mod support;
 
 use boothop_core::BootId;
 use boothop_windows1w_collector::{
-    ACKNOWLEDGEMENT, Args, CallError, FirmwareType, PrivilegeState, ReadOutcome, VariableName,
-    collect_with, parse_args,
+    ACKNOWLEDGEMENT, CallError, FirmwareType, PrivilegeState, ReadOutcome, ReadStatus,
+    TerminalOutcome, VariableName, collect_with, parse_args,
 };
 use support::{FakeCalls, load_option_bytes};
 
@@ -41,6 +41,99 @@ fn privilege_success_restores_original_state_and_failed_restore_is_terminal() {
             .skip(1)
             .any(|_| true)
     );
+}
+
+#[test]
+fn privilege_enable_failure_preserves_raw_u32_and_does_not_restore() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.enable_error = Some(CallError::new(u32::MAX));
+    let failure = collect_with(&mut calls).expect_err("privilege failure");
+    assert_eq!(failure.error.raw_code(), Some(u32::MAX));
+    assert_eq!(calls.log, ["firmware_type", "enable_privilege"]);
+}
+
+#[test]
+fn required_read_failure_returns_partial_attempt_evidence_and_terminal_error() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.boot_current = ReadOutcome::failure(0, u32::MAX);
+    let failure = collect_with(&mut calls).expect_err("required read failure");
+    assert_eq!(failure.error.variable(), Some(VariableName::BootCurrent));
+    assert_eq!(failure.error.raw_code(), Some(u32::MAX));
+    assert!(
+        failure
+            .evidence
+            .attempts
+            .iter()
+            .any(|a| a.variable == VariableName::BootOrder)
+    );
+    assert!(
+        failure
+            .evidence
+            .attempts
+            .iter()
+            .any(|a| a.variable == VariableName::BootCurrent)
+    );
+    assert!(!failure.evidence.accepted);
+    assert_eq!(calls.log.last().map(String::as_str), Some("restore"));
+}
+
+#[test]
+fn explicit_missing_option_is_distinct_from_other_read_errors() {
+    let mut missing = FakeCalls::minimal_valid();
+    missing.options.remove(&BootId(1));
+    missing.option_status = ReadStatus::Missing;
+    let failure = collect_with(&mut missing).expect_err("missing referenced option");
+    assert_eq!(failure.error.missing_boot_id(), Some(BootId(1)));
+    assert_eq!(failure.error.raw_code(), Some(2));
+
+    let mut error = FakeCalls::minimal_valid();
+    error.options.remove(&BootId(1));
+    error.option_status = ReadStatus::Error;
+    error.option_error = 2;
+    let failure = collect_with(&mut error).expect_err("unreadable referenced option");
+    assert_eq!(failure.error.missing_boot_id(), None);
+    assert_eq!(failure.error.raw_code(), Some(2));
+}
+
+#[test]
+fn malformed_current_or_next_is_recorded_and_non_accepting() {
+    let mut current = FakeCalls::minimal_valid();
+    current.boot_current = ReadOutcome::success(6, vec![1]);
+    let failure = collect_with(&mut current).expect_err("malformed BootCurrent");
+    assert_eq!(failure.error.variable(), Some(VariableName::BootCurrent));
+
+    let mut next = FakeCalls::minimal_valid();
+    next.boot_next = ReadOutcome::success(7, vec![1]);
+    let failure = collect_with(&mut next).expect_err("malformed BootNext");
+    assert_eq!(failure.error.variable(), Some(VariableName::BootNext));
+}
+
+#[test]
+fn known_sha256_and_failed_bootnext_cannot_be_accepted() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.boot_next = ReadOutcome::failure(0, 55);
+    let evidence = collect_with(&mut calls).expect("optional failure is retained");
+    let attempt = evidence
+        .attempts
+        .iter()
+        .find(|a| a.variable == VariableName::BootOrder && a.success)
+        .unwrap();
+    assert_eq!(
+        attempt.payload_sha256,
+        "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254"
+    );
+    assert!(!evidence.accepted);
+    assert_eq!(evidence.terminal, TerminalOutcome::BootNextUnavailable);
+}
+
+#[test]
+fn differing_bootnext_failures_are_unstable_even_without_decoded_values() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.boot_next = ReadOutcome::failure(0, 11);
+    calls.second_boot_next_error = Some(12);
+    let evidence = collect_with(&mut calls).expect("failure observations are evidence");
+    assert!(!evidence.stable);
+    assert!(!evidence.accepted);
 }
 
 #[test]
@@ -151,12 +244,7 @@ fn second_control_pass_detects_sequential_instability() {
 fn acknowledgement_and_run_id_validation_are_exact_and_private_path_safe() {
     let valid = parse_args([ACKNOWLEDGEMENT.to_string(), "--run-id=run_01-A".to_string()])
         .expect("valid ordered interlock");
-    assert_eq!(
-        valid,
-        Args {
-            run_id: "run_01-A".into()
-        }
-    );
+    assert_eq!(valid.run_id(), "run_01-A");
     let invalid: Vec<Vec<String>> = vec![
         vec!["--run-id=run".into(), ACKNOWLEDGEMENT.into()],
         vec!["--acknowledge=wrong".into(), "--run-id=run".into()],

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use boothop_core::BootId;
 use boothop_windows1w_collector::{
-    CallError, FirmwareType, PrivilegeState, ReadOutcome, VariableName, WindowsCalls,
+    CallError, FirmwareType, PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
 };
 
 pub struct FakeCalls {
@@ -10,6 +10,7 @@ pub struct FakeCalls {
     pub log: Vec<String>,
     pub restored: Option<PrivilegeState>,
     pub restore_error: Option<CallError>,
+    pub enable_error: Option<CallError>,
     pub boot_order: ReadOutcome,
     pub boot_current: ReadOutcome,
     pub boot_next: ReadOutcome,
@@ -17,7 +18,11 @@ pub struct FakeCalls {
     pub attrs: HashMap<VariableName, u32>,
     pub resize_boot_order: Option<usize>,
     pub second_order: Option<Vec<u8>>,
+    pub option_status: ReadStatus,
+    pub option_error: u32,
+    pub second_boot_next_error: Option<u32>,
     order_reads: usize,
+    next_reads: usize,
 }
 
 impl FakeCalls {
@@ -27,6 +32,7 @@ impl FakeCalls {
             log: Vec::new(),
             restored: None,
             restore_error: None,
+            enable_error: None,
             boot_order: ReadOutcome::success(7, vec![1, 0]),
             boot_current: ReadOutcome::success(6, vec![1, 0]),
             boot_next: ReadOutcome::success(7, vec![1, 0]),
@@ -34,7 +40,11 @@ impl FakeCalls {
             attrs: HashMap::new(),
             resize_boot_order: None,
             second_order: None,
+            option_status: ReadStatus::Error,
+            option_error: 2,
+            second_boot_next_error: None,
             order_reads: 0,
+            next_reads: 0,
         }
     }
 
@@ -42,7 +52,7 @@ impl FakeCalls {
         Self::new(FirmwareType::Uefi)
     }
 
-    pub fn with_firmware_error(code: i32) -> Self {
+    pub fn with_firmware_error(code: u32) -> Self {
         let mut fake = Self::new(FirmwareType::Uefi);
         fake.firmware = Err(CallError::new(code));
         fake
@@ -68,7 +78,9 @@ impl WindowsCalls for FakeCalls {
 
     fn enable_privilege(&mut self) -> Result<PrivilegeState, CallError> {
         self.log.push("enable_privilege".into());
-        Ok(PrivilegeState { was_enabled: false })
+        self.enable_error
+            .clone()
+            .map_or(Ok(PrivilegeState { was_enabled: false }), Err)
     }
 
     fn restore_privilege(&mut self, state: PrivilegeState) -> Result<(), CallError> {
@@ -91,15 +103,25 @@ impl WindowsCalls for FakeCalls {
             }
             VariableName::BootCurrent => self.boot_current.clone(),
             VariableName::BootNext => self.boot_next.clone(),
-            VariableName::Boot(id) => {
-                self.options
-                    .get(&id)
-                    .cloned()
-                    .map_or(ReadOutcome::failure(2, 2), |bytes| {
-                        ReadOutcome::success(self.attrs.get(&variable).copied().unwrap_or(7), bytes)
-                    })
-            }
+            VariableName::Boot(id) => self.options.get(&id).cloned().map_or_else(
+                || match self.option_status {
+                    ReadStatus::Missing => ReadOutcome::missing(self.option_error),
+                    ReadStatus::Error => ReadOutcome::failure(0, self.option_error),
+                    ReadStatus::Success => ReadOutcome::failure(0, self.option_error),
+                },
+                |bytes| {
+                    ReadOutcome::success(self.attrs.get(&variable).copied().unwrap_or(7), bytes)
+                },
+            ),
         };
+        if variable == VariableName::BootNext {
+            self.next_reads += 1;
+            if self.next_reads > 1
+                && let Some(error) = self.second_boot_next_error
+            {
+                outcome = ReadOutcome::failure(0, error);
+            }
+        }
         if let Some(attributes) = self.attrs.get(&variable).copied() {
             outcome.attributes = attributes;
         }
