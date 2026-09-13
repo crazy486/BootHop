@@ -177,6 +177,36 @@ fn failed_read_retains_immediate_raw_error_and_does_not_become_absent() {
 }
 
 #[test]
+fn two_matching_explicit_bootnext_missing_reads_prove_absence_without_discovery() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.boot_next = ReadOutcome::missing(203);
+    let evidence = collect_with(&mut calls).expect("explicit missing BootNext is evidence");
+    assert!(evidence.boot_next_absent);
+    assert!(!evidence.accepted);
+    assert_eq!(evidence.terminal, TerminalOutcome::BootNextUnavailable);
+    assert_eq!(calls.read_count(VariableName::Boot(BootId(1))), 1);
+}
+
+#[test]
+fn missing_attempt_retains_native_attributes_and_generic_error_is_not_absence() {
+    let mut missing = FakeCalls::minimal_valid();
+    missing.boot_next = ReadOutcome::missing(203);
+    missing.set_attributes(VariableName::BootNext, 7);
+    let evidence = collect_with(&mut missing).expect("missing BootNext is retained");
+    let attempt = evidence
+        .attempts
+        .iter()
+        .find(|attempt| attempt.variable == VariableName::BootNext)
+        .expect("BootNext attempt");
+    assert_eq!(attempt.attributes, 7);
+
+    let mut error = FakeCalls::minimal_valid();
+    error.boot_next = ReadOutcome::failure(0, 5);
+    let evidence = collect_with(&mut error).expect("generic BootNext errors are unavailable");
+    assert!(!evidence.boot_next_absent);
+}
+
+#[test]
 fn exact_attributes_are_required_for_each_variable_kind() {
     for (variable, attributes) in [
         (VariableName::BootOrder, 7),
@@ -243,6 +273,36 @@ fn second_control_pass_detects_sequential_instability() {
     calls.second_order = Some(vec![2, 0]);
     let evidence = collect_with(&mut calls).expect("instability is evidence, not a panic");
     assert!(!evidence.stable);
+}
+
+#[test]
+fn later_failure_preserves_prior_option_evidence_and_aggregate_budget_fails_closed() {
+    let mut unstable = FakeCalls::minimal_valid();
+    unstable.second_order = Some(vec![1]);
+    let failure = collect_with(&mut unstable).expect_err("second pass malformed");
+    assert_eq!(failure.evidence.options.len(), 1);
+    assert_eq!(failure.evidence.options[0].raw_payload, load_option_bytes());
+
+    let mut over_budget = FakeCalls::minimal_valid();
+    over_budget.boot_order = ReadOutcome::success(7, vec![1, 0, 2, 0]);
+    over_budget
+        .options
+        .insert(BootId(2), large_load_option_bytes(600_000));
+    over_budget
+        .options
+        .insert(BootId(1), large_load_option_bytes(600_000));
+    let failure = collect_with(&mut over_budget).expect_err("aggregate budget");
+    assert!(matches!(
+        failure.error,
+        boothop_windows1w_collector::CollectorError::ResourceLimit
+    ));
+    assert!(!failure.evidence.accepted);
+}
+
+fn large_load_option_bytes(size: usize) -> Vec<u8> {
+    let mut bytes = load_option_bytes();
+    bytes.resize(size, 0);
+    bytes
 }
 
 #[test]

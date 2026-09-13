@@ -5,17 +5,23 @@ mod model;
 mod windows;
 
 use std::path::PathBuf;
+use std::{fs, io, path::Path};
+
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 
 pub use collect::{CollectionFailure, CollectorError, collect_with};
 pub use evidence::{Attempt, Evidence, OptionEvidence, TerminalOutcome};
 pub use model::{
-    Args, CallError, FirmwareType, INITIAL_BUFFER_BYTES, MAX_PAYLOAD_BYTES, MAX_SUMMARY_BYTES,
-    PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
+    Args, CallError, FirmwareType, INITIAL_BUFFER_BYTES, MAX_ENUMERATION_BYTES, MAX_PAYLOAD_BYTES,
+    MAX_SUMMARY_BYTES, PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
 };
 #[cfg(windows)]
 pub use windows::WindowsBackend;
 
 pub const ACKNOWLEDGEMENT: &str = "--acknowledge=WINDOWS1W_NATIVE_READ_ONLY_AUTHORIZED";
+const PRIVATE_EVIDENCE_ROOT: &str = ".superpowers/sdd/2026-09-08-boothop/private/windows1w";
+pub const MAX_REPORT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArgumentError {
@@ -51,8 +57,96 @@ pub fn evidence_path(args: &Args) -> Result<PathBuf, ArgumentError> {
     Ok(PathBuf::from(".superpowers/sdd/2026-09-08-boothop/private/windows1w").join(args.run_id()))
 }
 
+#[derive(Debug)]
+pub enum EvidencePathError {
+    InvalidRunId,
+    Io(io::Error),
+    SymlinkOrReparse,
+    NotDirectory,
+    NotContained,
+}
+
+pub fn prepare_evidence_path(args: &Args) -> Result<PathBuf, EvidencePathError> {
+    validate_run_id(args.run_id()).map_err(|_| EvidencePathError::InvalidRunId)?;
+    let root = PathBuf::from(PRIVATE_EVIDENCE_ROOT);
+    ensure_directory_chain(&root)?;
+    let run_dir = root.join(args.run_id());
+    ensure_directory(&run_dir)?;
+    let canonical_root = fs::canonicalize(&root).map_err(EvidencePathError::Io)?;
+    let canonical_run = fs::canonicalize(&run_dir).map_err(EvidencePathError::Io)?;
+    if !canonical_run.starts_with(&canonical_root) {
+        return Err(EvidencePathError::NotContained);
+    }
+    Ok(canonical_run)
+}
+
+pub fn write_report(path: &Path, report: &str) -> io::Result<()> {
+    if report.len() > MAX_REPORT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "collector report exceeds the fixed private limit",
+        ));
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    use io::Write;
+    file.write_all(report.as_bytes())?;
+    file.sync_all()
+}
+
+fn ensure_directory_chain(path: &Path) -> Result<(), EvidencePathError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        ensure_directory(&current)?;
+    }
+    Ok(())
+}
+
+fn ensure_directory(path: &Path) -> Result<(), EvidencePathError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+                return Err(EvidencePathError::SymlinkOrReparse);
+            }
+            if !metadata.is_dir() {
+                return Err(EvidencePathError::NotDirectory);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(EvidencePathError::Io)?;
+            let metadata = fs::symlink_metadata(path).map_err(EvidencePathError::Io)?;
+            if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+                return Err(EvidencePathError::SymlinkOrReparse);
+            }
+            if !metadata.is_dir() {
+                return Err(EvidencePathError::NotDirectory);
+            }
+        }
+        Err(error) => return Err(EvidencePathError::Io(error)),
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 fn validate_run_id(run_id: &str) -> Result<(), ArgumentError> {
-    if run_id.is_empty() || run_id.len() > 64 || run_id == "." || run_id == ".." {
+    if run_id.is_empty()
+        || run_id.len() > 64
+        || run_id == "."
+        || run_id == ".."
+        || run_id.ends_with('.')
+    {
         return Err(ArgumentError::InvalidRunId);
     }
     let bytes = run_id.as_bytes();

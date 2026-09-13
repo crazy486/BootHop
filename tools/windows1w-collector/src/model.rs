@@ -3,6 +3,7 @@ use boothop_core::BootId;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_SUMMARY_BYTES: usize = 160;
 pub const INITIAL_BUFFER_BYTES: usize = 4_096;
+pub const MAX_ENUMERATION_BYTES: usize = MAX_PAYLOAD_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VariableName {
@@ -65,12 +66,16 @@ pub struct ReadOutcome {
 
 impl ReadOutcome {
     pub fn success(attributes: u32, bytes: Vec<u8>) -> Self {
+        Self::success_with_last_error(attributes, bytes, 0)
+    }
+
+    pub fn success_with_last_error(attributes: u32, bytes: Vec<u8>, last_error: u32) -> Self {
         let bytes_returned = bytes.len();
         Self {
             status: ReadStatus::Success,
             bytes,
             bytes_returned,
-            last_error: 0,
+            last_error,
             attributes,
             buffer_too_small: false,
             required_size: 0,
@@ -88,12 +93,16 @@ impl ReadOutcome {
         }
     }
     pub fn missing(last_error: u32) -> Self {
+        Self::missing_with_attributes(last_error, 0)
+    }
+
+    pub fn missing_with_attributes(last_error: u32, attributes: u32) -> Self {
         Self {
             status: ReadStatus::Missing,
             bytes: Vec::new(),
             bytes_returned: 0,
             last_error,
-            attributes: 0,
+            attributes,
             buffer_too_small: false,
             required_size: 0,
         }

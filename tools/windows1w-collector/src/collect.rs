@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use boothop_core::{BootId, parse_load_option};
 
 use crate::{
-    FirmwareType, PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
+    FirmwareType, MAX_ENUMERATION_BYTES, PrivilegeState, ReadOutcome, ReadStatus, VariableName,
+    WindowsCalls,
     evidence::{Attempt, Evidence, OptionEvidence, TerminalOutcome, attempt, digest},
     model::{INITIAL_BUFFER_BYTES, MAX_PAYLOAD_BYTES},
 };
@@ -88,6 +89,26 @@ impl CollectionFailure {
             evidence: Evidence::failed(attempts),
         }
     }
+
+    fn with_state(
+        error: CollectorError,
+        attempts: Vec<Attempt>,
+        options: Vec<OptionEvidence>,
+        option_ids: Vec<BootId>,
+    ) -> Self {
+        Self {
+            error,
+            evidence: Evidence {
+                attempts,
+                options,
+                option_ids,
+                stable: false,
+                accepted: false,
+                boot_next_absent: false,
+                terminal: TerminalOutcome::Failed,
+            },
+        }
+    }
 }
 
 pub fn collect_with<C: WindowsCalls>(calls: &mut C) -> Result<Evidence, CollectionFailure> {
@@ -148,6 +169,13 @@ fn collect_after_privilege<C: WindowsCalls>(
         Ok(controls) => controls,
         Err(error) => return Err(CollectionFailure::new(error, attempts)),
     };
+    let mut enumeration_bytes = first.enumeration_bytes;
+    if enumeration_bytes > MAX_ENUMERATION_BYTES {
+        return Err(CollectionFailure::new(
+            CollectorError::ResourceLimit,
+            attempts,
+        ));
+    }
     let mut option_ids = Vec::new();
     let mut seen = HashSet::new();
     for id in first
@@ -166,46 +194,67 @@ fn collect_after_privilege<C: WindowsCalls>(
         let outcome = match read_bounded(calls, VariableName::Boot(id), &mut attempts) {
             Ok(outcome) => outcome,
             Err(ReadFailure::Missing { outcome }) => {
-                return Err(CollectionFailure::new(
+                return Err(CollectionFailure::with_state(
                     CollectorError::MissingReferencedOption {
                         boot_id: id,
                         raw_code: outcome.last_error,
                     },
                     attempts,
+                    options.clone(),
+                    option_ids.clone(),
                 ));
             }
             Err(ReadFailure::Error { outcome }) => {
-                return Err(CollectionFailure::new(
+                return Err(CollectionFailure::with_state(
                     CollectorError::Read {
                         variable: VariableName::Boot(id),
                         raw_code: outcome.last_error,
                     },
                     attempts,
+                    options.clone(),
+                    option_ids.clone(),
                 ));
             }
             Err(ReadFailure::ResourceLimit) => {
-                return Err(CollectionFailure::new(
+                return Err(CollectionFailure::with_state(
                     CollectorError::ResourceLimit,
                     attempts,
+                    options.clone(),
+                    option_ids.clone(),
                 ));
             }
         };
         if outcome.attributes != 7 {
-            return Err(CollectionFailure::new(
+            return Err(CollectionFailure::with_state(
                 CollectorError::InvalidAttributes {
                     variable: VariableName::Boot(id),
                     expected: 7,
                     actual: outcome.attributes,
                 },
                 attempts,
+                options.clone(),
+                option_ids.clone(),
             ));
         }
+        enumeration_bytes = match enumeration_bytes.checked_add(outcome.bytes.len()) {
+            Some(total) if total <= MAX_ENUMERATION_BYTES => total,
+            _ => {
+                return Err(CollectionFailure::with_state(
+                    CollectorError::ResourceLimit,
+                    attempts,
+                    options.clone(),
+                    option_ids.clone(),
+                ));
+            }
+        };
         let parsed = match parse_load_option(&outcome.bytes) {
             Ok(parsed) => parsed,
             Err(_) => {
-                return Err(CollectionFailure::new(
+                return Err(CollectionFailure::with_state(
                     CollectorError::InvalidReferencedOption(id),
                     attempts,
+                    options,
+                    option_ids,
                 ));
             }
         };
@@ -217,7 +266,11 @@ fn collect_after_privilege<C: WindowsCalls>(
     }
     let second = match read_controls(calls, &mut attempts) {
         Ok(controls) => controls,
-        Err(error) => return Err(CollectionFailure::new(error, attempts)),
+        Err(error) => {
+            return Err(CollectionFailure::with_state(
+                error, attempts, options, option_ids,
+            ));
+        }
     };
     let stable = first == second;
     let terminal = if !stable {
@@ -233,7 +286,7 @@ fn collect_after_privilege<C: WindowsCalls>(
         option_ids,
         stable,
         accepted: terminal == TerminalOutcome::Accepted,
-        boot_next_absent: false,
+        boot_next_absent: stable && first.boot_next_absent && second.boot_next_absent,
         terminal,
     })
 }
@@ -245,6 +298,8 @@ struct Controls {
     boot_next: Option<BootId>,
     observations: Vec<Observation>,
     boot_next_available: bool,
+    boot_next_absent: bool,
+    enumeration_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -287,7 +342,7 @@ fn read_controls<C: WindowsCalls>(
     require_attributes(VariableName::BootCurrent, current.attributes, 6)?;
     let boot_current = decode_single(&current.bytes, VariableName::BootCurrent)?;
     let next = read_bounded(calls, VariableName::BootNext, attempts);
-    let (boot_next, boot_next_observation, boot_next_available) = match next {
+    let (boot_next, boot_next_observation, boot_next_available, boot_next_absent) = match next {
         Ok(outcome) => {
             let observation = Observation::from_outcome(VariableName::BootNext, &outcome);
             require_attributes(VariableName::BootNext, outcome.attributes, 7)?;
@@ -295,16 +350,19 @@ fn read_controls<C: WindowsCalls>(
                 Some(decode_single(&outcome.bytes, VariableName::BootNext)?),
                 observation,
                 true,
+                false,
             )
         }
         Err(ReadFailure::Missing { outcome }) => (
             None,
             Observation::from_outcome(VariableName::BootNext, &outcome),
             false,
+            true,
         ),
         Err(ReadFailure::Error { outcome }) => (
             None,
             Observation::from_outcome(VariableName::BootNext, &outcome),
+            false,
             false,
         ),
         Err(ReadFailure::ResourceLimit) => return Err(CollectorError::ResourceLimit),
@@ -319,6 +377,8 @@ fn read_controls<C: WindowsCalls>(
             boot_next_observation,
         ],
         boot_next_available,
+        boot_next_absent,
+        enumeration_bytes: order.bytes.len() + current.bytes.len(),
     })
 }
 
