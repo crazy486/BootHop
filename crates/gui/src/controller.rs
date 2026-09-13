@@ -397,9 +397,10 @@ enum ValidatedReport {
 }
 
 /// Public report semantics guaranteed by core::execute on a Linux host.
-/// The GUI does not independently validate or receive identity material; it trusts
-/// the privileged helper/core contract that a successful Inspect matched saved and
-/// live canonical identities.
+/// The GUI does not independently validate or receive identity material. For a
+/// successful Inspect of an existing Ready record, it trusts the privileged
+/// helper/core contract that saved and live canonical identities matched; a
+/// Missing-record Inspect is discovery only and has no saved identity to match.
 fn validate_report(request: Request, report: &Report) -> Option<ValidatedReport> {
     let target = match report.record {
         RecordDiagnostic::Missing => None,
