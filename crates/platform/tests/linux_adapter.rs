@@ -14,6 +14,12 @@ const GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 fn name(stem: &str) -> String {
     format!("{stem}-{GUID}")
 }
+fn is_boot_next_read_open(event: &str) -> bool {
+    event == format!("open:{}:ReadVariable", name("BootNext"))
+}
+fn is_boot_option_read_open(event: &str) -> bool {
+    event == format!("open:{}:ReadVariable", name("Boot0007"))
+}
 #[derive(Default)]
 struct Store;
 impl ProtectedStore for Store {
@@ -572,7 +578,7 @@ fn ready_inspect_does_not_open_boot_next_during_option_enumeration() {
             .borrow()
             .events
             .iter()
-            .any(|event| event.contains("BootNext"))
+            .any(|event| is_boot_next_read_open(event))
     );
 }
 
@@ -592,7 +598,7 @@ fn missing_record_inspect_does_not_open_boot_next_during_option_enumeration() {
             .borrow()
             .events
             .iter()
-            .any(|event| event.contains("BootNext"))
+            .any(|event| is_boot_next_read_open(event))
     );
 }
 
@@ -614,7 +620,7 @@ fn malformed_boot_next_does_not_affect_inspect_inventory() {
             .borrow()
             .events
             .iter()
-            .any(|event| event.contains("BootNext"))
+            .any(|event| is_boot_next_read_open(event))
     );
 }
 
@@ -809,6 +815,50 @@ fn ready_store() -> ReadyStore {
         .unwrap(),
     })
 }
+struct ConfigureStore {
+    saves: Rc<RefCell<usize>>,
+}
+impl ProtectedStore for ConfigureStore {
+    fn load(&mut self) -> Result<RecordState, Error> {
+        Ok(RecordState::Missing)
+    }
+    fn save(&mut self, _: &TargetRecord) -> Result<(), Error> {
+        *self.saves.borrow_mut() += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn configure_ignores_malformed_or_inaccessible_boot_next_and_only_saves_record() {
+    for inaccessible in [false, true] {
+        let calls = inventory_calls();
+        if inaccessible {
+            calls.0.borrow_mut().fail = Some(("BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c", 13));
+        } else {
+            calls.set("BootNext", &[7, 0, 0, 0, 7, 0, 0]);
+        }
+        let saves = Rc::new(RefCell::new(0));
+        let mut store = ConfigureStore {
+            saves: saves.clone(),
+        };
+        let report = boothop_core::execute(
+            boothop_core::Request::Configure {
+                boot_id: BootId(7),
+                os: boothop_core::Os::Windows,
+            },
+            boothop_core::Os::Linux,
+            &mut LinuxPlatform::new(&mut store, calls.clone()),
+        )
+        .unwrap();
+        assert_eq!(*saves.borrow(), 1);
+        assert_eq!(report.stages, [boothop_core::Stage::TargetValidated]);
+        let events = calls.0.borrow().events.clone();
+        assert!(!events.iter().any(|event| is_boot_next_read_open(event)));
+        assert!(calls.0.borrow().writes.is_empty());
+        assert!(calls.0.borrow().flags.is_empty());
+    }
+}
+
 fn switch(calls: &FakeLinuxCalls) -> Result<boothop_core::Report, Error> {
     boothop_core::execute(
         boothop_core::Request::Switch {
@@ -966,27 +1016,45 @@ fn switch_write_failures_race_conflict_and_readback_never_reboot() {
 fn switch_explicitly_reads_boot_next_and_fails_closed_on_malformed_or_inaccessible_value() {
     let calls = inventory_calls();
     calls.set("BootNext", &[7, 0, 0, 0, 7, 0, 0]);
-    let Error::FlowFailure { cause, .. } = switch(&calls).unwrap_err() else {
+    let Error::FlowFailure { cause, stages, .. } = switch(&calls).unwrap_err() else {
         panic!("flow failure")
     };
     assert_eq!(*cause, Error::UnsupportedFormat);
-    assert!(
-        calls
-            .0
-            .borrow()
-            .events
-            .iter()
-            .any(|event| event.contains("BootNext"))
-    );
+    assert_eq!(stages, [boothop_core::Stage::TargetValidated]);
+    let events = calls.0.borrow().events.clone();
+    let names = events.iter().position(|event| event == "names").unwrap();
+    let option = events
+        .iter()
+        .rposition(|event| is_boot_option_read_open(event))
+        .unwrap();
+    let next = events
+        .iter()
+        .position(|event| is_boot_next_read_open(event))
+        .unwrap();
+    // Core target validation is pure and emits no adapter event; the final
+    // Boot0007 reopen is the strongest observable inventory-complete marker.
+    assert!(names < option && option < next);
     assert!(calls.0.borrow().writes.is_empty());
     assert!(calls.0.borrow().flags.is_empty());
 
     let calls = inventory_calls();
     calls.0.borrow_mut().fail = Some(("BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c", 13));
-    let Error::FlowFailure { cause, .. } = switch(&calls).unwrap_err() else {
+    let Error::FlowFailure { cause, stages, .. } = switch(&calls).unwrap_err() else {
         panic!("flow failure")
     };
     assert_eq!(*cause, io("open", 13));
+    assert_eq!(stages, [boothop_core::Stage::TargetValidated]);
+    let events = calls.0.borrow().events.clone();
+    let names = events.iter().position(|event| event == "names").unwrap();
+    let option = events
+        .iter()
+        .rposition(|event| is_boot_option_read_open(event))
+        .unwrap();
+    let next = events
+        .iter()
+        .position(|event| is_boot_next_read_open(event))
+        .unwrap();
+    assert!(names < option && option < next);
     assert!(calls.0.borrow().writes.is_empty());
     assert!(calls.0.borrow().flags.is_empty());
 }
