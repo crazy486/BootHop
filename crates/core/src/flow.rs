@@ -1,7 +1,7 @@
 use crate::{
     BootId, Candidate, Classification, Error, OptionInventory, Os, RebootOutcome, RecordDiagnostic,
     RecordState, Report, Request, ResidualAssessment, Stage, TargetRecord, canonicalize,
-    expected_target,
+    expected_target, validate_target,
 };
 
 /// Adapter boundary. All methods except save/write/reboot must be read-only.
@@ -80,7 +80,16 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
         diagnostics,
     };
     match request {
-        Request::Inspect => Ok(report),
+        Request::Inspect => {
+            if let RecordState::Ready(target) = &record {
+                let index = options
+                    .iter()
+                    .position(|(id, _)| *id == target.boot_id)
+                    .ok_or(Error::TargetMissing)?;
+                validate_target(target, &options[index].1)?;
+            }
+            Ok(report)
+        }
         Request::Configure { boot_id, os } => {
             let index = options
                 .iter()
@@ -112,9 +121,7 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
                 .iter()
                 .position(|(id, _)| *id == target.boot_id)
                 .ok_or(Error::TargetMissing)?;
-            if identities[index].as_ref().map_err(Clone::clone)? != &target.identity {
-                return Err(Error::IdentityMismatch);
-            }
+            validate_target(&target, &options[index].1)?;
             report.stages.push(Stage::TargetValidated);
             let initial = platform
                 .read_next()

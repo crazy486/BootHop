@@ -1,9 +1,9 @@
 mod support;
 
 use boothop_core::{
-    BootId, CanonicalDevicePathNode, Classification, Error, Os, RebootOutcome, RecordDiagnostic,
-    RecordState, Request, ResidualAssessment, Stage, canonicalize, decode_record, encode_record,
-    execute,
+    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, Os, RebootOutcome,
+    RecordDiagnostic, RecordState, Request, ResidualAssessment, Stage, canonicalize, decode_record,
+    encode_record, execute,
 };
 use support::{Event, FakePlatform};
 
@@ -81,6 +81,167 @@ fn three_inspects_are_read_only() {
         assert!(!report.candidates[0].ambiguous);
     }
     assert_eq!(p.record, saved);
+    assert!(!p.events.iter().any(Event::is_mutation));
+}
+
+// This catches the production change that makes an exact saved/live identity match a
+// prerequisite for an Inspect Ready report.
+#[test]
+fn inspect_ready_requires_exact_live_identity_and_has_no_stages() {
+    let mut p = FakePlatform::ready();
+    let report = execute(Request::Inspect, Os::Linux, &mut p).unwrap();
+    assert_eq!(
+        report.record,
+        RecordDiagnostic::Ready {
+            boot_id: BootId(7),
+            os: Os::Windows
+        }
+    );
+    assert!(report.stages.is_empty());
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+}
+
+// This catches the production change that maps a saved BootId with no live option to
+// TargetMissing during Inspect.
+#[test]
+fn inspect_ready_with_absent_saved_boot_id_returns_target_missing() {
+    let mut p = FakePlatform::ready();
+    p.options[0].0 = BootId(8);
+    assert_eq!(
+        execute(Request::Inspect, Os::Linux, &mut p),
+        Err(Error::TargetMissing)
+    );
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+    assert!(!p.events.iter().any(Event::is_mutation));
+}
+
+// This catches the production change that rejects a changed structured canonical field
+// before Inspect can claim the protected target is Ready.
+#[test]
+fn inspect_ready_with_structured_identity_change_returns_identity_mismatch() {
+    let mut p = FakePlatform::ready();
+    let node = &mut p.options[0].1.file_paths[0].instances[0].nodes[0];
+    let DevicePathNodeKind::HardDrive(hard_drive) = &mut node.kind else {
+        panic!("fixture has a hard-drive node")
+    };
+    hard_drive.partition_number += 1;
+    node.payload[0..4].copy_from_slice(&hard_drive.partition_number.to_le_bytes());
+    assert_eq!(
+        execute(Request::Inspect, Os::Linux, &mut p),
+        Err(Error::IdentityMismatch)
+    );
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+    assert!(!p.events.iter().any(Event::is_mutation));
+}
+
+// This catches the production change that compares OptionalData OpaqueExact byte length.
+#[test]
+fn inspect_ready_with_optional_data_length_change_returns_identity_mismatch() {
+    let mut p = FakePlatform::ready();
+    p.options[0].1.optional_data.push(0);
+    assert_eq!(
+        execute(Request::Inspect, Os::Linux, &mut p),
+        Err(Error::IdentityMismatch)
+    );
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+    assert!(!p.events.iter().any(Event::is_mutation));
+}
+
+// This catches the production change that compares OptionalData OpaqueExact content digest.
+#[test]
+fn inspect_ready_with_equal_length_optional_data_change_returns_identity_mismatch() {
+    let mut p = FakePlatform::ready();
+    p.options[0].1.optional_data[0] ^= 1;
+    assert_eq!(
+        execute(Request::Inspect, Os::Linux, &mut p),
+        Err(Error::IdentityMismatch)
+    );
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+    assert!(!p.events.iter().any(Event::is_mutation));
+}
+
+// This catches the production change that keeps non-identity descriptions out of the
+// protected identity comparison.
+#[test]
+fn inspect_ready_with_description_only_change_remains_ready() {
+    let mut p = FakePlatform::ready();
+    p.options[0].1.description_utf16 = "Renamed".encode_utf16().collect();
+    let report = execute(Request::Inspect, Os::Linux, &mut p).unwrap();
+    assert_eq!(
+        report.record,
+        RecordDiagnostic::Ready {
+            boot_id: BootId(7),
+            os: Os::Windows
+        }
+    );
+    assert!(report.stages.is_empty());
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+}
+
+// This catches the production change that preserves discovery Inspect behavior when no
+// protected record exists.
+#[test]
+fn inspect_missing_record_preserves_discovery_result() {
+    let mut p = FakePlatform::missing();
+    let report = execute(Request::Inspect, Os::Linux, &mut p).unwrap();
+    assert_eq!(report.record, RecordDiagnostic::Missing);
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].boot_id, BootId(7));
+    assert_eq!(
+        report.candidates[0].classification,
+        Classification::NeedsConfirmation
+    );
+    assert!(report.stages.is_empty());
+    assert_eq!(
+        p.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
     assert!(!p.events.iter().any(Event::is_mutation));
 }
 
@@ -706,10 +867,9 @@ fn load_attributes_and_description_are_revalidated_each_time() {
             1 => p.options[0].1.attributes = 3,
             _ => p.options[0].1.description_utf16 = vec![0xd800],
         }
-        let report = execute(Request::Inspect, Os::Linux, &mut p).unwrap();
         assert_eq!(
-            report.candidates[0].classification,
-            Classification::Unsupported
+            execute(Request::Inspect, Os::Linux, &mut p),
+            Err(Error::UnsupportedFormat)
         );
         for request in [requests()[1], switch()] {
             assert_eq!(

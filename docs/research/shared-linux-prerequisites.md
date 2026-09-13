@@ -40,6 +40,8 @@ FilePath保留终止前UTF-16码元，要求首码元为反斜杠、路径不为
 
 Description仅供显示：合法UTF-16改名不影响identity；空描述允许，显示层转义控制字符，不据名称分类。load-option attributes每次仅允许0x00000001或0x00000009（ACTIVE，HIDDEN可选，CATEGORY_BOOT=0），其他位/未激活均UnsupportedFormat；HIDDEN只影响显示而不改变identity。变量attributes独立要求Boot####/BootOrder/BootNext恰为7，BootCurrent恰为6；未知认证/附加位拒绝。两类attributes不进入identity，但每次inspect/configure/switch都重新验证；权限/读取错误不能被人工OS确认绕过。
 
+Stage 4 review 曾撤回“Ready Inspect 已证明身份匹配”的旧表述：旧行为只证明记录读取成功并能枚举 live entry。现行实现要求已有受保护记录的 Inspect 按保存 BootId 找到当前 live option，使用同一 canonicalization/validation 路径比较全部结构化字段及 OptionalData OpaqueExact 的长度和 SHA-256；完整匹配才是可信的 Ready/Configured，BootId 缺失为 TargetMissing，任一身份差异为 IdentityMismatch。该 Inspect 边界仍不读取/检查 BootNext，不执行生产 Switch 状态机，也不提供 Switch dry run；真实 Stage 4 仍须重新安装后再获授权重复生产 Inspect，fake 测试不替代实证。
+
 所有OptionalData（含空）严格 `OpaqueExactV1 { algorithm: Sha256, byte_length: u64, digest: [u8; 32] }`，源为同一完整解析buffer的全部余字节。成熟库SHA-256完整摘要，不裁剪/NUL清理/重编码/提取子集。any identity差异→IdentityMismatch，停止switch且无WriteNext/Reboot/SaveRecord；原编号不存在也停止，不搜索替代编号。用户主动重新选择确认OS、正常授权configure才建立新基线。全部结构有效仍不能证明最终OS或启动链安全；相同路径二进制/BCD变化、外部检查后变化与SHA-256抗碰撞假设仍是边界。
 
 自动Known启用表为空：当前所有受支持候选均NeedsConfirmation，包含名称看似Windows、GRUB或唯一候选。用户确认Windows/Linux用于configure保存os，不放宽有效性。per-OS只保存对侧目标。未来增加Known或容忍变化需另有依据/审查；自然更新配对只约束未来宽松策略。
