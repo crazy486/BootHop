@@ -175,9 +175,6 @@ pub(crate) fn read_options<C: LinuxCalls>(
     }
     let current = read(calls, "BootCurrent", false)?.ok_or(Error::TargetMissing)?;
     referenced[decode_id(&current, 6)?.0 as usize] = true;
-    if let Some(next) = read(calls, "BootNext", true)? {
-        referenced[decode_boot_next(&next)?.0 as usize] = true;
-    }
     let names = calls.names(&dir)?;
     let mut discovered = [false; 65536];
     for name in names {

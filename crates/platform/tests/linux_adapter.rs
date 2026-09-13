@@ -550,6 +550,74 @@ fn options(calls: &FakeLinuxCalls) -> Result<boothop_core::OptionInventory, Erro
     LinuxPlatform::new(&mut Store, calls.clone()).read_options()
 }
 
+#[test]
+fn ready_inspect_does_not_open_boot_next_during_option_enumeration() {
+    let calls = inventory_calls();
+    let report = boothop_core::execute(
+        boothop_core::Request::Inspect,
+        boothop_core::Os::Linux,
+        &mut LinuxPlatform::new(&mut ready_store(), calls.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        report.record,
+        boothop_core::RecordDiagnostic::Ready {
+            boot_id: BootId(7),
+            os: boothop_core::Os::Windows,
+        }
+    );
+    assert!(
+        !calls
+            .0
+            .borrow()
+            .events
+            .iter()
+            .any(|event| event.contains("BootNext"))
+    );
+}
+
+#[test]
+fn missing_record_inspect_does_not_open_boot_next_during_option_enumeration() {
+    let calls = inventory_calls();
+    let report = boothop_core::execute(
+        boothop_core::Request::Inspect,
+        boothop_core::Os::Linux,
+        &mut LinuxPlatform::new(&mut Store, calls.clone()),
+    )
+    .unwrap();
+    assert_eq!(report.record, boothop_core::RecordDiagnostic::Missing);
+    assert!(
+        !calls
+            .0
+            .borrow()
+            .events
+            .iter()
+            .any(|event| event.contains("BootNext"))
+    );
+}
+
+#[test]
+fn malformed_boot_next_does_not_affect_inspect_inventory() {
+    let calls = inventory_calls();
+    calls.set("BootNext", &[7, 0, 0, 0, 7, 0, 0]);
+    let report = boothop_core::execute(
+        boothop_core::Request::Inspect,
+        boothop_core::Os::Linux,
+        &mut LinuxPlatform::new(&mut Store, calls.clone()),
+    )
+    .unwrap();
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].boot_id, BootId(7));
+    assert!(
+        !calls
+            .0
+            .borrow()
+            .events
+            .iter()
+            .any(|event| event.contains("BootNext"))
+    );
+}
+
 // Catches reference-only discovery, lowercase/malformed names, and prefix leakage to parser.
 #[test]
 fn strict_global_enumeration_includes_orphans() {
@@ -625,14 +693,6 @@ fn all_control_variables_and_option_attributes_are_validated() {
                 vec![6, 0, 0, 0, 7, 0, 0, 0],
             ],
         ),
-        (
-            "BootNext",
-            vec![
-                vec![6, 0, 0, 0, 7, 0],
-                vec![7, 0, 0],
-                vec![7, 0, 0, 0, 7, 0, 0],
-            ],
-        ),
     ] {
         for bytes in values {
             let calls = inventory_calls();
@@ -661,9 +721,6 @@ fn missing_control_references_and_disappearing_entries_fail_whole_inventory() {
     }
     let calls = inventory_calls();
     calls.set("BootOrder", &[7, 0, 0, 0, 8, 0]);
-    assert_eq!(options(&calls), Err(Error::TargetMissing));
-    let calls = inventory_calls();
-    calls.set("BootNext", &[7, 0, 0, 0, 8, 0]);
     assert_eq!(options(&calls), Err(Error::TargetMissing));
     let calls = inventory_calls();
     calls.0.borrow_mut().fail = Some(("Boot0007-8be4df61-93ca-11d2-aa0d-00e098032b8c", 2));
@@ -902,6 +959,35 @@ fn switch_write_failures_race_conflict_and_readback_never_reboot() {
     };
     assert_eq!(*cause, Error::ReadbackFailed);
     assert_eq!(calls.0.borrow().writes.len(), 1);
+    assert!(calls.0.borrow().flags.is_empty());
+}
+
+#[test]
+fn switch_explicitly_reads_boot_next_and_fails_closed_on_malformed_or_inaccessible_value() {
+    let calls = inventory_calls();
+    calls.set("BootNext", &[7, 0, 0, 0, 7, 0, 0]);
+    let Error::FlowFailure { cause, .. } = switch(&calls).unwrap_err() else {
+        panic!("flow failure")
+    };
+    assert_eq!(*cause, Error::UnsupportedFormat);
+    assert!(
+        calls
+            .0
+            .borrow()
+            .events
+            .iter()
+            .any(|event| event.contains("BootNext"))
+    );
+    assert!(calls.0.borrow().writes.is_empty());
+    assert!(calls.0.borrow().flags.is_empty());
+
+    let calls = inventory_calls();
+    calls.0.borrow_mut().fail = Some(("BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c", 13));
+    let Error::FlowFailure { cause, .. } = switch(&calls).unwrap_err() else {
+        panic!("flow failure")
+    };
+    assert_eq!(*cause, io("open", 13));
+    assert!(calls.0.borrow().writes.is_empty());
     assert!(calls.0.borrow().flags.is_empty());
 }
 

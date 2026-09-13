@@ -37,7 +37,7 @@ BootHop 能验证启动项配置并请求一次性启动，不能证明引导器
 
 发现、只读验证和诊断当前 UEFI 状态。用于首次配置、重新选择和失效后的重新发现。不写固件或更新可信目标配置，不重启。需要权限时允许触发 UAC / polkit。
 
-Stage 4 review 记录了一个已撤回的历史含义：此前 Ready 只表示受保护记录已加载且可枚举到 live 启动项，并不证明二者的 canonical identity 相等。现行契约修订为：当已有受保护记录时，Inspect 必须按记录中的 BootId 找到 live option、生成同一完整 canonical identity 并逐字段（含 OptionalData OpaqueExact 长度和 SHA-256）比较；只有完整匹配才可返回 Ready/Configured，缺失返回 TargetMissing，失配返回 IdentityMismatch。该校验仍是只读的；Inspect 不读取或检查 BootNext 冲突，不运行生产 Switch 状态机，也不是 Switch dry run。
+Stage 4 review 记录了一个已撤回的历史含义：此前 Ready 只表示受保护记录已加载且可枚举到 live 启动项，并不证明二者的 canonical identity 相等。现行契约修订为：当已有受保护记录时，Inspect 必须按记录中的 BootId 找到 live option、生成同一完整 canonical identity 并逐字段（含 OptionalData OpaqueExact 长度和 SHA-256）比较；只有完整匹配才可返回 Ready/Configured，缺失返回 TargetMissing，失配返回 IdentityMismatch。该校验仍是只读的；Inspect 的选项枚举只读取并验证 BootOrder、BootCurrent 和发现的 Boot####，不打开 BootNext；BootNext 仅由 Switch 的显式 `read_next` 读取和验证。Inspect 不检查 BootNext 冲突，不运行生产 Switch 状态机，也不是 Switch dry run。
 
 ### configure
 
