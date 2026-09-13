@@ -123,10 +123,12 @@ pub fn collect_with<C: WindowsCalls>(calls: &mut C) -> Result<Evidence, Collecti
     match calls.restore_privilege(privilege) {
         Ok(()) => result,
         Err(error) => {
-            let evidence = match result {
+            let mut evidence = match result {
                 Ok(evidence) => evidence,
                 Err(failure) => failure.evidence,
             };
+            evidence.accepted = false;
+            evidence.terminal = TerminalOutcome::Failed;
             Err(CollectionFailure {
                 error: CollectorError::RestorePrivilege {
                     raw_code: error.raw_code,

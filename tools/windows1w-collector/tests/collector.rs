@@ -32,6 +32,11 @@ fn privilege_success_restores_original_state_and_failed_restore_is_terminal() {
     failed.restore_error = Some(CallError::new(87));
     let result = collect_with(&mut failed);
     assert!(result.is_err());
+    let failure = result.expect_err("restore failure");
+    assert!(!failure.evidence.accepted);
+    assert_eq!(failure.evidence.terminal, TerminalOutcome::Failed);
+    assert!(!failure.evidence.attempts.is_empty());
+    assert!(!failure.evidence.options.is_empty());
     assert_eq!(failed.log.last().map(String::as_str), Some("restore"));
     assert!(
         !failed
