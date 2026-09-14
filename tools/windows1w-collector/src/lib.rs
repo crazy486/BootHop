@@ -56,6 +56,11 @@ where
     Ok(Args::new(run_id.to_owned()))
 }
 
+/// Returns the deterministic path for pure inspection/tests only.
+///
+/// Callers that will create or write evidence must use
+/// [`prepare_evidence_path`], which performs fixed-root no-follow checks and
+/// canonical containment verification before returning a write path.
 pub fn evidence_path(args: &Args) -> Result<PathBuf, ArgumentError> {
     validate_run_id(args.run_id())?;
     Ok(PathBuf::from(".superpowers/sdd/2026-09-08-boothop/private/windows1w").join(args.run_id()))
