@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-#[cfg(windows)]
-use boothop_windows1w_collector::WindowsBackend;
 use boothop_windows1w_collector::{
-    ACKNOWLEDGEMENT, ArgumentError, MAX_ENUMERATION_BYTES, WindowsCalls, evidence_path, parse_args,
-    write_report,
+    ACKNOWLEDGEMENT, ArgumentError, MAX_ENUMERATION_BYTES, evidence_path, parse_args, write_report,
 };
+#[cfg(windows)]
+use boothop_windows1w_collector::{WindowsBackend, WindowsCalls};
 
 #[test]
 fn parser_requires_the_exact_ordered_interlock() {
