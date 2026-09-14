@@ -21,8 +21,8 @@ Date: 2026-09-13
 - Linux Stage 2 read-only privileged Inspect: PASS.
 - Linux Stage 3 Configure: PASS.
 - Linux Stage 4 pre-switch read-only acceptance: PASS.
-- Stage 5 production Switch was actually executed. BootNext write/readback and the reboot path occurred, and the user manually confirmed arrival in Windows 11. Windows-side post-boot BootOrder/BootNext evidence is still pending; Stage 5 is not closed and must not be called PASS.
-- Windows1W remains incomplete.
+- Stage 5 production Switch was actually executed. BootNext write/readback and the reboot path occurred, and the user manually confirmed arrival in Windows 11. The single authorized Windows-side evidence run observed stable unchanged `BootOrder=[0000,0003]`, stable `BootCurrent=0000`, and stable BootNext Win32 error 203. Because BootCurrent did not corroborate direct `Boot0003` selection and the firmware API contract does not explicitly guarantee 203 as missing-variable semantics, Stage 5 remains pending and must not be called PASS.
+- Windows1W native read evidence is `PASS_WITH_LIMITATION`: real UEFI reads, attributes, shared-parser compatibility, and sequential stability were verified. Firmware type and privilege enable/restore are attested by the reviewed collector control flow rather than direct evidence fields. This releases the Windows1W research gate for future Windows production implementation, but no Windows production work has started.
 
 ## Safety state
 
@@ -31,7 +31,7 @@ Date: 2026-09-13
 - Do not change BootOrder.
 - Do not use `bcdedit` or `efibootmgr` to repair anything.
 - Do not begin Windows -> Linux Switch.
-- Do not start Windows production work before Windows1W completes.
+- Windows production work may start only under a new explicit scope; the Windows1W research gate is released with the limitations recorded in `docs/research/windows1w-real-evidence-2026-09-14.md`.
 
 ## Windows resume point
 
@@ -41,7 +41,7 @@ Resume in this exact safe order:
 2. Read the design, specification, plan, and this handoff.
 3. Restore the SDD controller context.
 4. Keep Stage 5 pending.
-5. Stop at the Windows1W read-only firmware API authorization boundary. Do not call Windows firmware APIs without explicit user authorization.
+5. Do not repeat the completed one-time Windows1W collector run. Any additional Windows firmware API access requires a new explicit user authorization.
 
 ## Remaining gates
 
