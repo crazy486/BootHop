@@ -412,6 +412,7 @@ fn read_controls<C: WindowsCalls>(
         enumeration_bytes: order.bytes.len() + current.bytes.len(),
         snapshot: ControlSnapshot {
             boot_order: boot_order.clone(),
+            boot_order_status: order.status,
             boot_order_bytes_returned: order.bytes_returned,
             boot_order_last_error: order.last_error,
             boot_order_attributes: order.attributes,

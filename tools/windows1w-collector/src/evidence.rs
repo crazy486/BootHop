@@ -29,6 +29,7 @@ pub struct ControlValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlSnapshot {
     pub boot_order: Vec<BootId>,
+    pub boot_order_status: ReadStatus,
     pub boot_order_bytes_returned: usize,
     pub boot_order_last_error: u32,
     pub boot_order_attributes: u32,
@@ -165,9 +166,10 @@ pub fn render_private_report(
             push_line(
                 &mut report,
                 &format!(
-                    "{} boot_order={:?} boot_order_bytes_returned={} boot_order_last_error={} boot_order_attributes={} boot_order_payload_sha256={}",
+                    "{} boot_order={:?} boot_order_status={:?} boot_order_bytes_returned={} boot_order_last_error={} boot_order_attributes={} boot_order_payload_sha256={}",
                     label,
                     snapshot.boot_order,
+                    snapshot.boot_order_status,
                     snapshot.boot_order_bytes_returned,
                     snapshot.boot_order_last_error,
                     snapshot.boot_order_attributes,
