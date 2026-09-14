@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::{
     BootId, EnumerationDiagnostic, OptionInventory, Os, Platform, RebootOutcome, RecordState,
     Stage, TargetRecord,
