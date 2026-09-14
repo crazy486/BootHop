@@ -5,7 +5,10 @@ use boothop_core::{BootId, parse_load_option};
 use crate::{
     FirmwareType, MAX_ENUMERATION_BYTES, PrivilegeState, ReadOutcome, ReadStatus, VariableName,
     WindowsCalls,
-    evidence::{Attempt, Evidence, OptionEvidence, TerminalOutcome, attempt, digest},
+    evidence::{
+        Attempt, ControlSnapshot, ControlValue, Evidence, OptionEvidence, TerminalOutcome, attempt,
+        digest,
+    },
     model::{INITIAL_BUFFER_BYTES, MAX_PAYLOAD_BYTES},
 };
 
@@ -95,6 +98,8 @@ impl CollectionFailure {
         attempts: Vec<Attempt>,
         options: Vec<OptionEvidence>,
         option_ids: Vec<BootId>,
+        first_control: Option<ControlSnapshot>,
+        second_control: Option<ControlSnapshot>,
     ) -> Self {
         Self {
             error,
@@ -106,6 +111,8 @@ impl CollectionFailure {
                 accepted: false,
                 boot_next_absent: false,
                 terminal: TerminalOutcome::Failed,
+                first_control: first_control.map(Box::new),
+                second_control: second_control.map(Box::new),
             },
         }
     }
@@ -171,9 +178,13 @@ fn collect_after_privilege<C: WindowsCalls>(
     };
     let mut enumeration_bytes = first.enumeration_bytes;
     if enumeration_bytes > MAX_ENUMERATION_BYTES {
-        return Err(CollectionFailure::new(
+        return Err(CollectionFailure::with_state(
             CollectorError::ResourceLimit,
             attempts,
+            Vec::new(),
+            Vec::new(),
+            Some(first.snapshot.clone()),
+            None,
         ));
     }
     let mut option_ids = Vec::new();
@@ -202,6 +213,8 @@ fn collect_after_privilege<C: WindowsCalls>(
                     attempts,
                     options.clone(),
                     option_ids.clone(),
+                    Some(first.snapshot.clone()),
+                    None,
                 ));
             }
             Err(ReadFailure::Error { outcome }) => {
@@ -213,6 +226,8 @@ fn collect_after_privilege<C: WindowsCalls>(
                     attempts,
                     options.clone(),
                     option_ids.clone(),
+                    Some(first.snapshot.clone()),
+                    None,
                 ));
             }
             Err(ReadFailure::ResourceLimit) => {
@@ -221,6 +236,8 @@ fn collect_after_privilege<C: WindowsCalls>(
                     attempts,
                     options.clone(),
                     option_ids.clone(),
+                    Some(first.snapshot.clone()),
+                    None,
                 ));
             }
         };
@@ -234,6 +251,8 @@ fn collect_after_privilege<C: WindowsCalls>(
                 attempts,
                 options.clone(),
                 option_ids.clone(),
+                Some(first.snapshot.clone()),
+                None,
             ));
         }
         enumeration_bytes = match enumeration_bytes.checked_add(outcome.bytes.len()) {
@@ -244,6 +263,8 @@ fn collect_after_privilege<C: WindowsCalls>(
                     attempts,
                     options.clone(),
                     option_ids.clone(),
+                    Some(first.snapshot.clone()),
+                    None,
                 ));
             }
         };
@@ -255,6 +276,8 @@ fn collect_after_privilege<C: WindowsCalls>(
                     attempts,
                     options,
                     option_ids,
+                    Some(first.snapshot.clone()),
+                    None,
                 ));
             }
         };
@@ -268,7 +291,12 @@ fn collect_after_privilege<C: WindowsCalls>(
         Ok(controls) => controls,
         Err(error) => {
             return Err(CollectionFailure::with_state(
-                error, attempts, options, option_ids,
+                error,
+                attempts,
+                options,
+                option_ids,
+                Some(first.snapshot.clone()),
+                None,
             ));
         }
     };
@@ -288,6 +316,8 @@ fn collect_after_privilege<C: WindowsCalls>(
         accepted: terminal == TerminalOutcome::Accepted,
         boot_next_absent: stable && first.boot_next_absent && second.boot_next_absent,
         terminal,
+        first_control: Some(Box::new(first.snapshot)),
+        second_control: Some(Box::new(second.snapshot)),
     })
 }
 
@@ -300,6 +330,7 @@ struct Controls {
     boot_next_available: bool,
     boot_next_absent: bool,
     enumeration_bytes: usize,
+    snapshot: ControlSnapshot,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -368,17 +399,41 @@ fn read_controls<C: WindowsCalls>(
         Err(ReadFailure::ResourceLimit) => return Err(CollectorError::ResourceLimit),
     };
     Ok(Controls {
-        boot_order,
+        boot_order: boot_order.clone(),
         boot_current,
         boot_next,
         observations: vec![
             order_observation,
             current_observation,
-            boot_next_observation,
+            boot_next_observation.clone(),
         ],
         boot_next_available,
         boot_next_absent,
         enumeration_bytes: order.bytes.len() + current.bytes.len(),
+        snapshot: ControlSnapshot {
+            boot_order: boot_order.clone(),
+            boot_order_bytes_returned: order.bytes_returned,
+            boot_order_last_error: order.last_error,
+            boot_order_attributes: order.attributes,
+            boot_order_payload_sha256: digest(&order.bytes),
+            boot_current: ControlValue {
+                status: current.status,
+                value: Some(boot_current),
+                bytes_returned: current.bytes_returned,
+                last_error: current.last_error,
+                attributes: current.attributes,
+                payload_sha256: digest(&current.bytes),
+            },
+            boot_next: ControlValue {
+                status: boot_next_observation.status,
+                value: boot_next,
+                bytes_returned: boot_next_observation.bytes_returned,
+                last_error: boot_next_observation.last_error,
+                attributes: boot_next_observation.attributes,
+                payload_sha256: boot_next_observation.digest.clone(),
+            },
+            sequential_not_atomic: true,
+        },
     })
 }
 

@@ -29,7 +29,6 @@ use crate::{
 const CURRENT_PROCESS_PSEUDO_HANDLE: HANDLE = -1isize as *mut c_void;
 const FIRMWARE_GUID: &str = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
 const SYSTEM_ENVIRONMENT_PRIVILEGE: &str = "SeSystemEnvironmentPrivilege";
-const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -295,9 +294,6 @@ impl WindowsCalls for WindowsBackend {
                 .checked_mul(2)
                 .unwrap_or(MAX_PAYLOAD_BYTES.saturating_add(1));
             return ReadOutcome::buffer_too_small(required_size, attributes);
-        }
-        if error == ERROR_ENVVAR_NOT_FOUND {
-            return ReadOutcome::missing_with_attributes(error, attributes);
         }
         ReadOutcome {
             status: ReadStatus::Error,

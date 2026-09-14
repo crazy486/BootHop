@@ -82,6 +82,8 @@ fn backend_source_uses_the_braced_fixed_firmware_guid() {
     assert!(source.contains("SetLastError(0)"));
     assert!(source.contains("previous.PrivilegeCount == 0"));
     assert!(source.contains("impl Drop for WindowsBackend"));
+    assert!(!source.contains("ERROR_ENVVAR_NOT_FOUND"));
+    assert!(!source.contains("ReadStatus::Missing"));
     assert_eq!(MAX_ENUMERATION_BYTES, 1_048_576);
 }
 

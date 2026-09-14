@@ -48,7 +48,15 @@ Evidence is written only below the fixed private root
 The collector performs bounded reads (maximum 1 MiB), preserves native error
 codes and returned attributes, retains raw option payloads separately from
 `boothop-core` parsing, and restores the exact prior privilege attributes
-before normal exit. The entry point returns failure for invalid setup,
+before normal exit. The native backend preserves every non-buffer firmware
+failure (including error 203) as `ReadStatus::Error`; it never infers
+BootNext absence. Explicit `ReadStatus::Missing` and two-matching absence
+proof are fake-only semantic coverage pending Windows1W evidence.
+
+The private report records every attempt, both sequential (not atomic)
+control snapshots, and bounded Boot#### payload length/digest entries. Raw
+Boot#### payloads are written to exclusive `Boot%04X.bin` files below the
+private root, separate from parsed summaries. The entry point returns failure for invalid setup,
 collection, or report writes, and success only for accepted evidence. This
 artifact provides preparation and static evidence,
 not Windows firmware behavior evidence; no real-session authorization is

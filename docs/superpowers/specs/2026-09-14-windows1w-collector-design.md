@@ -40,6 +40,12 @@ The future real entry point verifies the UEFI firmware type, opens its own proce
 
 It reads `BootOrder`, `BootCurrent`, and `BootNext` through `GetFirmwareEnvironmentVariableExW`. Every successful read validates the exact shared prerequisite variable attributes: `7` for `BootOrder`, `BootNext`, and `Boot####`; `6` for `BootCurrent`. Any other value, including unknown authentication/additional bits, is recorded and rejected. It then deduplicates the `BootId` union referenced by successful, structurally and attribute-valid control reads and reads only those `Boot%04X` variables. It never scans `Boot0000..BootFFFF`. A missing or failed `BootNext` does not expand discovery. Two matching explicit missing observations may establish `boot_next_absent`; a generic error remains unavailable and is never interpreted as absence. Missing, unreadable, or attribute-invalid referenced options are recorded and make the collection non-accepting; nothing is repaired.
 
+The current native backend deliberately maps every non-buffer firmware-read
+failure, including `ERROR_ENVVAR_NOT_FOUND` (203), to `ReadStatus::Error`.
+`ReadStatus::Missing` and the two-matching-missing absence proof are
+fake-only semantic coverage until Windows1W evidence authorizes a native
+absence interpretation.
+
 Control variables are read a second time. Equality means only that the sequential observations were stable; the collector never calls them an atomic snapshot. Any difference is recorded as unstable.
 
 The collector restores the original privilege state before normal exit. A restore failure records a diagnostic, causes failure, performs no further firmware reads, launches no child process, and exits. Tests assert the call log ends at the failed restore.

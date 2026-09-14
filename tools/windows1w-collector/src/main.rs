@@ -3,7 +3,8 @@ fn main() -> std::process::ExitCode {
     use std::env;
 
     use boothop_windows1w_collector::{
-        WindowsBackend, collect_with, parse_args, prepare_evidence_path, write_report,
+        WindowsBackend, collect_with, parse_args, prepare_evidence_path, render_private_report,
+        write_option_payloads, write_report,
     };
 
     let raw_args: Vec<String> = env::args().skip(1).collect();
@@ -24,8 +25,35 @@ fn main() -> std::process::ExitCode {
 
     let mut calls = WindowsBackend::new();
     let (accepted, report) = match collect_with(&mut calls) {
-        Ok(evidence) => (evidence.accepted, render_evidence(&evidence)),
-        Err(failure) => (false, render_failure(&failure)),
+        Ok(evidence) => {
+            if let Err(error) = write_option_payloads(&root, &evidence) {
+                eprintln!("cannot write private option payloads: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+            let report = match render_private_report(&evidence, None) {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!("cannot render private collector report: {error:?}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            };
+            (evidence.accepted, report)
+        }
+        Err(failure) => {
+            if let Err(error) = write_option_payloads(&root, &failure.evidence) {
+                eprintln!("cannot write private option payloads: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+            let error_text = format!("{:?}", failure.error);
+            let report = match render_private_report(&failure.evidence, Some(&error_text)) {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!("cannot render private collector report: {error:?}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            };
+            (false, report)
+        }
     };
     if let Err(error) = write_report(&root.join("collector-report.txt"), &report) {
         eprintln!("cannot write private collector report: {error}");
@@ -44,28 +72,4 @@ fn main() -> std::process::ExitCode {
     // workspace metadata and ordinary library tests buildable without ever
     // constructing the native backend.
     std::process::ExitCode::FAILURE
-}
-
-#[cfg(windows)]
-fn render_evidence(evidence: &boothop_windows1w_collector::Evidence) -> String {
-    format!(
-        "accepted={} terminal={:?} stable={} attempts={} options={} option_ids={:?}\n",
-        evidence.accepted,
-        evidence.terminal,
-        evidence.stable,
-        evidence.attempts.len(),
-        evidence.options.len(),
-        evidence.option_ids,
-    )
-}
-
-#[cfg(windows)]
-fn render_failure(failure: &boothop_windows1w_collector::CollectionFailure) -> String {
-    format!(
-        "accepted=false error={:?} attempts={} options={} option_ids={:?}\n",
-        failure.error,
-        failure.evidence.attempts.len(),
-        failure.evidence.options.len(),
-        failure.evidence.option_ids,
-    )
 }

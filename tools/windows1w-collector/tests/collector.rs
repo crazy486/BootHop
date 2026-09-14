@@ -3,7 +3,8 @@ mod support;
 use boothop_core::BootId;
 use boothop_windows1w_collector::{
     ACKNOWLEDGEMENT, CallError, FirmwareType, PrivilegeState, ReadOutcome, ReadStatus,
-    TerminalOutcome, VariableName, collect_with, parse_args,
+    TerminalOutcome, VariableName, collect_with, parse_args, render_private_report,
+    write_option_payloads,
 };
 use support::{FakeCalls, load_option_bytes};
 
@@ -297,6 +298,49 @@ fn later_failure_preserves_prior_option_evidence_and_aggregate_budget_fails_clos
         boothop_windows1w_collector::CollectorError::ResourceLimit
     ));
     assert!(!failure.evidence.accepted);
+}
+
+#[test]
+fn structured_report_contains_all_attempt_fields_and_both_sequential_snapshots() {
+    let mut calls = FakeCalls::minimal_valid();
+    let evidence = collect_with(&mut calls).expect("fake collection succeeds");
+    let report = render_private_report(&evidence, None).expect("bounded report");
+    assert!(report.contains("snapshot_semantics=sequential_not_atomic"));
+    assert!(report.contains("attempt ordinal=0 variable=BootOrder status=Success success=true"));
+    assert!(report.contains("bytes_returned=2"));
+    assert!(report.contains("last_error=0"));
+    assert!(report.contains("attributes=7"));
+    assert!(report.contains("payload_sha256="));
+    assert!(report.contains("summary=\"BootOrder: success, 2 bytes\""));
+    assert!(report.contains("buffer_too_small=false"));
+    assert!(report.contains("first_control boot_order=[BootId(1)]"));
+    assert!(report.contains("second_control boot_order=[BootId(1)]"));
+    assert!(report.contains("first_control.boot_next status=Success value=Some(BootId(1))"));
+    assert!(!report.contains("[1, 0, 0, 0"));
+}
+
+#[test]
+fn failure_report_retains_snapshots_attempts_and_separate_raw_option_file() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.second_order = Some(vec![1]);
+    let failure = collect_with(&mut calls).expect_err("second pass malformed");
+    let report = render_private_report(&failure.evidence, Some("MalformedControl")).unwrap();
+    assert!(report.contains("error=MalformedControl"));
+    assert!(report.contains("first_control boot_order="));
+    assert!(!report.contains("second_control boot_order="));
+    assert!(report.contains("option boot_id=1 raw_file=Boot0001.bin raw_length="));
+    assert!(!report.contains("[1, 0, 0, 0"));
+
+    let directory = std::env::temp_dir().join(format!(
+        "boothop-windows1w-options-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    write_option_payloads(&directory, &failure.evidence).unwrap();
+    assert!(directory.join("Boot0001.bin").is_file());
+    assert!(write_option_payloads(&directory, &failure.evidence).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 fn large_load_option_bytes(size: usize) -> Vec<u8> {

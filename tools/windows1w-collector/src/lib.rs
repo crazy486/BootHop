@@ -12,6 +12,7 @@ use std::os::windows::fs::MetadataExt;
 
 pub use collect::{CollectionFailure, CollectorError, collect_with};
 pub use evidence::{Attempt, Evidence, OptionEvidence, TerminalOutcome};
+pub use evidence::{ControlSnapshot, ControlValue, ReportError, render_private_report};
 pub use model::{
     Args, CallError, FirmwareType, INITIAL_BUFFER_BYTES, MAX_ENUMERATION_BYTES, MAX_PAYLOAD_BYTES,
     MAX_SUMMARY_BYTES, PrivilegeState, ReadOutcome, ReadStatus, VariableName, WindowsCalls,
@@ -87,12 +88,30 @@ pub fn write_report(path: &Path, report: &str) -> io::Result<()> {
             "collector report exceeds the fixed private limit",
         ));
     }
+    write_exclusive(path, report.as_bytes(), MAX_REPORT_BYTES)
+}
+
+pub fn write_option_payloads(root: &Path, evidence: &Evidence) -> io::Result<()> {
+    for option in &evidence.options {
+        let path = root.join(format!("Boot{:04X}.bin", option.boot_id.0));
+        write_exclusive(&path, &option.raw_payload, MAX_PAYLOAD_BYTES)?;
+    }
+    Ok(())
+}
+
+fn write_exclusive(path: &Path, bytes: &[u8], limit: usize) -> io::Result<()> {
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private evidence payload exceeds the fixed limit",
+        ));
+    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)?;
     use io::Write;
-    file.write_all(report.as_bytes())?;
+    file.write_all(bytes)?;
     file.sync_all()
 }
 
