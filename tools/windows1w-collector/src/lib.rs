@@ -11,7 +11,10 @@ use std::{fs, io, path::Path};
 use std::os::windows::fs::MetadataExt;
 
 pub use collect::{CollectionFailure, CollectorError, collect_with};
-pub use evidence::{Attempt, Evidence, OptionEvidence, TerminalOutcome};
+pub use evidence::{
+    Attempt, Evidence, OptionEvidence, RawOptionEvidence, RawOptionParseStatus,
+    RawOptionValidation, TerminalOutcome,
+};
 pub use evidence::{ControlSnapshot, ControlValue, ReportError, render_private_report};
 pub use model::{
     Args, CallError, FirmwareType, INITIAL_BUFFER_BYTES, MAX_ENUMERATION_BYTES, MAX_PAYLOAD_BYTES,
@@ -92,7 +95,7 @@ pub fn write_report(path: &Path, report: &str) -> io::Result<()> {
 }
 
 pub fn write_option_payloads(root: &Path, evidence: &Evidence) -> io::Result<()> {
-    for option in &evidence.options {
+    for option in &evidence.raw_options {
         let path = root.join(format!("Boot{:04X}.bin", option.boot_id.0));
         write_exclusive(&path, &option.raw_payload, MAX_PAYLOAD_BYTES)?;
     }

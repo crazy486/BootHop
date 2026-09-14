@@ -54,9 +54,12 @@ BootNext absence. Explicit `ReadStatus::Missing` and two-matching absence
 proof are fake-only semantic coverage pending Windows1W evidence.
 
 The private report records every attempt, both sequential (not atomic)
-control snapshots, and bounded Boot#### payload length/digest entries. Raw
-Boot#### payloads are written to exclusive `Boot%04X.bin` files below the
-private root, separate from parsed summaries. The entry point returns failure for invalid setup,
+control snapshots, and bounded Boot#### payload length/digest entries. Every
+successfully read referenced Boot#### payload is retained in a separate raw
+capture even when attributes are invalid or parsing fails; only validated and
+parsed payloads become parsed option evidence. Raw Boot#### payloads are written
+to exclusive `Boot%04X.bin` files below the private root, separate from parsed
+summaries, with validation/parse status recorded without raw bytes. The entry point returns failure for invalid setup,
 collection, or report writes, and success only for accepted evidence. This
 artifact provides preparation and static evidence,
 not Windows firmware behavior evidence; no real-session authorization is

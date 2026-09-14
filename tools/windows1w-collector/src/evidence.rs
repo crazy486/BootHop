@@ -52,10 +52,35 @@ pub struct OptionEvidence {
     pub raw_payload: Vec<u8>,
     pub parsed: LoadOption,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RawOptionValidation {
+    Valid,
+    InvalidAttributes { expected: u32, actual: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RawOptionParseStatus {
+    NotAttempted,
+    Valid,
+    Malformed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawOptionEvidence {
+    pub boot_id: BootId,
+    pub raw_payload: Vec<u8>,
+    pub status: ReadStatus,
+    pub attributes: u32,
+    pub validation: RawOptionValidation,
+    pub parse_status: RawOptionParseStatus,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Evidence {
     pub attempts: Vec<Attempt>,
     pub options: Vec<OptionEvidence>,
+    pub raw_options: Vec<RawOptionEvidence>,
     pub option_ids: Vec<BootId>,
     pub stable: bool,
     pub accepted: bool,
@@ -70,6 +95,7 @@ impl Evidence {
         Self {
             attempts,
             options: Vec::new(),
+            raw_options: Vec::new(),
             option_ids: Vec::new(),
             stable: false,
             accepted: false,
@@ -188,15 +214,19 @@ pub fn render_private_report(
             )?;
         }
     }
-    for option in &evidence.options {
+    for raw in &evidence.raw_options {
         push_line(
             &mut report,
             &format!(
-                "option boot_id={} raw_file=Boot{:04X}.bin raw_length={} raw_sha256={}",
-                option.boot_id.0,
-                option.boot_id.0,
-                option.raw_payload.len(),
-                digest(&option.raw_payload),
+                "option boot_id={} raw_file=Boot{:04X}.bin raw_length={} raw_sha256={} status={:?} attributes={} validation={:?} parse_status={:?}",
+                raw.boot_id.0,
+                raw.boot_id.0,
+                raw.raw_payload.len(),
+                digest(&raw.raw_payload),
+                raw.status,
+                raw.attributes,
+                raw.validation,
+                raw.parse_status,
             ),
         )?;
     }

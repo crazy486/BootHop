@@ -6,8 +6,8 @@ use crate::{
     FirmwareType, MAX_ENUMERATION_BYTES, PrivilegeState, ReadOutcome, ReadStatus, VariableName,
     WindowsCalls,
     evidence::{
-        Attempt, ControlSnapshot, ControlValue, Evidence, OptionEvidence, TerminalOutcome, attempt,
-        digest,
+        Attempt, ControlSnapshot, ControlValue, Evidence, OptionEvidence, RawOptionEvidence,
+        RawOptionParseStatus, RawOptionValidation, TerminalOutcome, attempt, digest,
     },
     model::{INITIAL_BUFFER_BYTES, MAX_PAYLOAD_BYTES},
 };
@@ -82,14 +82,14 @@ impl CollectorError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionFailure {
     pub error: CollectorError,
-    pub evidence: Evidence,
+    pub evidence: Box<Evidence>,
 }
 
 impl CollectionFailure {
     fn new(error: CollectorError, attempts: Vec<Attempt>) -> Self {
         Self {
             error,
-            evidence: Evidence::failed(attempts),
+            evidence: Box::new(Evidence::failed(attempts)),
         }
     }
 
@@ -97,15 +97,17 @@ impl CollectionFailure {
         error: CollectorError,
         attempts: Vec<Attempt>,
         options: Vec<OptionEvidence>,
+        raw_options: Vec<RawOptionEvidence>,
         option_ids: Vec<BootId>,
         first_control: Option<ControlSnapshot>,
         second_control: Option<ControlSnapshot>,
     ) -> Self {
         Self {
             error,
-            evidence: Evidence {
+            evidence: Box::new(Evidence {
                 attempts,
                 options,
+                raw_options,
                 option_ids,
                 stable: false,
                 accepted: false,
@@ -113,7 +115,7 @@ impl CollectionFailure {
                 terminal: TerminalOutcome::Failed,
                 first_control: first_control.map(Box::new),
                 second_control: second_control.map(Box::new),
-            },
+            }),
         }
     }
 }
@@ -153,7 +155,7 @@ pub fn collect_with<C: WindowsCalls>(calls: &mut C) -> Result<Evidence, Collecti
         Err(error) => {
             let mut evidence = match result {
                 Ok(evidence) => evidence,
-                Err(failure) => failure.evidence,
+                Err(failure) => *failure.evidence,
             };
             evidence.accepted = false;
             evidence.terminal = TerminalOutcome::Failed;
@@ -161,7 +163,7 @@ pub fn collect_with<C: WindowsCalls>(calls: &mut C) -> Result<Evidence, Collecti
                 error: CollectorError::RestorePrivilege {
                     raw_code: error.raw_code,
                 },
-                evidence,
+                evidence: Box::new(evidence),
             })
         }
     }
@@ -183,6 +185,7 @@ fn collect_after_privilege<C: WindowsCalls>(
             attempts,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Some(first.snapshot.clone()),
             None,
         ));
@@ -201,6 +204,7 @@ fn collect_after_privilege<C: WindowsCalls>(
         }
     }
     let mut options = Vec::new();
+    let mut raw_options = Vec::new();
     for id in option_ids.iter().copied() {
         let outcome = match read_bounded(calls, VariableName::Boot(id), &mut attempts) {
             Ok(outcome) => outcome,
@@ -212,6 +216,7 @@ fn collect_after_privilege<C: WindowsCalls>(
                     },
                     attempts,
                     options.clone(),
+                    raw_options.clone(),
                     option_ids.clone(),
                     Some(first.snapshot.clone()),
                     None,
@@ -225,6 +230,7 @@ fn collect_after_privilege<C: WindowsCalls>(
                     },
                     attempts,
                     options.clone(),
+                    raw_options.clone(),
                     option_ids.clone(),
                     Some(first.snapshot.clone()),
                     None,
@@ -235,13 +241,41 @@ fn collect_after_privilege<C: WindowsCalls>(
                     CollectorError::ResourceLimit,
                     attempts,
                     options.clone(),
+                    raw_options.clone(),
                     option_ids.clone(),
                     Some(first.snapshot.clone()),
                     None,
                 ));
             }
         };
+        enumeration_bytes = match enumeration_bytes.checked_add(outcome.bytes.len()) {
+            Some(total) if total <= MAX_ENUMERATION_BYTES => total,
+            _ => {
+                return Err(CollectionFailure::with_state(
+                    CollectorError::ResourceLimit,
+                    attempts,
+                    options.clone(),
+                    raw_options.clone(),
+                    option_ids.clone(),
+                    Some(first.snapshot.clone()),
+                    None,
+                ));
+            }
+        };
+        let mut raw = RawOptionEvidence {
+            boot_id: id,
+            raw_payload: outcome.bytes.clone(),
+            status: outcome.status,
+            attributes: outcome.attributes,
+            validation: RawOptionValidation::Valid,
+            parse_status: RawOptionParseStatus::NotAttempted,
+        };
         if outcome.attributes != 7 {
+            raw.validation = RawOptionValidation::InvalidAttributes {
+                expected: 7,
+                actual: outcome.attributes,
+            };
+            raw_options.push(raw);
             return Err(CollectionFailure::with_state(
                 CollectorError::InvalidAttributes {
                     variable: VariableName::Boot(id),
@@ -250,31 +284,26 @@ fn collect_after_privilege<C: WindowsCalls>(
                 },
                 attempts,
                 options.clone(),
+                raw_options,
                 option_ids.clone(),
                 Some(first.snapshot.clone()),
                 None,
             ));
         }
-        enumeration_bytes = match enumeration_bytes.checked_add(outcome.bytes.len()) {
-            Some(total) if total <= MAX_ENUMERATION_BYTES => total,
-            _ => {
-                return Err(CollectionFailure::with_state(
-                    CollectorError::ResourceLimit,
-                    attempts,
-                    options.clone(),
-                    option_ids.clone(),
-                    Some(first.snapshot.clone()),
-                    None,
-                ));
-            }
-        };
         let parsed = match parse_load_option(&outcome.bytes) {
-            Ok(parsed) => parsed,
+            Ok(parsed) => {
+                raw.parse_status = RawOptionParseStatus::Valid;
+                raw_options.push(raw);
+                parsed
+            }
             Err(_) => {
+                raw.parse_status = RawOptionParseStatus::Malformed;
+                raw_options.push(raw);
                 return Err(CollectionFailure::with_state(
                     CollectorError::InvalidReferencedOption(id),
                     attempts,
                     options,
+                    raw_options,
                     option_ids,
                     Some(first.snapshot.clone()),
                     None,
@@ -294,6 +323,7 @@ fn collect_after_privilege<C: WindowsCalls>(
                 error,
                 attempts,
                 options,
+                raw_options,
                 option_ids,
                 Some(first.snapshot.clone()),
                 None,
@@ -311,6 +341,7 @@ fn collect_after_privilege<C: WindowsCalls>(
     Ok(Evidence {
         attempts,
         options,
+        raw_options,
         option_ids,
         stable,
         accepted: terminal == TerminalOutcome::Accepted,

@@ -301,6 +301,81 @@ fn later_failure_preserves_prior_option_evidence_and_aggregate_budget_fails_clos
 }
 
 #[test]
+fn invalid_attributes_retain_raw_option_for_private_output_without_parsing() {
+    let mut calls = FakeCalls::minimal_valid();
+    calls.set_attributes(VariableName::Boot(BootId(1)), 6);
+    let failure = collect_with(&mut calls).expect_err("invalid option attributes");
+    assert_eq!(failure.evidence.options.len(), 0);
+    assert_eq!(failure.evidence.raw_options.len(), 1);
+    let raw = &failure.evidence.raw_options[0];
+    assert_eq!(raw.boot_id, BootId(1));
+    assert_eq!(raw.raw_payload, load_option_bytes());
+    assert_eq!(
+        raw.validation,
+        boothop_windows1w_collector::RawOptionValidation::InvalidAttributes {
+            expected: 7,
+            actual: 6
+        }
+    );
+    assert_eq!(
+        raw.parse_status,
+        boothop_windows1w_collector::RawOptionParseStatus::NotAttempted
+    );
+
+    let directory = std::env::temp_dir().join(format!(
+        "boothop-windows1w-invalid-attrs-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    write_option_payloads(&directory, &failure.evidence).unwrap();
+    assert_eq!(
+        std::fs::read(directory.join("Boot0001.bin")).unwrap(),
+        load_option_bytes()
+    );
+    assert!(write_option_payloads(&directory, &failure.evidence).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn malformed_option_retains_raw_payload_and_reports_parse_failure() {
+    let mut calls = FakeCalls::minimal_valid();
+    let malformed = vec![1, 0, 0, 0, 4, 0, 0, 0, 0xff];
+    calls.options.insert(BootId(1), malformed.clone());
+    let failure = collect_with(&mut calls).expect_err("malformed option");
+    assert_eq!(failure.evidence.options.len(), 0);
+    assert_eq!(failure.evidence.raw_options.len(), 1);
+    let raw = &failure.evidence.raw_options[0];
+    assert_eq!(raw.raw_payload, malformed);
+    assert_eq!(
+        raw.validation,
+        boothop_windows1w_collector::RawOptionValidation::Valid
+    );
+    assert_eq!(
+        raw.parse_status,
+        boothop_windows1w_collector::RawOptionParseStatus::Malformed
+    );
+    let report = render_private_report(&failure.evidence, Some("InvalidReferencedOption")).unwrap();
+    assert!(report.contains("raw_file=Boot0001.bin"));
+    assert!(report.contains("validation=Valid parse_status=Malformed"));
+    assert!(!report.contains("[1, 0, 0, 0, 4, 0, 0, 0, 255]"));
+
+    let directory = std::env::temp_dir().join(format!(
+        "boothop-windows1w-malformed-option-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    write_option_payloads(&directory, &failure.evidence).unwrap();
+    assert_eq!(
+        std::fs::read(directory.join("Boot0001.bin")).unwrap(),
+        malformed
+    );
+    assert!(write_option_payloads(&directory, &failure.evidence).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn structured_report_contains_all_attempt_fields_and_both_sequential_snapshots() {
     let mut calls = FakeCalls::minimal_valid();
     let evidence = collect_with(&mut calls).expect("fake collection succeeds");
