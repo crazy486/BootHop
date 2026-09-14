@@ -90,12 +90,14 @@ backend imports: `kernel32.dll` — `GetFirmwareEnvironmentVariableExW`,
 `SetLastError`, `GetLastError`, `CloseHandle`, `GetFirmwareType`; and
 `advapi32.dll` — `OpenProcessToken`, `AdjustTokenPrivileges`,
 `LookupPrivilegeValueW`. The same PE also contained runtime/support imports:
+`kernel32.dll` (`IsProcessorFeaturePresent`, `GetSystemTimeAsFileTime`) and
 `KERNEL32.dll` (`FlsAlloc`, `UnhandledExceptionFilter`, `IsDebuggerPresent`,
 `InitializeSListHead`, `GetModuleHandleA`, `FormatMessageW`, `IsThreadAFiber`,
 `FlsSetValue`, `GetModuleHandleW`, `WaitForSingleObject`, `GetFullPathNameW`,
 `GetCurrentThreadId`, `GetProcessHeap`, `HeapFree`, `HeapReAlloc`,
 `RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `SetFileTime`,
 `GetFileInformationByHandle`, `GetFileInformationByHandleEx`,
+`SetFileInformationByHandle`, `CreateFileW`, `GetStdHandle`, `GetCurrentProcess`,
 `CreateDirectoryW`, `AddVectoredExceptionHandler`, `SetThreadStackGuarantee`,
 `GetCurrentThread`, `GetCurrentDirectoryW`, `GetCommandLineW`, `lstrlenW`,
 `FindFirstFileExW`, `FindClose`, `GetProcAddress`, `WideCharToMultiByte`,
