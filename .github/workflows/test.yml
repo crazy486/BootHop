@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux fontconfig development dependency
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libfontconfig1-dev
       # rust-toolchain.toml pins compiler 1.98.1; this action ref matches it.
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
