@@ -27,12 +27,17 @@ The native backend may directly import only these security/firmware functions pl
 - `GetLastError`
 - `CloseHandle`
 
-The backend does not import or call dynamic-loading or process-launch APIs.
-The release PE may contain ordinary Rust/MSVC runtime imports (including
-startup, filesystem, allocator, exception, or CRT support symbols); those are
-audited and are not collector capabilities.
+At application/backend source level, the collector does not declare, import, or
+call dynamic-loading or process-launch APIs. The release PE may nevertheless
+contain ordinary Rust/MSVC runtime imports with those names (for example
+`LoadLibraryA` and `GetProcAddress`) used by runtime startup/support code. Such
+symbols are audited as runtime exceptions and are not collector capabilities;
+they are not reachable through the backend source or its `WindowsCalls`
+implementation.
 
-It must not declare, import, dynamically resolve, or call any `SetFirmwareEnvironmentVariable*`, BCD mutation, shutdown/restart, process-launch, shell, `LoadLibrary`, or `GetProcAddress` API.
+The application/backend source must not declare, import, dynamically resolve,
+or call any `SetFirmwareEnvironmentVariable*`, BCD mutation, shutdown/restart,
+process-launch, shell, `LoadLibrary`, or `GetProcAddress` API.
 
 ## Fixed collection algorithm
 
@@ -79,3 +84,39 @@ TDD fake coverage must include firmware-type API failure/non-UEFI short-circuiti
 The acceptance artifact targets Windows 11 x86-64 with `x86_64-pc-windows-msvc`; the underlying read API minimum is Windows 8 desktop. Its tracked report must state that Windows1W remains blocked, Linux Stage 5 remains pending, and Windows production implementation has not begun.
 
 The final release artifact is hashed and audited with `dumpbin /imports`. Source and dependency trees are searched for prohibited symbols. Independent spec, quality, and security reviewers must close all Critical and Important findings before any real-session authorization request.
+
+For the audited release artifact, `dumpbin /imports` showed these direct
+backend imports: `kernel32.dll` — `GetFirmwareEnvironmentVariableExW`,
+`SetLastError`, `GetLastError`, `CloseHandle`, `GetFirmwareType`; and
+`advapi32.dll` — `OpenProcessToken`, `AdjustTokenPrivileges`,
+`LookupPrivilegeValueW`. The same PE also contained runtime/support imports:
+`KERNEL32.dll` (`FlsAlloc`, `UnhandledExceptionFilter`, `IsDebuggerPresent`,
+`InitializeSListHead`, `GetModuleHandleA`, `FormatMessageW`, `IsThreadAFiber`,
+`FlsSetValue`, `GetModuleHandleW`, `WaitForSingleObject`, `GetFullPathNameW`,
+`GetCurrentThreadId`, `GetProcessHeap`, `HeapFree`, `HeapReAlloc`,
+`RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `SetFileTime`,
+`GetFileInformationByHandle`, `GetFileInformationByHandleEx`,
+`CreateDirectoryW`, `AddVectoredExceptionHandler`, `SetThreadStackGuarantee`,
+`GetCurrentThread`, `GetCurrentDirectoryW`, `GetCommandLineW`, `lstrlenW`,
+`FindFirstFileExW`, `FindClose`, `GetProcAddress`, `WideCharToMultiByte`,
+`WaitForSingleObjectEx`, `LoadLibraryA`, `CreateMutexA`, `ReleaseMutex`,
+`HeapAlloc`, `GetModuleFileNameW`, `MultiByteToWideChar`, `WriteConsoleW`,
+`GetConsoleMode`, `GetConsoleOutputCP`, `FlsFree`,
+`SetUnhandledExceptionFilter`, `GetModuleHandleExW`),
+`api-ms-win-core-synch-l1-2-0.dll` (`WaitOnAddress`, `WakeByAddressAll`,
+`WakeByAddressSingle`), `bcryptprimitives.dll` (`ProcessPrng`),
+`ntdll.dll` (`NtWriteFile`, `RtlNtStatusToDosError`),
+`VCRUNTIME140.dll` (`__current_exception`, `__C_specific_handler`,
+`__current_exception_context`, `memmove`, `memset`, `memcmp`,
+`__CxxFrameHandler3`, `memcpy`, `_CxxThrowException`),
+`api-ms-win-crt-runtime-l1-1-0.dll` (`_initialize_onexit_table`,
+`_register_onexit_function`, `terminate`, `_seh_filter_exe`, `_set_app_type`,
+`_configure_narrow_argv`, `_initialize_narrow_environment`,
+`_get_initial_narrow_environment`, `_initterm`, `_initterm_e`, `exit`, `_exit`,
+`_register_thread_local_exe_atexit_callback`, `__p___argc`, `__p___argv`,
+`_cexit`, `_c_exit`, `_crt_atexit`), `api-ms-win-crt-math-l1-1-0.dll`
+(`__setusermatherr`), `api-ms-win-crt-stdio-l1-1-0.dll` (`_set_fmode`,
+`__p__commode`), `api-ms-win-crt-locale-l1-1-0.dll` (`_configthreadlocale`),
+and `api-ms-win-crt-heap-l1-1-0.dll` (`_set_new_mode`, `free`). The runtime
+list is reported as an observed PE exception, not as an allowlist for
+application/backend source.

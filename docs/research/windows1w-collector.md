@@ -61,3 +61,18 @@ collection, or report writes, and success only for accepted evidence. This
 artifact provides preparation and static evidence,
 not Windows firmware behavior evidence; no real-session authorization is
 requested by this document.
+
+The final PE import audit distinguishes backend imports from runtime support.
+The backend imports observed were `kernel32.dll`:
+`GetFirmwareEnvironmentVariableExW`, `SetLastError`, `GetLastError`,
+`CloseHandle`, `GetFirmwareType`; and `advapi32.dll`:
+`OpenProcessToken`, `AdjustTokenPrivileges`, `LookupPrivilegeValueW`.
+Runtime/support imports observed in the same PE included `kernel32.dll`
+`GetProcAddress`/`LoadLibraryA` and filesystem/startup/exception symbols,
+`api-ms-win-core-synch-l1-2-0.dll` wait/address symbols,
+`bcryptprimitives.dll` `ProcessPrng`, `ntdll.dll` file/status symbols,
+`VCRUNTIME140.dll` CRT exception/memory symbols, and the
+`api-ms-win-crt-*` startup/heap/math/locale/stdio symbols. These runtime
+imports are an explicitly audited PE exception; application/backend source
+does not declare, import, dynamically resolve, or call dynamic-loading or
+process-launch APIs.
