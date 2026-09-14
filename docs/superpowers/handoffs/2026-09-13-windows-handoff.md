@@ -45,7 +45,7 @@ Resume in this exact safe order:
 
 ## Remaining gates
 
-- Windows1W native firmware API read-only evidence.
+- Windows1W is no longer a blocking research gate; its direct-result logging limitations remain tracked for production design.
 - Stage 5 Windows-side BootOrder/BootNext closure.
 - Windows storage/adapter.
 - UAC/helper.
@@ -56,4 +56,4 @@ Resume in this exact safe order:
 
 ## Local-only state audit
 
-The ignored progress ledger, Stage 1-5 reports, and private evidence do not clone. Raw UEFI bytes, private captures, sensitive complete device paths, screenshots not already tracked, secrets, and personal data must not enter Git. This tracked handoff is the safe resume summary; detailed and private evidence stays on Linux.
+The ignored progress ledger, Stage 1-5 reports, and private evidence do not clone. Raw UEFI bytes, private captures, sensitive complete device paths, screenshots not already tracked, secrets, and personal data must not enter Git. This tracked handoff is the safe resume summary; detailed evidence remains only on the machine where it was captured (Linux for pre-switch artifacts and Windows for the one authorized Windows1W run).
