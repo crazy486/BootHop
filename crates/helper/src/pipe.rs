@@ -1,6 +1,6 @@
 //! Bounded nonblocking Unix pipe operations, shared by the two process endpoints.
 use crate::{dispatch::SessionIo, protocol::MAX_BYTES};
-use boothop_core::Error;
+use boothop_core::{Error, PlatformOperation};
 use std::{
     io,
     os::fd::{AsRawFd, BorrowedFd, RawFd},
@@ -14,7 +14,7 @@ fn failure(operation: &'static str, error: io::Error) -> Error {
         _ => libc::EIO,
     });
     Error::PlatformIo {
-        operation: operation.into(),
+        operation: PlatformOperation::from_label(operation).expect("closed IPC operation label"),
         raw_code,
     }
 }

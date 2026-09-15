@@ -1,5 +1,7 @@
 use crate::ProtectedStore;
-use boothop_core::{Error, RecordState, TargetRecord, decode_record, encode_record};
+use boothop_core::{
+    Error, PlatformOperation, RecordState, TargetRecord, decode_record, encode_record,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,7 +190,7 @@ impl<F: Filesystem> LockedStore<F> {
 
 fn io(operation: &'static str, raw_code: i32) -> Error {
     Error::PlatformIo {
-        operation: operation.into(),
+        operation: PlatformOperation::from_label(operation).expect("closed Linux operation label"),
         raw_code,
     }
 }

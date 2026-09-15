@@ -5,7 +5,7 @@ use crate::{
 };
 use boothop_core::{
     BootId, Candidate, Classification, Error, Os, RecordDiagnostic, Report, Request,
-    ResidualAssessment, Stage,
+    ResidualAssessment, RollbackAssessment, Stage,
 };
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -509,6 +509,10 @@ fn stages_text(stages: &[Stage]) -> String {
             Stage::RebootAccepted => "重启请求已被系统接受",
             Stage::RebootRejected => "RebootRejected：重启请求被拒绝",
             Stage::RebootUnknown => "重启请求结果未知",
+            Stage::RollbackAttempted => "已尝试回滚 BootNext",
+            Stage::RollbackRestored => "BootNext 已回滚恢复",
+            Stage::RollbackUnsafe => "BootNext 回滚不安全",
+            Stage::RollbackFailed => "BootNext 回滚失败",
             Stage::ResidualPossible => "BootNext 可能残留",
         })
         .collect::<Vec<_>>()
@@ -523,6 +527,7 @@ fn domain_text(error: &Error, depth: usize) -> String {
             cause,
             stages,
             residual_assessment,
+            rollback_assessment,
             ..
         } => {
             let assessment = match residual_assessment {
@@ -535,12 +540,21 @@ fn domain_text(error: &Error, depth: usize) -> String {
                     format!("残留读取失败：{}", domain_text(e, depth + 1))
                 }
             };
+            let rollback = match rollback_assessment {
+                RollbackAssessment::NotNeeded => "回滚无需执行".into(),
+                RollbackAssessment::Restored => "回滚已恢复".into(),
+                RollbackAssessment::Unsafe => "回滚不安全".into(),
+                RollbackAssessment::Failed(e) => {
+                    format!("回滚失败：{}", domain_text(e.as_ref(), depth + 1))
+                }
+            };
             bounded(
                 format!(
-                    "FlowFailure: {}；{}；{}",
+                    "FlowFailure: {}；{}；{}；{}",
                     domain_text(cause, depth + 1),
                     stages_text(stages),
-                    assessment
+                    assessment,
+                    rollback
                 ),
                 4096,
             )
@@ -549,11 +563,7 @@ fn domain_text(error: &Error, depth: usize) -> String {
             operation,
             raw_code,
         } => {
-            let safe = match operation.as_str() {
-                "open" | "read" | "write" | "metadata" | "lock" | "fsync" | "rename" | "ipc"
-                | "reboot" => operation.as_str(),
-                _ => "unknown",
-            };
+            let safe = operation.as_str();
             format!("PlatformIo: {safe}, errno={raw_code}")
         }
         Error::StoreDurabilityUnknown { raw_code } => {

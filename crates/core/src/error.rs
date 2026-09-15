@@ -1,5 +1,69 @@
 use crate::{BootId, Stage};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformOperation {
+    Open,
+    Read,
+    Write,
+    Metadata,
+    Lock,
+    Flush,
+    Replace,
+    Ipc,
+    Reboot,
+    Random,
+    Process,
+    Security,
+}
+
+impl PlatformOperation {
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "open" => Self::Open,
+            "read" => Self::Read,
+            "write" => Self::Write,
+            "metadata" => Self::Metadata,
+            "lock" => Self::Lock,
+            "fsync" | "flush" => Self::Flush,
+            "rename" | "replace" => Self::Replace,
+            "ipc" => Self::Ipc,
+            "reboot" => Self::Reboot,
+            "random" => Self::Random,
+            "process" => Self::Process,
+            "security" => Self::Security,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Metadata => "metadata",
+            Self::Lock => "lock",
+            Self::Flush => "fsync",
+            Self::Replace => "rename",
+            Self::Ipc => "ipc",
+            Self::Reboot => "reboot",
+            Self::Random => "random",
+            Self::Process => "process",
+            Self::Security => "security",
+        }
+    }
+}
+
+impl From<&str> for PlatformOperation {
+    fn from(value: &str) -> Self {
+        Self::from_label(value).expect("unknown platform operation label")
+    }
+}
+impl PartialEq<&str> for PlatformOperation {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     MalformedLoadOption,
@@ -19,10 +83,31 @@ pub enum Error {
     Busy,
     ReadbackFailed,
     RebootRejected,
-    /// Operation is a fixed diagnostic label: open/read/write/metadata/lock/fsync/rename/ipc/reboot.
-    /// Adapters must never include paths or variable contents.
+    NotUefi,
+    PrivilegeUnavailable,
+    PrivilegeEnableFailed {
+        raw_code: i32,
+    },
+    PrivilegeRestoreFailed {
+        raw_code: i32,
+    },
+    FirmwareReadFailed {
+        raw_code: i32,
+    },
+    FirmwareWriteFailed {
+        raw_code: i32,
+    },
+    BootNextUnavailable {
+        raw_code: i32,
+    },
+    ProtectedStoreViolation {
+        raw_code: i32,
+    },
+    StoreReplaceFailed {
+        raw_code: i32,
+    },
     PlatformIo {
-        operation: String,
+        operation: PlatformOperation,
         raw_code: i32,
     },
     StoreDurabilityUnknown {
@@ -32,6 +117,7 @@ pub enum Error {
         cause: Box<Error>,
         stages: Vec<Stage>,
         residual_assessment: ResidualAssessment,
+        rollback_assessment: RollbackAssessment,
         diagnostics: Vec<crate::EnumerationDiagnostic>,
     },
 }
@@ -53,4 +139,12 @@ pub enum ResidualAssessment {
     NotChecked,
     Observed(Option<BootId>),
     ReadFailed(Box<Error>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RollbackAssessment {
+    NotNeeded,
+    Restored,
+    Unsafe,
+    Failed(Box<Error>),
 }

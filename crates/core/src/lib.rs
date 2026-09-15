@@ -7,7 +7,7 @@ mod model;
 mod record;
 
 pub use device_path::parse_device_path;
-pub use error::{Error, ResidualAssessment};
+pub use error::{Error, PlatformOperation, ResidualAssessment, RollbackAssessment};
 pub use flow::{Platform, execute};
 pub use identity::{canonicalize, classify, validate_target};
 pub use load_option::parse_load_option;
@@ -16,6 +16,6 @@ pub use model::{
     CanonicalHardDriveNode, CanonicalIdentity, Classification, DevicePath, DevicePathInstance,
     DevicePathNode, DevicePathNodeKind, EnumerationDiagnostic, FilePathNode, HardDriveNode,
     LoadOption, OpaqueAlgorithm, OpaqueExactV1, OptionInventory, Os, RebootOutcome,
-    RecordDiagnostic, RecordState, Report, Request, Stage, TargetRecord,
+    RecordDiagnostic, RecordState, Report, Request, RollbackOutcome, Stage, TargetRecord,
 };
 pub use record::{decode_record, encode_record, expected_target};

@@ -29,7 +29,19 @@ pub enum Stage {
     RebootAccepted,
     RebootRejected,
     RebootUnknown,
+    RollbackAttempted,
+    RollbackRestored,
+    RollbackUnsafe,
+    RollbackFailed,
     ResidualPossible,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RollbackOutcome {
+    NotNeeded,
+    Restored,
+    Unsafe,
+    Failed(crate::Error),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

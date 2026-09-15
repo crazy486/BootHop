@@ -1,6 +1,6 @@
 use boothop_core::{
     BootId, Candidate, Classification, Error, Os, RecordDiagnostic, Report, Request,
-    ResidualAssessment, Stage,
+    ResidualAssessment, RollbackAssessment, Stage,
 };
 use boothop_gui::{
     cache::{Cache, CacheError, CachedTarget},
@@ -138,6 +138,7 @@ fn nested(error: Error) -> Error {
         // evidence is covered separately by the accepted/unknown tests.
         stages: vec![Stage::TargetValidated],
         residual_assessment: ResidualAssessment::NotChecked,
+        rollback_assessment: RollbackAssessment::NotNeeded,
         diagnostics: vec![],
     }
 }
@@ -643,7 +644,7 @@ fn public_diagnostics_are_bounded_and_redact_untrusted_operation_strings() {
         &h,
         &e,
         Err(ClientError::Domain(nested(Error::PlatformIo {
-            operation: "secret identity digest OptionalData\n".repeat(10000),
+            operation: boothop_core::PlatformOperation::Write,
             raw_code: 42,
         }))),
     );
@@ -1000,6 +1001,10 @@ fn inspect_wrong_os_or_any_stages_are_protocol_unknown_before_display_update() {
         Stage::RebootAccepted,
         Stage::RebootRejected,
         Stage::RebootUnknown,
+        Stage::RollbackAttempted,
+        Stage::RollbackRestored,
+        Stage::RollbackUnsafe,
+        Stage::RollbackFailed,
         Stage::ResidualPossible,
     ] {
         reject_success(

@@ -1,7 +1,7 @@
 use crate::{
     BootId, Candidate, Classification, Error, OptionInventory, Os, RebootOutcome, RecordDiagnostic,
-    RecordState, Report, Request, ResidualAssessment, Stage, TargetRecord, canonicalize,
-    expected_target, validate_target,
+    RecordState, Report, Request, ResidualAssessment, RollbackAssessment, RollbackOutcome, Stage,
+    TargetRecord, canonicalize, expected_target, validate_target,
 };
 
 /// Adapter boundary. All methods except save/write/reboot must be read-only.
@@ -17,6 +17,8 @@ pub trait Platform {
     fn read_next(&mut self) -> Result<Option<BootId>, Error>;
     /// A failed write may still have changed firmware. Never replay or clear it automatically.
     fn write_next(&mut self, target: BootId) -> Result<(), Error>;
+    /// Restore only the exact value observed before this invocation wrote `written`.
+    fn rollback_next(&mut self, original: Option<BootId>, written: BootId) -> RollbackOutcome;
     fn reboot(&mut self) -> RebootOutcome;
     /// Called after the trusted record read and before any firmware reads or mutations.
     fn check_environment(&mut self) -> Result<(), Error>;
@@ -123,13 +125,14 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
                 .ok_or(Error::TargetMissing)?;
             validate_target(&target, &options[index].1)?;
             report.stages.push(Stage::TargetValidated);
-            let initial = platform
+            let original = platform
                 .read_next()
                 .map_err(|error| failure(error, &report, false))?;
-            if initial.is_some_and(|id| id != target.boot_id) {
+            if original.is_some_and(|id| id != target.boot_id) {
                 return Err(failure(Error::BootNextConflict, &report, false));
             }
-            if initial.is_none() {
+            let mut wrote = false;
+            if original.is_none() {
                 // Recheck immediately before attempting a write. This is not an external CAS:
                 // the adapter must also reject an object that appears during write preparation.
                 match platform
@@ -140,9 +143,12 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
                         return Err(failure(Error::BootNextConflict, &report, false));
                     }
                     Some(_) => {}
-                    None => platform
-                        .write_next(target.boot_id)
-                        .map_err(|error| failure(error, &report, true))?,
+                    None => {
+                        platform
+                            .write_next(target.boot_id)
+                            .map_err(|error| failure(error, &report, true))?;
+                        wrote = true;
+                    }
                 }
             }
             if platform
@@ -161,24 +167,60 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
                 }
                 RebootOutcome::Rejected => {
                     report.stages.push(Stage::RebootRejected);
-                    let assessment = match platform.read_next() {
+                    match platform.read_next() {
                         Ok(next) => {
-                            if next == Some(target.boot_id) {
+                            let residual = next != original;
+                            let rollback = if !residual {
+                                RollbackAssessment::NotNeeded
+                            } else if !wrote || next != Some(target.boot_id) {
+                                report.stages.push(Stage::RollbackUnsafe);
+                                RollbackAssessment::Unsafe
+                            } else {
+                                report.stages.push(Stage::RollbackAttempted);
+                                match platform.rollback_next(original, target.boot_id) {
+                                    RollbackOutcome::NotNeeded => RollbackAssessment::NotNeeded,
+                                    RollbackOutcome::Restored => {
+                                        report.stages.push(Stage::RollbackRestored);
+                                        RollbackAssessment::Restored
+                                    }
+                                    RollbackOutcome::Unsafe => {
+                                        report.stages.push(Stage::RollbackUnsafe);
+                                        RollbackAssessment::Unsafe
+                                    }
+                                    RollbackOutcome::Failed(error) => {
+                                        report.stages.push(Stage::RollbackFailed);
+                                        RollbackAssessment::Failed(Box::new(error))
+                                    }
+                                }
+                            };
+                            if matches!(
+                                rollback,
+                                RollbackAssessment::Unsafe | RollbackAssessment::Failed(_)
+                            ) {
                                 report.stages.push(Stage::ResidualPossible);
                             }
-                            ResidualAssessment::Observed(next)
+                            return Err(Error::FlowFailure {
+                                cause: Box::new(Error::RebootRejected),
+                                stages: report.stages,
+                                residual_assessment: ResidualAssessment::Observed(next),
+                                rollback_assessment: rollback,
+                                diagnostics: report.diagnostics,
+                            });
                         }
                         Err(error) => {
+                            report.stages.push(Stage::RollbackUnsafe);
                             report.stages.push(Stage::ResidualPossible);
-                            ResidualAssessment::ReadFailed(Box::new(error))
+                            return Err(Error::FlowFailure {
+                                cause: Box::new(Error::RebootRejected),
+                                stages: report.stages,
+                                residual_assessment: ResidualAssessment::ReadFailed(Box::new(
+                                    error,
+                                )),
+                                rollback_assessment: RollbackAssessment::Unsafe,
+                                diagnostics: report.diagnostics,
+                            });
                         }
                     };
-                    return Err(Error::FlowFailure {
-                        cause: Box::new(Error::RebootRejected),
-                        stages: report.stages,
-                        residual_assessment: assessment,
-                        diagnostics: report.diagnostics,
-                    });
                 }
             }
             Ok(report)
@@ -195,6 +237,7 @@ fn failure(cause: Error, report: &Report, residual_possible: bool) -> Error {
         cause: Box::new(cause),
         stages,
         residual_assessment: ResidualAssessment::NotChecked,
+        rollback_assessment: RollbackAssessment::NotNeeded,
         diagnostics: report.diagnostics.clone(),
     }
 }

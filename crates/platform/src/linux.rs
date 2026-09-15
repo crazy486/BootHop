@@ -4,7 +4,8 @@ pub mod store;
 
 use crate::ProtectedStore;
 use boothop_core::{
-    BootId, Error, OptionInventory, Platform, RebootOutcome, RecordState, TargetRecord,
+    BootId, Error, OptionInventory, Platform, RebootOutcome, RecordState, RollbackOutcome,
+    TargetRecord,
 };
 use firmware::{Metadata, OpenKind};
 use reboot::{Probe, Reply};
@@ -56,6 +57,11 @@ impl<C: LinuxCalls> Platform for LinuxPlatform<'_, C> {
     }
     fn write_next(&mut self, target: BootId) -> Result<(), Error> {
         firmware::write_next(&mut self.calls, target)
+    }
+    fn rollback_next(&mut self, _original: Option<BootId>, _written: BootId) -> RollbackOutcome {
+        // Linux retains its historical non-mutating behavior; efivarfs has no
+        // approved exclusivity proof for an exact restore.
+        RollbackOutcome::Unsafe
     }
     fn check_environment(&mut self) -> Result<(), Error> {
         self.reboot_ready = false;

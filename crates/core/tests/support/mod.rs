@@ -1,6 +1,6 @@
 use boothop_core::{
-    BootId, Error, LoadOption, Os, Platform, RebootOutcome, RecordState, TargetRecord,
-    canonicalize, decode_record, parse_load_option,
+    BootId, Error, LoadOption, Os, Platform, RebootOutcome, RecordState, RollbackOutcome,
+    TargetRecord, canonicalize, decode_record, parse_load_option,
 };
 
 pub fn option() -> LoadOption {
@@ -24,11 +24,18 @@ pub enum Event {
     ReadNext,
     WriteNext(BootId),
     Reboot,
+    RollbackNext {
+        original: Option<BootId>,
+        written: BootId,
+    },
 }
 
 impl Event {
     pub fn is_mutation(&self) -> bool {
-        matches!(self, Self::SaveRecord | Self::WriteNext(_) | Self::Reboot)
+        matches!(
+            self,
+            Self::SaveRecord | Self::WriteNext(_) | Self::RollbackNext { .. } | Self::Reboot
+        )
     }
 }
 
@@ -43,6 +50,7 @@ pub struct FakePlatform {
     pub next_reads: std::collections::VecDeque<Result<Option<BootId>, Error>>,
     pub write_error_mutates: bool,
     pub diagnostics: Vec<boothop_core::EnumerationDiagnostic>,
+    pub rollback_outcome: RollbackOutcome,
 }
 
 impl FakePlatform {
@@ -57,6 +65,7 @@ impl FakePlatform {
             next_reads: Default::default(),
             write_error_mutates: false,
             diagnostics: Vec::new(),
+            rollback_outcome: RollbackOutcome::Unsafe,
         }
     }
 
@@ -124,5 +133,16 @@ impl Platform for FakePlatform {
         self.call(Event::Reboot)
             .expect("reboot uses its explicit outcome channel");
         self.reboot_outcome
+    }
+    fn rollback_next(&mut self, original: Option<BootId>, written: BootId) -> RollbackOutcome {
+        self.events.push(Event::RollbackNext { original, written });
+        let outcome = self.rollback_outcome.clone();
+        if matches!(
+            &outcome,
+            RollbackOutcome::Restored | RollbackOutcome::NotNeeded
+        ) {
+            self.next = original;
+        }
+        outcome
     }
 }

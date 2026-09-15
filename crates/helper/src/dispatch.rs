@@ -1,5 +1,5 @@
 //! One-shot trusted dispatch. Transport input is intent only.
-use boothop_core::{Error, Os, Platform, Report, Request};
+use boothop_core::{Error, Os, Platform, PlatformOperation, Report, Request};
 use boothop_protocol as protocol;
 
 pub type SendResult<'a> = dyn FnMut(Result<Report, Error>) -> Result<(), Error> + 'a;
@@ -23,7 +23,7 @@ pub fn serve(
 ) -> Result<(), Error> {
     if euid != 0 {
         return Err(Error::PlatformIo {
-            operation: "ipc".into(),
+            operation: PlatformOperation::Ipc,
             raw_code: 1,
         });
     }

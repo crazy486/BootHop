@@ -17,7 +17,7 @@ pub struct Metadata {
     pub ctime: (i64, i64),
 }
 use super::LinuxCalls;
-use boothop_core::{BootId, Error};
+use boothop_core::{BootId, Error, PlatformOperation};
 pub(crate) const GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 fn reserve<T>(buffer: &mut Vec<T>, additional: usize) -> Result<(), Error> {
     buffer
@@ -26,7 +26,7 @@ fn reserve<T>(buffer: &mut Vec<T>, additional: usize) -> Result<(), Error> {
 }
 pub(crate) fn io(operation: &'static str, raw_code: i32) -> Error {
     Error::PlatformIo {
-        operation: operation.into(),
+        operation: PlatformOperation::from_label(operation).expect("closed Linux operation label"),
         raw_code,
     }
 }

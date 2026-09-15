@@ -2,7 +2,7 @@
 
 use boothop_core::{
     BootId, EnumerationDiagnostic, OptionInventory, Os, Platform, RebootOutcome, RecordState,
-    Stage, TargetRecord,
+    RollbackOutcome, Stage, TargetRecord,
 };
 use boothop_core::{Error, Request};
 use boothop_helper::dispatch::{SessionIo, serve};
@@ -59,6 +59,9 @@ impl Platform for Flow<'_> {
         s.writes.push(id);
         s.next = Some(id);
         Ok(())
+    }
+    fn rollback_next(&mut self, _original: Option<BootId>, _written: BootId) -> RollbackOutcome {
+        RollbackOutcome::Unsafe
     }
     fn reboot(&mut self) -> RebootOutcome {
         assert!(self.fs.held());

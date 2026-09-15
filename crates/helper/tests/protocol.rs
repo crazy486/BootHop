@@ -1,7 +1,7 @@
 use boothop_core::{BootId, Os, Request};
 use boothop_core::{
     Candidate, Classification, EnumerationDiagnostic, Error, RecordDiagnostic, Report,
-    ResidualAssessment, Stage,
+    ResidualAssessment, RollbackAssessment, Stage,
 };
 use boothop_helper::protocol::*;
 use boothop_helper::protocol::{decode_request, encode_request};
@@ -43,7 +43,7 @@ fn request_and_hello_require_canonical_object_shapes() {
 fn all_response_struct_payloads_require_maps_including_recursive_errors() {
     use serde_json::json;
     let empty_report = json!({"candidates":[],"record":"Missing","stages":[],"diagnostics":[]});
-    let flow = json!({"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","diagnostics":[]}});
+    let flow = json!({"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}});
     let cases = [
         (
             "response",
@@ -77,7 +77,7 @@ fn all_response_struct_payloads_require_maps_including_recursive_errors() {
         ),
         (
             "platform error",
-            json!({"protocol_version":1,"result":{"Err":{"PlatformIo":{"operation":"read","raw_code":5}}}}),
+            json!({"protocol_version":1,"result":{"Err":{"PlatformIo":{"operation":"Read","raw_code":5}}}}),
             "/result/Err/PlatformIo",
             json!(["read", 5]),
         ),
@@ -91,17 +91,17 @@ fn all_response_struct_payloads_require_maps_including_recursive_errors() {
             "flow error",
             json!({"protocol_version":1,"result":{"Err":flow}}),
             "/result/Err/FlowFailure",
-            json!(["Busy", [], "NotChecked", []]),
+            json!(["Busy", [], "NotChecked", "NotNeeded", []]),
         ),
         (
             "recursive cause",
-            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":flow,"stages":[],"residual_assessment":"NotChecked","diagnostics":[]}}}}),
+            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":flow,"stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}}}}),
             "/result/Err/FlowFailure/cause/FlowFailure",
-            json!(["Busy", [], "NotChecked", []]),
+            json!(["Busy", [], "NotChecked", "NotNeeded", []]),
         ),
         (
             "recursive residual",
-            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":{"ReadFailed":{"StoreDurabilityUnknown":{"raw_code":5}}},"diagnostics":[]}}}}),
+            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":{"ReadFailed":{"StoreDurabilityUnknown":{"raw_code":5}}},"rollback_assessment":"NotNeeded","diagnostics":[]}}}}),
             "/result/Err/FlowFailure/residual_assessment/ReadFailed/StoreDurabilityUnknown",
             json!([5]),
         ),
@@ -152,7 +152,7 @@ fn canonical_shape_allows_field_order_whitespace_and_equivalent_escapes() {
     );
     assert_eq!(
         decode_response(&frame(
-            r#"{ "result" : { "Err" : { "PlatformIo" : { "raw_code": 5, "operation": "read" } } }, "protocol_version": 1 }"#
+            r#"{ "result" : { "Err" : { "PlatformIo" : { "raw_code": 5, "operation": "Read" } } }, "protocol_version": 1 }"#
         )),
         Ok(Err(Error::PlatformIo {
             operation: "read".into(),
@@ -180,6 +180,8 @@ fn all_unit_enum_families_reject_object_and_array_alternatives() {
         "Busy",
         "ReadbackFailed",
         "RebootRejected",
+        "NotUefi",
+        "PrivilegeUnavailable",
     ] {
         cases.push((
             json!({"protocol_version":1,"result":{"Err":variant}}),
@@ -192,6 +194,10 @@ fn all_unit_enum_families_reject_object_and_array_alternatives() {
         "RebootAccepted",
         "RebootRejected",
         "RebootUnknown",
+        "RollbackAttempted",
+        "RollbackRestored",
+        "RollbackUnsafe",
+        "RollbackFailed",
         "ResidualPossible",
     ] {
         cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[variant],"diagnostics":[]}}}), "/result/Ok/stages/0"));
@@ -200,7 +206,7 @@ fn all_unit_enum_families_reject_object_and_array_alternatives() {
         cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[],"classification":variant,"ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/candidates/0/classification"));
     }
     cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/record"));
-    cases.push((json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","diagnostics":[]}}}}), "/result/Err/FlowFailure/residual_assessment"));
+    cases.push((json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}}}}), "/result/Err/FlowFailure/residual_assessment"));
     for variant in ["Windows", "Linux"] {
         cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":variant}},"stages":[],"diagnostics":[]}}}), "/result/Ok/record/Ready/os"));
     }
@@ -247,6 +253,10 @@ fn report() -> Report {
             Stage::RebootAccepted,
             Stage::RebootRejected,
             Stage::RebootUnknown,
+            Stage::RollbackAttempted,
+            Stage::RollbackRestored,
+            Stage::RollbackUnsafe,
+            Stage::RollbackFailed,
             Stage::ResidualPossible,
         ],
         diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(42))],
@@ -362,6 +372,15 @@ fn every_domain_error_and_nested_residual_roundtrip() {
         Error::Busy,
         Error::ReadbackFailed,
         Error::RebootRejected,
+        Error::NotUefi,
+        Error::PrivilegeUnavailable,
+        Error::PrivilegeEnableFailed { raw_code: 5 },
+        Error::PrivilegeRestoreFailed { raw_code: 6 },
+        Error::FirmwareReadFailed { raw_code: 7 },
+        Error::FirmwareWriteFailed { raw_code: 8 },
+        Error::BootNextUnavailable { raw_code: 9 },
+        Error::ProtectedStoreViolation { raw_code: 10 },
+        Error::StoreReplaceFailed { raw_code: 11 },
         Error::PlatformIo {
             operation: "ipc".into(),
             raw_code: -1,
@@ -380,10 +399,12 @@ fn every_domain_error_and_nested_residual_roundtrip() {
                     cause: Box::new(error.clone()),
                     stages: report().stages,
                     residual_assessment: residual,
+                    rollback_assessment: RollbackAssessment::NotNeeded,
                     diagnostics: report().diagnostics,
                 }),
                 stages: vec![Stage::ResidualPossible],
                 residual_assessment: ResidualAssessment::NotChecked,
+                rollback_assessment: RollbackAssessment::NotNeeded,
                 diagnostics: vec![],
             };
             for result in [Err(error.clone()), Err(nested)] {
@@ -475,6 +496,7 @@ fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
             Stage::ResidualPossible,
         ],
         residual_assessment: ResidualAssessment::Observed(Some(BootId(7))),
+        rollback_assessment: RollbackAssessment::NotNeeded,
         diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
     };
     let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
@@ -484,6 +506,7 @@ fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
         stages,
         residual_assessment,
         diagnostics,
+        ..
     }) = decode_response(&frame).unwrap()
     else {
         panic!("mutation evidence must remain terminal")
@@ -516,6 +539,7 @@ fn oversized_configure_failure_preserves_bounded_terminal_cause() {
         cause: Box::new(Error::StoreDurabilityUnknown { raw_code: 28 }),
         stages: vec![Stage::TargetValidated],
         residual_assessment: ResidualAssessment::NotChecked,
+        rollback_assessment: RollbackAssessment::NotNeeded,
         diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
     };
     let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
@@ -525,6 +549,7 @@ fn oversized_configure_failure_preserves_bounded_terminal_cause() {
         stages,
         residual_assessment,
         diagnostics,
+        ..
     }) = decode_response(&frame).unwrap()
     else {
         panic!("oversized configure failure must remain a domain failure")
@@ -545,6 +570,7 @@ fn oversized_failure_preserves_reboot_rejected_cause_without_residual_fabricatio
             Stage::RebootRejected,
         ],
         residual_assessment: ResidualAssessment::Observed(None),
+        rollback_assessment: RollbackAssessment::NotNeeded,
         diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
     };
     let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();
@@ -553,6 +579,7 @@ fn oversized_failure_preserves_reboot_rejected_cause_without_residual_fabricatio
         stages,
         residual_assessment,
         diagnostics,
+        ..
     }) = decode_response(&frame).unwrap()
     else {
         panic!("oversized reboot rejection must remain a domain failure")
@@ -577,12 +604,14 @@ fn compaction_bounds_recursive_cause_and_preserves_nested_errno_evidence() {
             cause: Box::new(Error::StoreDurabilityUnknown { raw_code: 5 }),
             stages: vec![Stage::TargetValidated],
             residual_assessment: ResidualAssessment::NotChecked,
+            rollback_assessment: RollbackAssessment::NotNeeded,
             diagnostics: vec![],
         }),
         stages: vec![Stage::TargetValidated, Stage::BootNextVerified],
         residual_assessment: ResidualAssessment::ReadFailed(Box::new(
             Error::StoreDurabilityUnknown { raw_code: 28 },
         )),
+        rollback_assessment: RollbackAssessment::NotNeeded,
         diagnostics: vec![EnumerationDiagnostic::DuplicateBootOrder(BootId(7)); 60_000],
     };
     let frame = budgeted_response(Err(error), encode_hello().len()).unwrap();

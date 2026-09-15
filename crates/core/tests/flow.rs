@@ -1,9 +1,10 @@
 mod support;
 
 use boothop_core::{
-    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, Os, RebootOutcome,
-    RecordDiagnostic, RecordState, Request, ResidualAssessment, Stage, canonicalize, decode_record,
-    encode_record, execute,
+    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, Os,
+    PlatformOperation, RebootOutcome, RecordDiagnostic, RecordState, Request, ResidualAssessment,
+    RollbackAssessment, RollbackOutcome, Stage, canonicalize, decode_record, encode_record,
+    execute,
 };
 use support::{Event, FakePlatform};
 
@@ -16,6 +17,47 @@ fn requests() -> [Request; 3] {
         },
         Request::Switch { os: Os::Windows },
     ]
+}
+
+#[test]
+fn rejected_reboot_rolls_back_only_a_write_made_by_core() {
+    let mut p = FakePlatform::ready();
+    p.reboot_outcome = RebootOutcome::Rejected;
+    p.next_reads = [Ok(None), Ok(None), Ok(Some(BootId(7))), Ok(Some(BootId(7)))].into();
+    p.rollback_outcome = RollbackOutcome::Restored;
+
+    let Error::FlowFailure {
+        cause,
+        stages,
+        rollback_assessment,
+        residual_assessment,
+        ..
+    } = execute(Request::Switch { os: Os::Windows }, Os::Linux, &mut p).unwrap_err()
+    else {
+        panic!("expected flow failure")
+    };
+    assert_eq!(*cause, Error::RebootRejected);
+    assert_eq!(rollback_assessment, RollbackAssessment::Restored);
+    assert_eq!(
+        residual_assessment,
+        ResidualAssessment::Observed(Some(BootId(7)))
+    );
+    assert_eq!(p.next, None);
+    assert_eq!(
+        stages,
+        [
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::RebootRejected,
+            Stage::RollbackAttempted,
+            Stage::RollbackRestored,
+        ]
+    );
+    assert!(
+        p.events
+            .iter()
+            .any(|event| matches!(event, Event::RollbackNext { .. }))
+    );
 }
 
 // Removing the initial trusted record read must fail these three-operation checks.
@@ -620,7 +662,11 @@ fn configure_failure_preserves_store_durability_without_firmware_residual() {
 fn every_fallible_switch_call_preserves_cause_and_stops() {
     for index in 0..7 {
         let cause = Error::PlatformIo {
-            operation: if index == 5 { "write" } else { "read" }.into(),
+            operation: if index == 5 {
+                PlatformOperation::Write
+            } else {
+                PlatformOperation::Read
+            },
             raw_code: 100 + index as i32,
         };
         let mut p = FakePlatform::ready();
@@ -646,7 +692,7 @@ fn failed_write_can_leave_state_and_is_never_retried() {
         let mut p = FakePlatform::ready();
         p.write_error_mutates = mutates;
         let cause = Error::PlatformIo {
-            operation: "write".into(),
+            operation: PlatformOperation::Write,
             raw_code: 4,
         };
         p.failure = Some((5, cause.clone()));
@@ -665,7 +711,7 @@ fn failed_write_can_leave_state_and_is_never_retried() {
 fn reboot_rejected_assesses_without_restoration() {
     for (observed, residual) in [
         (Some(BootId(7)), true),
-        (Some(BootId(8)), false),
+        (Some(BootId(8)), true),
         (None, false),
     ] {
         let mut p = FakePlatform::ready();
@@ -676,8 +722,14 @@ fn reboot_rejected_assesses_without_restoration() {
             Stage::BootNextVerified,
             Stage::RebootRejected,
         ];
-        if residual {
-            stages.push(Stage::ResidualPossible);
+        if observed == Some(BootId(7)) {
+            stages.extend([
+                Stage::RollbackAttempted,
+                Stage::RollbackUnsafe,
+                Stage::ResidualPossible,
+            ]);
+        } else if residual {
+            stages.extend([Stage::RollbackUnsafe, Stage::ResidualPossible]);
         }
         assert_failure(
             execute(switch(), Os::Linux, &mut p).unwrap_err(),
@@ -687,6 +739,12 @@ fn reboot_rejected_assesses_without_restoration() {
         );
         let mut expected = success_events();
         expected.push(Event::ReadNext);
+        if observed == Some(BootId(7)) {
+            expected.push(Event::RollbackNext {
+                original: None,
+                written: BootId(7),
+            });
+        }
         assert_eq!(p.events, expected);
     }
 }
@@ -696,7 +754,7 @@ fn reboot_rejected_assessment_failure_retains_raw_error() {
     let mut p = FakePlatform::ready();
     p.reboot_outcome = RebootOutcome::Rejected;
     let read_error = Error::PlatformIo {
-        operation: "read".into(),
+        operation: PlatformOperation::Read,
         raw_code: 19,
     };
     p.failure = Some((8, read_error.clone()));
@@ -707,6 +765,7 @@ fn reboot_rejected_assessment_failure_retains_raw_error() {
             Stage::TargetValidated,
             Stage::BootNextVerified,
             Stage::RebootRejected,
+            Stage::RollbackUnsafe,
             Stage::ResidualPossible,
         ],
         ResidualAssessment::ReadFailed(Box::new(read_error)),
@@ -902,7 +961,11 @@ fn every_inspect_and_configure_call_failure_stops_and_retains_raw_code() {
         for index in 0..count {
             let mut p = FakePlatform::missing();
             let cause = Error::PlatformIo {
-                operation: if index == 3 { "rename" } else { "read" }.into(),
+                operation: if index == 3 {
+                    PlatformOperation::Replace
+                } else {
+                    PlatformOperation::Read
+                },
                 raw_code: 13,
             };
             p.failure = Some((index, cause.clone()));
@@ -950,7 +1013,7 @@ fn same_target_readback_error_preserves_residual_without_write() {
     let mut p = FakePlatform::ready();
     p.next = Some(BootId(7));
     let cause = Error::PlatformIo {
-        operation: "read".into(),
+        operation: PlatformOperation::Read,
         raw_code: 5,
     };
     p.failure = Some((4, cause.clone()));

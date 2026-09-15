@@ -1,4 +1,4 @@
-//! Version 1 wire DTOs. No protected record or firmware identity is serializable here.
+//! Closed wire DTOs. No protected record or firmware identity is serializable here.
 use boothop_core as c;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,10 @@ pub enum Stage {
     RebootAccepted,
     RebootRejected,
     RebootUnknown,
+    RollbackAttempted,
+    RollbackRestored,
+    RollbackUnsafe,
+    RollbackFailed,
     ResidualPossible,
 }
 impl From<c::Stage> for Stage {
@@ -96,6 +100,10 @@ impl From<c::Stage> for Stage {
             c::Stage::RebootAccepted => Self::RebootAccepted,
             c::Stage::RebootRejected => Self::RebootRejected,
             c::Stage::RebootUnknown => Self::RebootUnknown,
+            c::Stage::RollbackAttempted => Self::RollbackAttempted,
+            c::Stage::RollbackRestored => Self::RollbackRestored,
+            c::Stage::RollbackUnsafe => Self::RollbackUnsafe,
+            c::Stage::RollbackFailed => Self::RollbackFailed,
             c::Stage::ResidualPossible => Self::ResidualPossible,
         }
     }
@@ -108,6 +116,10 @@ impl From<Stage> for c::Stage {
             Stage::RebootAccepted => Self::RebootAccepted,
             Stage::RebootRejected => Self::RebootRejected,
             Stage::RebootUnknown => Self::RebootUnknown,
+            Stage::RollbackAttempted => Self::RollbackAttempted,
+            Stage::RollbackRestored => Self::RollbackRestored,
+            Stage::RollbackUnsafe => Self::RollbackUnsafe,
+            Stage::RollbackFailed => Self::RollbackFailed,
             Stage::ResidualPossible => Self::ResidualPossible,
         }
     }
@@ -188,6 +200,88 @@ pub enum ResidualAssessment {
     Observed(Option<BootId>),
     ReadFailed(Box<Error>),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum RollbackAssessment {
+    NotNeeded,
+    Restored,
+    Unsafe,
+    Failed(Box<Error>),
+}
+impl From<c::RollbackAssessment> for RollbackAssessment {
+    fn from(v: c::RollbackAssessment) -> Self {
+        match v {
+            c::RollbackAssessment::NotNeeded => Self::NotNeeded,
+            c::RollbackAssessment::Restored => Self::Restored,
+            c::RollbackAssessment::Unsafe => Self::Unsafe,
+            c::RollbackAssessment::Failed(e) => Self::Failed(Box::new((*e).into())),
+        }
+    }
+}
+impl From<RollbackAssessment> for c::RollbackAssessment {
+    fn from(v: RollbackAssessment) -> Self {
+        match v {
+            RollbackAssessment::NotNeeded => Self::NotNeeded,
+            RollbackAssessment::Restored => Self::Restored,
+            RollbackAssessment::Unsafe => Self::Unsafe,
+            RollbackAssessment::Failed(e) => Self::Failed(Box::new((*e).into())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum PlatformOperation {
+    Open,
+    Read,
+    Write,
+    Metadata,
+    Lock,
+    Flush,
+    Replace,
+    Ipc,
+    Reboot,
+    Random,
+    Process,
+    Security,
+}
+impl From<c::PlatformOperation> for PlatformOperation {
+    fn from(v: c::PlatformOperation) -> Self {
+        match v {
+            c::PlatformOperation::Open => Self::Open,
+            c::PlatformOperation::Read => Self::Read,
+            c::PlatformOperation::Write => Self::Write,
+            c::PlatformOperation::Metadata => Self::Metadata,
+            c::PlatformOperation::Lock => Self::Lock,
+            c::PlatformOperation::Flush => Self::Flush,
+            c::PlatformOperation::Replace => Self::Replace,
+            c::PlatformOperation::Ipc => Self::Ipc,
+            c::PlatformOperation::Reboot => Self::Reboot,
+            c::PlatformOperation::Random => Self::Random,
+            c::PlatformOperation::Process => Self::Process,
+            c::PlatformOperation::Security => Self::Security,
+        }
+    }
+}
+impl From<PlatformOperation> for c::PlatformOperation {
+    fn from(v: PlatformOperation) -> Self {
+        match v {
+            PlatformOperation::Open => Self::Open,
+            PlatformOperation::Read => Self::Read,
+            PlatformOperation::Write => Self::Write,
+            PlatformOperation::Metadata => Self::Metadata,
+            PlatformOperation::Lock => Self::Lock,
+            PlatformOperation::Flush => Self::Flush,
+            PlatformOperation::Replace => Self::Replace,
+            PlatformOperation::Ipc => Self::Ipc,
+            PlatformOperation::Reboot => Self::Reboot,
+            PlatformOperation::Random => Self::Random,
+            PlatformOperation::Process => Self::Process,
+            PlatformOperation::Security => Self::Security,
+        }
+    }
+}
 impl From<c::ResidualAssessment> for ResidualAssessment {
     fn from(v: c::ResidualAssessment) -> Self {
         match v {
@@ -226,8 +320,31 @@ pub enum Error {
     Busy,
     ReadbackFailed,
     RebootRejected,
+    NotUefi,
+    PrivilegeUnavailable,
+    PrivilegeEnableFailed {
+        raw_code: i32,
+    },
+    PrivilegeRestoreFailed {
+        raw_code: i32,
+    },
+    FirmwareReadFailed {
+        raw_code: i32,
+    },
+    FirmwareWriteFailed {
+        raw_code: i32,
+    },
+    BootNextUnavailable {
+        raw_code: i32,
+    },
+    ProtectedStoreViolation {
+        raw_code: i32,
+    },
+    StoreReplaceFailed {
+        raw_code: i32,
+    },
     PlatformIo {
-        operation: String,
+        operation: PlatformOperation,
         raw_code: i32,
     },
     StoreDurabilityUnknown {
@@ -237,6 +354,7 @@ pub enum Error {
         cause: Box<Error>,
         stages: Vec<Stage>,
         residual_assessment: ResidualAssessment,
+        rollback_assessment: RollbackAssessment,
         diagnostics: Vec<EnumerationDiagnostic>,
     },
 }
@@ -260,11 +378,26 @@ impl From<c::Error> for Error {
             c::Error::Busy => Self::Busy,
             c::Error::ReadbackFailed => Self::ReadbackFailed,
             c::Error::RebootRejected => Self::RebootRejected,
+            c::Error::NotUefi => Self::NotUefi,
+            c::Error::PrivilegeUnavailable => Self::PrivilegeUnavailable,
+            c::Error::PrivilegeEnableFailed { raw_code } => {
+                Self::PrivilegeEnableFailed { raw_code }
+            }
+            c::Error::PrivilegeRestoreFailed { raw_code } => {
+                Self::PrivilegeRestoreFailed { raw_code }
+            }
+            c::Error::FirmwareReadFailed { raw_code } => Self::FirmwareReadFailed { raw_code },
+            c::Error::FirmwareWriteFailed { raw_code } => Self::FirmwareWriteFailed { raw_code },
+            c::Error::BootNextUnavailable { raw_code } => Self::BootNextUnavailable { raw_code },
+            c::Error::ProtectedStoreViolation { raw_code } => {
+                Self::ProtectedStoreViolation { raw_code }
+            }
+            c::Error::StoreReplaceFailed { raw_code } => Self::StoreReplaceFailed { raw_code },
             c::Error::PlatformIo {
                 operation,
                 raw_code,
             } => Self::PlatformIo {
-                operation,
+                operation: operation.into(),
                 raw_code,
             },
             c::Error::StoreDurabilityUnknown { raw_code } => {
@@ -274,11 +407,13 @@ impl From<c::Error> for Error {
                 cause,
                 stages,
                 residual_assessment,
+                rollback_assessment,
                 diagnostics,
             } => Self::FlowFailure {
                 cause: Box::new((*cause).into()),
                 stages: stages.into_iter().map(|v| v.into()).collect(),
                 residual_assessment: residual_assessment.into(),
+                rollback_assessment: rollback_assessment.into(),
                 diagnostics: diagnostics.into_iter().map(|v| v.into()).collect(),
             },
         }
@@ -302,11 +437,22 @@ impl From<Error> for c::Error {
             Error::Busy => Self::Busy,
             Error::ReadbackFailed => Self::ReadbackFailed,
             Error::RebootRejected => Self::RebootRejected,
+            Error::NotUefi => Self::NotUefi,
+            Error::PrivilegeUnavailable => Self::PrivilegeUnavailable,
+            Error::PrivilegeEnableFailed { raw_code } => Self::PrivilegeEnableFailed { raw_code },
+            Error::PrivilegeRestoreFailed { raw_code } => Self::PrivilegeRestoreFailed { raw_code },
+            Error::FirmwareReadFailed { raw_code } => Self::FirmwareReadFailed { raw_code },
+            Error::FirmwareWriteFailed { raw_code } => Self::FirmwareWriteFailed { raw_code },
+            Error::BootNextUnavailable { raw_code } => Self::BootNextUnavailable { raw_code },
+            Error::ProtectedStoreViolation { raw_code } => {
+                Self::ProtectedStoreViolation { raw_code }
+            }
+            Error::StoreReplaceFailed { raw_code } => Self::StoreReplaceFailed { raw_code },
             Error::PlatformIo {
                 operation,
                 raw_code,
             } => Self::PlatformIo {
-                operation,
+                operation: operation.into(),
                 raw_code,
             },
             Error::StoreDurabilityUnknown { raw_code } => Self::StoreDurabilityUnknown { raw_code },
@@ -314,11 +460,13 @@ impl From<Error> for c::Error {
                 cause,
                 stages,
                 residual_assessment,
+                rollback_assessment,
                 diagnostics,
             } => Self::FlowFailure {
                 cause: Box::new((*cause).into()),
                 stages: stages.into_iter().map(|v| v.into()).collect(),
                 residual_assessment: residual_assessment.into(),
+                rollback_assessment: rollback_assessment.into(),
                 diagnostics: diagnostics.into_iter().map(|v| v.into()).collect(),
             },
         }
@@ -523,11 +671,13 @@ pub fn budgeted_response(
                     cause,
                     stages,
                     residual_assessment,
+                    rollback_assessment,
                     ..
                 }) if !stages.is_empty() => encode_response(Err(c::Error::FlowFailure {
                     cause: Box::new(compact_cause(*cause)),
                     stages: compact_stages(stages),
                     residual_assessment: compact_residual_assessment(residual_assessment),
+                    rollback_assessment: compact_rollback_assessment(rollback_assessment),
                     diagnostics: Vec::new(),
                 })),
                 _ => Err(ProtocolError::ResourceLimit),
@@ -550,17 +700,20 @@ fn compact_cause(error: c::Error) -> c::Error {
         c::Error::PlatformIo {
             operation,
             raw_code,
-        } if matches!(
-            operation.as_str(),
-            "open" | "read" | "write" | "metadata" | "lock" | "fsync" | "rename" | "ipc" | "reboot"
-        ) =>
-        {
-            c::Error::PlatformIo {
-                operation,
-                raw_code,
-            }
+        } => c::Error::PlatformIo {
+            operation,
+            raw_code,
+        },
+        c::Error::FlowFailure { .. } => c::Error::ResourceLimit,
+        other => other,
+    }
+}
+
+fn compact_rollback_assessment(assessment: c::RollbackAssessment) -> c::RollbackAssessment {
+    match assessment {
+        c::RollbackAssessment::Failed(error) => {
+            c::RollbackAssessment::Failed(Box::new(compact_cause(*error)))
         }
-        c::Error::FlowFailure { .. } | c::Error::PlatformIo { .. } => c::Error::ResourceLimit,
         other => other,
     }
 }

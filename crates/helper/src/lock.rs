@@ -30,8 +30,8 @@ pub fn with_linux_operation<T>(
 mod tests {
     use super::*;
     use boothop_core::{
-        BootId, LoadOption, Os, Platform, RebootOutcome, RecordState, Request, Stage, TargetRecord,
-        execute,
+        BootId, LoadOption, Os, Platform, RebootOutcome, RecordState, Request, RollbackOutcome,
+        Stage, TargetRecord, execute,
     };
 
     struct Flow<'a> {
@@ -69,6 +69,13 @@ mod tests {
             assert!(self.fs.held());
             self.events.push("write");
             Ok(())
+        }
+        fn rollback_next(
+            &mut self,
+            _original: Option<BootId>,
+            _written: BootId,
+        ) -> RollbackOutcome {
+            RollbackOutcome::Unsafe
         }
         fn reboot(&mut self) -> RebootOutcome {
             assert!(self.fs.held());
