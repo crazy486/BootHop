@@ -659,8 +659,11 @@ fn decode<T: DeserializeOwned + Serialize>(frame: &[u8]) -> Result<T, ProtocolEr
     if frame.len() != size + 4 {
         return Err(ProtocolError::Invalid);
     }
-    // Decode the ORIGINAL bytes first: typed visitors must see duplicate and
-    // unknown fields before any Value map can collapse keys. Serde also accepts
+    // Reject duplicate object members from the original bytes before any
+    // typed/value decode can normalize an object map.
+    reject_duplicate_keys(&frame[4..])?;
+    // Decode the ORIGINAL bytes first: typed visitors must see unknown fields.
+    // Serde also accepts
     // sequences for structs and {"UnitVariant": null} for unit enums, so typed
     // decoding alone is not a strict JSON shape check.
     let value: T = serde_json::from_slice(&frame[4..]).map_err(|_| ProtocolError::Invalid)?;
@@ -675,6 +678,206 @@ fn decode<T: DeserializeOwned + Serialize>(frame: &[u8]) -> Result<T, ProtocolEr
         return Err(ProtocolError::Invalid);
     }
     Ok(value)
+}
+
+fn reject_duplicate_keys(bytes: &[u8]) -> Result<(), ProtocolError> {
+    let mut parser = JsonScanner { bytes, offset: 0 };
+    parser.value(0)?;
+    parser.whitespace();
+    if parser.offset == bytes.len() {
+        Ok(())
+    } else {
+        Err(ProtocolError::Invalid)
+    }
+}
+
+struct JsonScanner<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl JsonScanner<'_> {
+    fn whitespace(&mut self) {
+        while self
+            .bytes
+            .get(self.offset)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn value(&mut self, depth: usize) -> Result<(), ProtocolError> {
+        if depth > 256 {
+            return Err(ProtocolError::ResourceLimit);
+        }
+        self.whitespace();
+        match self.bytes.get(self.offset).copied() {
+            Some(b'{') => self.object(depth + 1),
+            Some(b'[') => self.array(depth + 1),
+            Some(b'"') => self.string().map(|_| ()),
+            Some(b't') => self.literal(b"true"),
+            Some(b'f') => self.literal(b"false"),
+            Some(b'n') => self.literal(b"null"),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            _ => Err(ProtocolError::Invalid),
+        }
+    }
+
+    fn object(&mut self, depth: usize) -> Result<(), ProtocolError> {
+        self.offset += 1;
+        self.whitespace();
+        let mut keys = std::collections::HashSet::new();
+        if self.bytes.get(self.offset) == Some(&b'}') {
+            self.offset += 1;
+            return Ok(());
+        }
+        loop {
+            self.whitespace();
+            let key = self.string()?;
+            if !keys.insert(key) {
+                return Err(ProtocolError::Invalid);
+            }
+            self.whitespace();
+            if self.bytes.get(self.offset) != Some(&b':') {
+                return Err(ProtocolError::Invalid);
+            }
+            self.offset += 1;
+            self.value(depth)?;
+            self.whitespace();
+            match self.bytes.get(self.offset).copied() {
+                Some(b',') => self.offset += 1,
+                Some(b'}') => {
+                    self.offset += 1;
+                    return Ok(());
+                }
+                _ => return Err(ProtocolError::Invalid),
+            }
+        }
+    }
+
+    fn array(&mut self, depth: usize) -> Result<(), ProtocolError> {
+        self.offset += 1;
+        self.whitespace();
+        if self.bytes.get(self.offset) == Some(&b']') {
+            self.offset += 1;
+            return Ok(());
+        }
+        loop {
+            self.value(depth)?;
+            self.whitespace();
+            match self.bytes.get(self.offset).copied() {
+                Some(b',') => self.offset += 1,
+                Some(b']') => {
+                    self.offset += 1;
+                    return Ok(());
+                }
+                _ => return Err(ProtocolError::Invalid),
+            }
+        }
+    }
+
+    fn string(&mut self) -> Result<String, ProtocolError> {
+        let start = self.offset;
+        if self.bytes.get(self.offset) != Some(&b'"') {
+            return Err(ProtocolError::Invalid);
+        }
+        self.offset += 1;
+        loop {
+            match self.bytes.get(self.offset).copied() {
+                Some(b'"') => {
+                    self.offset += 1;
+                    return serde_json::from_slice(&self.bytes[start..self.offset])
+                        .map_err(|_| ProtocolError::Invalid);
+                }
+                Some(b'\\') => {
+                    self.offset += 1;
+                    if self.bytes.get(self.offset) == Some(&b'u') {
+                        self.offset = self.offset.saturating_add(5);
+                    } else {
+                        self.offset += 1;
+                    }
+                }
+                Some(byte) if byte < 0x20 => return Err(ProtocolError::Invalid),
+                Some(_) => self.offset += 1,
+                None => return Err(ProtocolError::Invalid),
+            }
+        }
+    }
+
+    fn literal(&mut self, literal: &[u8]) -> Result<(), ProtocolError> {
+        if self.bytes.get(self.offset..self.offset + literal.len()) == Some(literal) {
+            self.offset += literal.len();
+            Ok(())
+        } else {
+            Err(ProtocolError::Invalid)
+        }
+    }
+
+    fn number(&mut self) -> Result<(), ProtocolError> {
+        let start = self.offset;
+        if self.bytes.get(self.offset) == Some(&b'-') {
+            self.offset += 1;
+        }
+        match self.bytes.get(self.offset) {
+            Some(b'0') => self.offset += 1,
+            Some(b'1'..=b'9') => {
+                self.offset += 1;
+                while self
+                    .bytes
+                    .get(self.offset)
+                    .is_some_and(|byte| byte.is_ascii_digit())
+                {
+                    self.offset += 1;
+                }
+            }
+            _ => return Err(ProtocolError::Invalid),
+        }
+        if self.bytes.get(self.offset) == Some(&b'.') {
+            self.offset += 1;
+            let fraction = self.offset;
+            while self
+                .bytes
+                .get(self.offset)
+                .is_some_and(|byte| byte.is_ascii_digit())
+            {
+                self.offset += 1;
+            }
+            if self.offset == fraction {
+                return Err(ProtocolError::Invalid);
+            }
+        }
+        if self
+            .bytes
+            .get(self.offset)
+            .is_some_and(|byte| *byte == b'e' || *byte == b'E')
+        {
+            self.offset += 1;
+            if self
+                .bytes
+                .get(self.offset)
+                .is_some_and(|byte| *byte == b'+' || *byte == b'-')
+            {
+                self.offset += 1;
+            }
+            let exponent = self.offset;
+            while self
+                .bytes
+                .get(self.offset)
+                .is_some_and(|byte| byte.is_ascii_digit())
+            {
+                self.offset += 1;
+            }
+            if self.offset == exponent {
+                return Err(ProtocolError::Invalid);
+            }
+        }
+        if self.offset == start {
+            Err(ProtocolError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
 }
 fn version(v: u32) -> Result<(), ProtocolError> {
     if v == PROTOCOL_VERSION {

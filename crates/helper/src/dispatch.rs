@@ -19,7 +19,7 @@ pub fn run_linux(
 
 /// Trusted Windows dispatch. The host is fixed here and can never be supplied
 /// by semantic GUI input.
-pub fn run_windows(
+pub(crate) fn run_windows(
     request: Request,
     platform: &mut impl Platform,
     send: &mut SendResult<'_>,
@@ -65,42 +65,6 @@ pub fn serve(
     }
 }
 
-/// Windows transport hook. Authentication is completed before hello/request
-/// bytes are accepted, and the callback is the only place allowed to build a
-/// platform after that check. Native authentication remains a Task 7 seam.
-pub fn serve_authenticated(
-    io: &mut impl SessionIo,
-    authenticate: impl FnOnce() -> Result<(), Error>,
-    operation: impl FnOnce(Request, &mut SendResult<'_>) -> Result<(), Error>,
-) -> Result<(), Error> {
-    authenticate()?;
-    let hello = protocol::encode_hello();
-    io.send(&hello)?;
-    let envelope =
-        protocol::decode_request_envelope(&io.receive()?).map_err(|_| Error::UnsupportedFormat)?;
-    let request_id = envelope.request_id;
-    let mut sent = false;
-    let mut send = |result| {
-        if sent {
-            return Err(Error::UnsupportedFormat);
-        }
-        sent = true;
-        io.send(
-            &protocol::budgeted_response_with_id(&request_id, result, hello.len())
-                .map_err(|_| Error::ResourceLimit)?,
-        )
-    };
-    let outcome = operation(envelope.request, &mut send);
-    match outcome {
-        Err(error) if !sent => io.send(
-            &protocol::budgeted_response_with_id(&request_id, Err(error), hello.len())
-                .map_err(|_| Error::ResourceLimit)?,
-        ),
-        Ok(()) if !sent => Err(Error::UnsupportedFormat),
-        other => other,
-    }
-}
-
 /// Complete one authenticated Windows operation. The operation guard is
 /// acquired before platform construction and remains in scope until the
 /// terminal `send` attempt has returned.
@@ -139,8 +103,10 @@ where
         Ok(mut platform) => run_windows(envelope.request, &mut platform, &mut send),
         Err(error) => send(Err(error)),
     };
-    // `guard` is intentionally dropped only after terminal response attempt.
-    outcome
+    // The explicit finish keeps release ordering observable and propagates a
+    // release failure even when the terminal response was already sent.
+    let release = guard.finish();
+    release.map(|()| outcome).unwrap_or_else(Err)
 }
 
 #[cfg(target_os = "linux")]

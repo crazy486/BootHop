@@ -6,8 +6,7 @@
 
 pub mod lock;
 
-use crate::dispatch::SendResult;
-use boothop_core::{Error, Platform, Request};
+use boothop_core::Error;
 
 pub const OPERATION_MUTEX_NAME: &str = r"Global\BootHop.Operation.v1";
 pub const OPERATION_MUTEX_TIMEOUT_MS: u32 = 30_000;
@@ -24,8 +23,14 @@ pub enum WaitOutcome {
 }
 
 pub trait OperationMutex {
+    /// Create/open the fixed mutex. If this fails, the implementation must
+    /// close any transient handle it created when the boundary is dropped.
     fn create(&mut self, name: &str, dacl: &str) -> Result<(), Error>;
+    /// Wait for exclusive ownership. A timeout/abandonment is not ownership;
+    /// implementations must close their native handle on Drop in that case.
     fn wait(&mut self, timeout_ms: u32) -> Result<WaitOutcome, Error>;
+    /// Release an acquired mutex. The boundary owns and closes its handle on
+    /// Drop regardless of whether acquisition or release succeeded.
     fn release(&mut self) -> Result<(), Error>;
 }
 
@@ -65,48 +70,30 @@ impl<C: OperationMutex> WindowsOperationGuard<C> {
     pub fn calls(&self) -> &C {
         &self.calls
     }
+
+    /// Finish an operation after the terminal response send. Release errors
+    /// are returned as fail-closed platform errors and are never retried.
+    pub fn finish(mut self) -> Result<(), Error> {
+        self.release_once()
+    }
+
+    fn release_once(&mut self) -> Result<(), Error> {
+        if self.released {
+            return Ok(());
+        }
+        self.released = true;
+        self.calls.release()
+    }
 }
 
 impl<C: OperationMutex> Drop for WindowsOperationGuard<C> {
     fn drop(&mut self) {
-        if !self.released {
-            self.released = true;
-            let _ = self.calls.release();
+        if !self.released && self.release_once().is_err() {
+            // Debug/test builds must remain testable without terminating the
+            // harness. Production release builds fail closed because
+            // continuing after a lock-release failure is unsafe.
+            #[cfg(not(debug_assertions))]
+            std::process::abort();
         }
     }
-}
-
-/// Dispatches a decoded intent through the shared state machine with the
-/// Windows host fixed by this function. The guard must be held by the caller
-/// until its terminal response send returns.
-pub fn run_windows(
-    request: Request,
-    platform: &mut impl Platform,
-    send: &mut SendResult<'_>,
-) -> Result<(), Error> {
-    send(boothop_core::execute(
-        request,
-        boothop_core::Os::Windows,
-        platform,
-    ))
-}
-
-/// Production wiring hook: authentication and guard acquisition happen before
-/// this closure constructs the native platform. The guard stays in scope while
-/// `run_windows` invokes the terminal response callback.
-pub fn dispatch_authenticated<C, P>(
-    authenticate: impl FnOnce() -> Result<(), Error>,
-    acquire: impl FnOnce() -> Result<WindowsOperationGuard<C>, Error>,
-    request: Request,
-    construct: impl FnOnce(&WindowsOperationGuard<C>) -> Result<P, Error>,
-    send: &mut SendResult<'_>,
-) -> Result<(), Error>
-where
-    C: OperationMutex,
-    P: Platform,
-{
-    authenticate()?;
-    let guard = acquire()?;
-    let mut platform = construct(&guard)?;
-    run_windows(request, &mut platform, send)
 }

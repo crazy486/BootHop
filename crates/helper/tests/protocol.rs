@@ -45,6 +45,44 @@ fn v2_rejects_missing_id_and_credential_or_arbitrary_transport_fields() {
 }
 
 #[test]
+fn duplicate_keys_are_rejected_recursively_without_value_normalization() {
+    let raw = |json: &str| {
+        let mut frame = (json.len() as u32).to_le_bytes().to_vec();
+        frame.extend(json.as_bytes());
+        frame
+    };
+    let id = "0123456789abcdef0123456789abcde1";
+    let cases = [
+        (
+            format!(
+                r#"{{"protocol_version":2,"request_id":"{id}","request":"Inspect","request_id":"{id}"}}"#
+            ),
+            true,
+        ),
+        (
+            format!(
+                r#"{{"protocol_version":2,"request_id":"{id}","request":{{"Switch":{{"os":"Windows","os":"Windows"}}}}}}"#
+            ),
+            true,
+        ),
+        (
+            format!(
+                r#"{{"protocol_version":2,"request_id":"{id}","result":{{"Err":{{"FlowFailure":{{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[],"diagnostics":[]}}}}}}}}"#
+            ),
+            false,
+        ),
+    ];
+    for (json, request) in cases {
+        let rejected = if request {
+            decode_request(&raw(&json)).is_err()
+        } else {
+            decode_response(&raw(&json)).is_err()
+        };
+        assert!(rejected, "duplicate accepted: {json}");
+    }
+}
+
+#[test]
 fn task6_protocol_is_v2_and_requires_request_correlation() {
     assert_eq!(boothop_helper::protocol::PROTOCOL_VERSION, 2);
     let frame = frame(
@@ -54,17 +92,24 @@ fn task6_protocol_is_v2_and_requires_request_correlation() {
 }
 
 fn frame(json: &str) -> Vec<u8> {
+    // Insert the fixture ID textually so malformed duplicate keys remain in
+    // the original bytes (a Value round-trip would erase the defect).
     let mut body = json.to_owned();
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json)
-        && let Some(object) = value.as_object_mut()
-        && (object.contains_key("request") || object.contains_key("result"))
-        && !object.contains_key("request_id")
-    {
-        object.insert(
-            "request_id".into(),
-            serde_json::Value::String("00000000000000000000000000000001".into()),
-        );
-        body = value.to_string();
+    if !json.contains("\"request_id\"") {
+        let marker = if json.contains("\"request\"") {
+            "\"request\""
+        } else if json.contains("\"result\"") {
+            "\"result\""
+        } else {
+            ""
+        };
+        if !marker.is_empty() {
+            let position = json.find(marker).unwrap();
+            body.insert_str(
+                position,
+                "\"request_id\":\"00000000000000000000000000000001\",",
+            );
+        }
     }
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend(body.as_bytes());
@@ -395,7 +440,6 @@ fn version_truncation_trailing_and_frame_limit_fail_closed() {
 fn hello_is_strict_and_versioned() {
     assert_eq!(decode_hello(&encode_hello()), Ok(()));
     for json in [
-        r#"{"protocol_version":2,"hello":true}"#,
         r#"{"protocol_version":2,"hello":false}"#,
         r#"{"protocol_version":2,"hello":true,"hello":true}"#,
         r#"{"protocol_version":2,"hello":true,"path":"/tmp"}"#,
@@ -541,9 +585,10 @@ fn every_report_shape_roundtrip_without_protected_data() {
 }
 #[test]
 fn response_rejects_unknown_duplicate_and_malformed_results() {
+    assert!(decode_response(&frame(r#"{"protocol_version":2,"result":{"Err":"Busy"}}"#)).is_ok());
     for json in [
         r#"{"protocol_version":2,"result":{"Err":"FutureError"}}"#,
-        r#"{"protocol_version":2,"result":{"Err":"Busy"}}"#,
+        r#"{"protocol_version":2,"result":{"Err":{"Busy":null}}}"#,
         r#"{"protocol_version":2,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5,"raw_code":6}}}}"#,
         r#"{"protocol_version":2,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5,"path":"x"}}}}"#,
         r#"{"protocol_version":2,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[],"identity":"x"}}}"#,
