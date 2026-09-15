@@ -24,5 +24,19 @@ fn main() {
     let result = dispatch::serve(euid, &mut io, dispatch::production);
     std::process::exit(if result.is_ok() { 0 } else { 1 });
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn main() {
+    let argv = std::env::args().skip(1).collect::<Vec<_>>();
+    let Ok(args) = boothop_helper::windows::pipe::parse_args(&argv) else {
+        std::process::exit(1);
+    };
+    // Keep native endpoint failures generic at the process boundary; the
+    // authenticated transport carries the only structured terminal result.
+    let status = boothop_helper::windows::pipe::run(args)
+        .map(|_| 0)
+        .unwrap_or(1);
+    std::process::exit(status);
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn main() {}

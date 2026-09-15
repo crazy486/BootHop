@@ -67,6 +67,12 @@ fn duplicate_keys_are_rejected_recursively_without_value_normalization() {
         ),
         (
             format!(
+                r#"{{"protocol_version":2,"request_id":"{id}","request":"Inspect","request\u005fid":"{id}"}}"#
+            ),
+            true,
+        ),
+        (
+            format!(
                 r#"{{"protocol_version":2,"request_id":"{id}","result":{{"Err":{{"FlowFailure":{{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[],"diagnostics":[]}}}}}}}}"#
             ),
             false,

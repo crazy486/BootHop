@@ -506,6 +506,7 @@ dependencies = [
  "boothop-protocol",
  "libc",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

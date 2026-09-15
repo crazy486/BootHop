@@ -5,6 +5,8 @@
 //! only injectable seams so host tests cannot perform privileged operations.
 
 pub mod lock;
+pub mod pipe;
+pub use pipe::{PIPE_DACL, PIPE_MAX_BYTES, PIPE_NAME_PREFIX};
 
 use boothop_core::Error;
 
@@ -12,6 +14,11 @@ pub const OPERATION_MUTEX_NAME: &str = r"Global\BootHop.Operation.v1";
 pub const OPERATION_MUTEX_TIMEOUT_MS: u32 = 30_000;
 /// SDDL for the operation mutex: SYSTEM and built-in administrators only.
 pub const OPERATION_MUTEX_DACL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+
+/// Fixed installation identities. These are deliberately constants rather
+/// than helper arguments so a caller cannot redirect the trusted boundary.
+pub const HELPER_IMAGE_PATH: &str = r"C:\Program Files\BootHop\boothop-helper.exe";
+pub const GUI_IMAGE_PATH: &str = r"C:\Program Files\BootHop\boothop-gui.exe";
 
 /// OS-backed mutex wait result. Abandonment is distinct from timeout and is
 /// always treated as a fail-closed platform error.
