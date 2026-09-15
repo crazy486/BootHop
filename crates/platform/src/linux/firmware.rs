@@ -24,9 +24,9 @@ fn reserve<T>(buffer: &mut Vec<T>, additional: usize) -> Result<(), Error> {
         .try_reserve(additional)
         .map_err(|_| Error::ResourceLimit)
 }
-pub(crate) fn io(operation: &'static str, raw_code: i32) -> Error {
+pub(crate) fn io(operation: PlatformOperation, raw_code: i32) -> Error {
     Error::PlatformIo {
-        operation: PlatformOperation::from_label(operation).expect("closed Linux operation label"),
+        operation,
         raw_code,
     }
 }
@@ -34,18 +34,22 @@ pub(crate) fn io(operation: &'static str, raw_code: i32) -> Error {
 const EFIVARFS: u64 = 0xde5e81e4;
 const MAX_RAW: usize = 1_048_580;
 pub(crate) fn directory<C: LinuxCalls>(calls: &mut C) -> Result<C::Handle, Error> {
-    let mut dir = calls.root().map_err(|e| io("open", e))?;
+    let mut dir = calls.root().map_err(|e| io(PlatformOperation::Open, e))?;
     validate(
-        calls.metadata(&dir).map_err(|e| io("metadata", e))?,
+        calls
+            .metadata(&dir)
+            .map_err(|e| io(PlatformOperation::Metadata, e))?,
         true,
         false,
     )?;
     for name in ["sys", "firmware", "efi", "efivars"] {
         dir = calls
             .open(&dir, name, OpenKind::Directory)
-            .map_err(|e| io("open", e))?;
+            .map_err(|e| io(PlatformOperation::Open, e))?;
         validate(
-            calls.metadata(&dir).map_err(|e| io("metadata", e))?,
+            calls
+                .metadata(&dir)
+                .map_err(|e| io(PlatformOperation::Metadata, e))?,
             true,
             name == "efivars",
         )?;
@@ -61,13 +65,13 @@ pub(crate) fn read_next<C: LinuxCalls>(calls: &mut C) -> Result<Option<BootId>, 
 
 fn validate(meta: Metadata, directory: bool, efivarfs: bool) -> Result<(), Error> {
     if meta.mode & 0o170000 != if directory { 0o040000 } else { 0o100000 } {
-        return Err(io("metadata", 1));
+        return Err(io(PlatformOperation::Metadata, 1));
     }
     if efivarfs && meta.filesystem != EFIVARFS {
-        return Err(io("metadata", 19));
+        return Err(io(PlatformOperation::Metadata, 19));
     }
     if efivarfs && meta.readonly {
-        return Err(io("metadata", 30));
+        return Err(io(PlatformOperation::Metadata, 30));
     }
     Ok(())
 }
@@ -80,9 +84,11 @@ fn read_variable<C: LinuxCalls>(
     let mut fd = match calls.open(dir, &format!("{stem}-{GUID}"), OpenKind::ReadVariable) {
         Ok(fd) => fd,
         Err(2) if optional => return Ok(None),
-        Err(e) => return Err(io("open", e)),
+        Err(e) => return Err(io(PlatformOperation::Open, e)),
     };
-    let before = calls.metadata(&fd).map_err(|e| io("metadata", e))?;
+    let before = calls
+        .metadata(&fd)
+        .map_err(|e| io(PlatformOperation::Metadata, e))?;
     validate(before, false, true)?;
     if before.size > MAX_RAW as u64 {
         return Err(Error::ResourceLimit);
@@ -92,13 +98,13 @@ fn read_variable<C: LinuxCalls>(
     let mut buffer = [0; 8192];
     loop {
         if std::time::Instant::now() >= deadline {
-            return Err(io("read", 110));
+            return Err(io(PlatformOperation::Read, 110));
         }
         let limit = buffer.len().min(MAX_RAW - bytes.len() + 1);
         // EINTR is returned immediately. In particular no write is ever retried.
         let count = calls
             .read(&mut fd, &mut buffer[..limit])
-            .map_err(|e| io("read", e))?;
+            .map_err(|e| io(PlatformOperation::Read, e))?;
         if count == 0 {
             break;
         }
@@ -109,15 +115,22 @@ fn read_variable<C: LinuxCalls>(
         bytes.extend_from_slice(&buffer[..count]);
     }
     if before.size != bytes.len() as u64
-        || before != calls.metadata(&fd).map_err(|e| io("metadata", e))?
+        || before
+            != calls
+                .metadata(&fd)
+                .map_err(|e| io(PlatformOperation::Metadata, e))?
     {
-        return Err(io("read", 5));
+        return Err(io(PlatformOperation::Read, 5));
     }
     let named = calls
         .open(dir, &format!("{stem}-{GUID}"), OpenKind::ReadVariable)
-        .map_err(|e| io("open", e))?;
-    if before != calls.metadata(&named).map_err(|e| io("metadata", e))? {
-        return Err(io("read", 5));
+        .map_err(|e| io(PlatformOperation::Open, e))?;
+    if before
+        != calls
+            .metadata(&named)
+            .map_err(|e| io(PlatformOperation::Metadata, e))?
+    {
+        return Err(io(PlatformOperation::Read, 5));
     }
     Ok(Some(bytes))
 }
@@ -140,7 +153,9 @@ pub(crate) fn read_options<C: LinuxCalls>(
 ) -> Result<boothop_core::OptionInventory, Error> {
     use boothop_core::{EnumerationDiagnostic, OptionInventory, parse_load_option};
     let dir = directory(calls)?;
-    let directory_before = calls.metadata(&dir).map_err(|e| io("metadata", e))?;
+    let directory_before = calls
+        .metadata(&dir)
+        .map_err(|e| io(PlatformOperation::Metadata, e))?;
     let mut total = 0usize;
     let mut read = |calls: &mut C, stem: &str, optional| -> Result<Option<Vec<u8>>, Error> {
         let bytes = read_variable(calls, &dir, stem, optional)?;
@@ -199,8 +214,12 @@ pub(crate) fn read_options<C: LinuxCalls>(
         reserve(&mut entries, 1)?;
         entries.push((BootId(id as u16), option));
     }
-    if directory_before != calls.metadata(&dir).map_err(|e| io("metadata", e))? {
-        return Err(io("read", 5));
+    if directory_before
+        != calls
+            .metadata(&dir)
+            .map_err(|e| io(PlatformOperation::Metadata, e))?
+    {
+        return Err(io(PlatformOperation::Read, 5));
     }
     Ok(OptionInventory {
         entries,
@@ -228,18 +247,20 @@ pub(crate) fn write_next<C: LinuxCalls>(calls: &mut C, target: BootId) -> Result
     let dir = directory(calls)?;
     let mut fd = calls
         .open(&dir, &format!("BootNext-{GUID}"), OpenKind::CreateNext)
-        .map_err(|e| io("open", e))?;
+        .map_err(|e| io(PlatformOperation::Open, e))?;
     validate(
-        calls.metadata(&fd).map_err(|e| io("metadata", e))?,
+        calls
+            .metadata(&fd)
+            .map_err(|e| io(PlatformOperation::Metadata, e))?,
         false,
         true,
     )?;
     let [low, high] = target.0.to_le_bytes();
     let count = calls
         .write(&mut fd, &[7, 0, 0, 0, low, high])
-        .map_err(|e| io("write", e))?;
+        .map_err(|e| io(PlatformOperation::Write, e))?;
     if count != 6 {
-        return Err(io("write", 5));
+        return Err(io(PlatformOperation::Write, 5));
     }
     Ok(())
 }
@@ -257,14 +278,15 @@ pub(crate) fn native_open(
     .map_err(|e| e.raw_os_error())
 }
 pub(crate) fn native_names(dir: &std::os::fd::OwnedFd) -> Result<Vec<Vec<u8>>, Error> {
-    let directory = rustix::fs::Dir::read_from(dir).map_err(|e| io("read", e.raw_os_error()))?;
+    let directory = rustix::fs::Dir::read_from(dir)
+        .map_err(|e| io(PlatformOperation::Read, e.raw_os_error()))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut names = Vec::new();
     for entry in directory {
         if std::time::Instant::now() >= deadline {
-            return Err(io("read", 110));
+            return Err(io(PlatformOperation::Read, 110));
         }
-        let entry = entry.map_err(|e| io("read", e.raw_os_error()))?;
+        let entry = entry.map_err(|e| io(PlatformOperation::Read, e.raw_os_error()))?;
         let bytes = entry.file_name().to_bytes();
         if boot_id(bytes).is_none() {
             continue;
@@ -410,7 +432,10 @@ mod tests {
         assert_eq!(meta.size, 0);
         assert_eq!(meta.device, expected.dev());
         assert_eq!(meta.inode, expected.ino());
-        assert_eq!(validate(meta, false, true), Err(io("metadata", 19)));
+        assert_eq!(
+            validate(meta, false, true),
+            Err(io(PlatformOperation::Metadata, 19))
+        );
     }
     #[test]
     fn native_enumeration_uses_descriptor_and_strict_names() {
@@ -430,6 +455,6 @@ mod tests {
         let regular: OwnedFd = File::open(temp.0.join(format!("Boot0001-{GUID}")))
             .unwrap()
             .into();
-        assert_eq!(native_names(&regular), Err(io("read", 20)));
+        assert_eq!(native_names(&regular), Err(io(PlatformOperation::Read, 20)));
     }
 }

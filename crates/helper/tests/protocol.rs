@@ -1,7 +1,7 @@
 use boothop_core::{BootId, Os, Request};
 use boothop_core::{
-    Candidate, Classification, EnumerationDiagnostic, Error, RecordDiagnostic, Report,
-    ResidualAssessment, RollbackAssessment, Stage,
+    Candidate, Classification, EnumerationDiagnostic, Error, PlatformOperation, RecordDiagnostic,
+    Report, ResidualAssessment, RollbackAssessment, Stage,
 };
 use boothop_helper::protocol::*;
 use boothop_helper::protocol::{decode_request, encode_request};
@@ -155,7 +155,7 @@ fn canonical_shape_allows_field_order_whitespace_and_equivalent_escapes() {
             r#"{ "result" : { "Err" : { "PlatformIo" : { "raw_code": 5, "operation": "Read" } } }, "protocol_version": 1 }"#
         )),
         Ok(Err(Error::PlatformIo {
-            operation: "read".into(),
+            operation: PlatformOperation::Read,
             raw_code: 5
         }))
     );
@@ -354,6 +354,43 @@ fn store_durability_unknown_error_wire_roundtrip() {
         );
     }
 }
+
+#[test]
+fn rollback_assessments_stages_and_closed_error_labels_roundtrip_without_secrets() {
+    let assessments = [
+        RollbackAssessment::NotNeeded,
+        RollbackAssessment::Restored,
+        RollbackAssessment::Unsafe,
+        RollbackAssessment::Failed(Box::new(Error::PlatformIo {
+            operation: boothop_core::PlatformOperation::Write,
+            raw_code: 77,
+        })),
+    ];
+    for assessment in assessments {
+        let error = Error::FlowFailure {
+            cause: Box::new(Error::RebootRejected),
+            stages: vec![
+                Stage::RollbackAttempted,
+                Stage::RollbackRestored,
+                Stage::RollbackUnsafe,
+                Stage::RollbackFailed,
+            ],
+            residual_assessment: ResidualAssessment::Observed(Some(BootId(7))),
+            rollback_assessment: assessment,
+            diagnostics: vec![],
+        };
+        let encoded = encode_response(Err(error.clone())).unwrap();
+        let text = std::str::from_utf8(&encoded[4..]).unwrap();
+        for sensitive in ["secret\\identity", "OptionalData", "{8be4df61", "S-1-5-21"] {
+            assert!(!text.contains(sensitive));
+        }
+        assert_eq!(decode_response(&encoded), Ok(Err(error)));
+    }
+    assert!(decode_response(&frame(
+        r#"{"protocol_version":1,"result":{"Err":{"PlatformIo":{"operation":"secret_identity","raw_code":5}}}}"#
+    ))
+    .is_err());
+}
 #[test]
 fn every_domain_error_and_nested_residual_roundtrip() {
     let errors = vec![
@@ -382,7 +419,7 @@ fn every_domain_error_and_nested_residual_roundtrip() {
         Error::ProtectedStoreViolation { raw_code: 10 },
         Error::StoreReplaceFailed { raw_code: 11 },
         Error::PlatformIo {
-            operation: "ipc".into(),
+            operation: PlatformOperation::Ipc,
             raw_code: -1,
         },
         Error::StoreDurabilityUnknown { raw_code: 5 },
@@ -487,7 +524,7 @@ fn oversized_report_becomes_complete_resource_limit_within_total_budget() {
 fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
     let error = Error::FlowFailure {
         cause: Box::new(Error::PlatformIo {
-            operation: "write".into(),
+            operation: PlatformOperation::Write,
             raw_code: 32,
         }),
         stages: vec![
@@ -514,7 +551,7 @@ fn oversized_mutation_failure_keeps_stage_and_residual_evidence() {
     assert_eq!(
         *cause,
         Error::PlatformIo {
-            operation: "write".into(),
+            operation: PlatformOperation::Write,
             raw_code: 32,
         }
     );

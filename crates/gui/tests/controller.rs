@@ -1,6 +1,6 @@
 use boothop_core::{
-    BootId, Candidate, Classification, Error, Os, RecordDiagnostic, Report, Request,
-    ResidualAssessment, RollbackAssessment, Stage,
+    BootId, Candidate, Classification, Error, Os, PlatformOperation, RecordDiagnostic, Report,
+    Request, ResidualAssessment, RollbackAssessment, Stage,
 };
 use boothop_gui::{
     cache::{Cache, CacheError, CachedTarget},
@@ -441,7 +441,7 @@ fn all_determinate_errors_preserve_category_without_cache_writes() {
         Error::ReadbackFailed,
         Error::RebootRejected,
         Error::PlatformIo {
-            operation: "write".into(),
+            operation: PlatformOperation::Write,
             raw_code: 13,
         },
     ] {

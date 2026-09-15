@@ -58,26 +58,34 @@ pub struct LockedStore<F: Filesystem> {
 }
 impl<F: Filesystem> LockedStore<F> {
     pub fn acquire(fs: F) -> Result<Self, Error> {
-        let mut dir = fs.root().map_err(|e| io("open", e))?;
-        validate_directory(fs.metadata(&dir).map_err(|e| io("metadata", e))?, false)?;
+        let mut dir = fs.root().map_err(|e| io(PlatformOperation::Open, e))?;
+        validate_directory(
+            fs.metadata(&dir)
+                .map_err(|e| io(PlatformOperation::Metadata, e))?,
+            false,
+        )?;
         for component in ["var", "lib", "boothop"] {
             dir = fs
                 .open(&dir, component, OpenKind::Directory)
-                .map_err(|e| io("open", e))?;
+                .map_err(|e| io(PlatformOperation::Open, e))?;
             validate_directory(
-                fs.metadata(&dir).map_err(|e| io("metadata", e))?,
+                fs.metadata(&dir)
+                    .map_err(|e| io(PlatformOperation::Metadata, e))?,
                 component == "boothop",
             )?;
         }
         let mut lock = fs
             .open(&dir, LOCK, OpenKind::ExistingFile)
-            .map_err(|e| io("open", e))?;
-        validate_file(fs.metadata(&lock).map_err(|e| io("metadata", e))?)?;
+            .map_err(|e| io(PlatformOperation::Open, e))?;
+        validate_file(
+            fs.metadata(&lock)
+                .map_err(|e| io(PlatformOperation::Metadata, e))?,
+        )?;
         fs.lock(&mut lock).map_err(|e| {
             if e == rustix::io::Errno::WOULDBLOCK.raw_os_error() {
                 Error::Busy
             } else {
-                io("lock", e)
+                io(PlatformOperation::Lock, e)
             }
         })?;
         Ok(Self {
@@ -92,9 +100,12 @@ impl<F: Filesystem> ProtectedStore for LockedStore<F> {
         let mut file = match self.fs.open(&self.dir, RECORD, OpenKind::ExistingFile) {
             Ok(file) => file,
             Err(2) => return Ok(RecordState::Missing),
-            Err(e) => return Err(io("open", e)),
+            Err(e) => return Err(io(PlatformOperation::Open, e)),
         };
-        let meta = self.fs.metadata(&file).map_err(|e| io("metadata", e))?;
+        let meta = self
+            .fs
+            .metadata(&file)
+            .map_err(|e| io(PlatformOperation::Metadata, e))?;
         validate_file(meta)?;
         if meta.size > MAX_RECORD_BYTES as u64 {
             return Err(Error::ResourceLimit);
@@ -106,7 +117,7 @@ impl<F: Filesystem> ProtectedStore for LockedStore<F> {
             let count = self
                 .fs
                 .read(&mut file, &mut buffer[..limit])
-                .map_err(|e| io("read", e))?;
+                .map_err(|e| io(PlatformOperation::Read, e))?;
             if count == 0 {
                 break;
             }
@@ -117,9 +128,13 @@ impl<F: Filesystem> ProtectedStore for LockedStore<F> {
             bytes.extend_from_slice(&buffer[..count]);
         }
         if bytes.len() as u64 != meta.size
-            || self.fs.metadata(&file).map_err(|e| io("metadata", e))? != meta
+            || self
+                .fs
+                .metadata(&file)
+                .map_err(|e| io(PlatformOperation::Metadata, e))?
+                != meta
         {
-            return Err(io("read", 5));
+            return Err(io(PlatformOperation::Read, 5));
         }
         decode_record(&bytes).map(RecordState::Ready)
     }
@@ -134,24 +149,30 @@ impl<F: Filesystem> ProtectedStore for LockedStore<F> {
         let mut file = self
             .fs
             .open(&self.dir, &name, OpenKind::ExclusiveTemp)
-            .map_err(|e| io("open", e))?;
+            .map_err(|e| io(PlatformOperation::Open, e))?;
         let result = (|| {
-            validate_file(self.fs.metadata(&file).map_err(|e| io("metadata", e))?)?;
+            validate_file(
+                self.fs
+                    .metadata(&file)
+                    .map_err(|e| io(PlatformOperation::Metadata, e))?,
+            )?;
             let mut written = 0;
             while written < bytes.len() {
                 let count = self
                     .fs
                     .write(&mut file, &bytes[written..])
-                    .map_err(|e| io("write", e))?;
+                    .map_err(|e| io(PlatformOperation::Write, e))?;
                 if count == 0 || count > bytes.len() - written {
-                    return Err(io("write", 5));
+                    return Err(io(PlatformOperation::Write, 5));
                 }
                 written += count;
             }
-            self.fs.sync(&file).map_err(|e| io("fsync", e))?;
+            self.fs
+                .sync(&file)
+                .map_err(|e| io(PlatformOperation::Flush, e))?;
             self.fs
                 .rename(&self.dir, &name, RECORD)
-                .map_err(|e| io("rename", e))
+                .map_err(|e| io(PlatformOperation::Replace, e))
         })();
         if let Err(error) = result {
             self.cleanup_temp(&file, &name);
@@ -188,9 +209,9 @@ impl<F: Filesystem> LockedStore<F> {
     }
 }
 
-fn io(operation: &'static str, raw_code: i32) -> Error {
+fn io(operation: PlatformOperation, raw_code: i32) -> Error {
     Error::PlatformIo {
-        operation: PlatformOperation::from_label(operation).expect("closed Linux operation label"),
+        operation,
         raw_code,
     }
 }
@@ -203,7 +224,7 @@ fn validate_directory(meta: Metadata, protected: bool) -> Result<(), Error> {
         || (protected && meta.mode & 0o7777 != 0o700)
     {
         // A successful stat with untrusted metadata is a policy denial (EPERM).
-        return Err(io("metadata", 1));
+        return Err(io(PlatformOperation::Metadata, 1));
     }
     Ok(())
 }
@@ -211,7 +232,7 @@ fn validate_directory(meta: Metadata, protected: bool) -> Result<(), Error> {
 fn validate_file(meta: Metadata) -> Result<(), Error> {
     if meta.uid != 0 || meta.gid != 0 || meta.mode != 0o100600 || meta.links != 1 {
         // No syscall failed here; use EPERM for the explicit protection-policy denial.
-        return Err(io("metadata", 1));
+        return Err(io(PlatformOperation::Metadata, 1));
     }
     Ok(())
 }

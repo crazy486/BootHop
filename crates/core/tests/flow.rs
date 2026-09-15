@@ -1,7 +1,7 @@
 mod support;
 
 use boothop_core::{
-    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, Os,
+    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, Os, Platform,
     PlatformOperation, RebootOutcome, RecordDiagnostic, RecordState, Request, ResidualAssessment,
     RollbackAssessment, RollbackOutcome, Stage, canonicalize, decode_record, encode_record,
     execute,
@@ -58,6 +58,89 @@ fn rejected_reboot_rolls_back_only_a_write_made_by_core() {
             .iter()
             .any(|event| matches!(event, Event::RollbackNext { .. }))
     );
+}
+
+#[test]
+fn rejected_reboot_retains_primary_cause_when_rollback_fails() {
+    let mut p = FakePlatform::ready();
+    p.reboot_outcome = RebootOutcome::Rejected;
+    let rollback_error = Error::PlatformIo {
+        operation: PlatformOperation::Write,
+        raw_code: 71,
+    };
+    p.rollback_outcome = RollbackOutcome::Failed(rollback_error.clone());
+    p.next_reads = [Ok(None), Ok(None), Ok(Some(BootId(7))), Ok(Some(BootId(7)))].into();
+
+    let Error::FlowFailure {
+        cause,
+        stages,
+        rollback_assessment,
+        ..
+    } = execute(Request::Switch { os: Os::Windows }, Os::Linux, &mut p).unwrap_err()
+    else {
+        panic!("expected flow failure")
+    };
+    assert_eq!(*cause, Error::RebootRejected);
+    assert_eq!(
+        rollback_assessment,
+        RollbackAssessment::Failed(Box::new(rollback_error))
+    );
+    assert_eq!(
+        stages,
+        [
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::RebootRejected,
+            Stage::RollbackAttempted,
+            Stage::RollbackFailed,
+            Stage::ResidualPossible,
+        ]
+    );
+}
+
+#[test]
+fn same_target_preexistence_is_not_rolled_back() {
+    let mut p = FakePlatform::ready();
+    p.next = Some(BootId(7));
+    p.reboot_outcome = RebootOutcome::Rejected;
+    p.next_reads = [Ok(Some(BootId(7))), Ok(Some(BootId(7)))].into();
+
+    let Error::FlowFailure {
+        cause,
+        stages,
+        rollback_assessment,
+        ..
+    } = execute(Request::Switch { os: Os::Windows }, Os::Linux, &mut p).unwrap_err()
+    else {
+        panic!("expected flow failure")
+    };
+    assert_eq!(*cause, Error::RebootRejected);
+    assert_eq!(rollback_assessment, RollbackAssessment::NotNeeded);
+    assert_eq!(
+        stages,
+        [
+            Stage::TargetValidated,
+            Stage::BootNextVerified,
+            Stage::RebootRejected
+        ]
+    );
+    assert!(
+        !p.events
+            .iter()
+            .any(|event| matches!(event, Event::RollbackNext { .. }))
+    );
+}
+
+#[test]
+fn rollback_restores_an_exact_non_none_original_in_exclusive_fake() {
+    let mut p = FakePlatform::ready();
+    p.next = Some(BootId(8));
+    p.rollback_outcome = RollbackOutcome::Restored;
+    assert_eq!(
+        p.rollback_next(Some(BootId(8)), BootId(7)),
+        RollbackOutcome::Restored
+    );
+    assert_eq!(p.next, Some(BootId(8)));
 }
 
 // Removing the initial trusted record read must fail these three-operation checks.

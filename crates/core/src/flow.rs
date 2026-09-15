@@ -4,7 +4,7 @@ use crate::{
     TargetRecord, canonicalize, expected_target, validate_target,
 };
 
-/// Adapter boundary. All methods except save/write/reboot must be read-only.
+/// Adapter boundary. Load/read/check methods are read-only; save/write/rollback/reboot may mutate.
 pub trait Platform {
     /// Missing is valid only after trusted store/path validation. Reject unsupported/corrupt records.
     fn load_record(&mut self) -> Result<RecordState, Error>;

@@ -7,14 +7,14 @@ use std::{
     time::Instant,
 };
 
-fn failure(operation: &'static str, error: io::Error) -> Error {
+fn failure(operation: PlatformOperation, error: io::Error) -> Error {
     let raw_code = error.raw_os_error().unwrap_or_else(|| match error.kind() {
         io::ErrorKind::TimedOut => libc::ETIMEDOUT,
         io::ErrorKind::WriteZero => libc::EPIPE,
         _ => libc::EIO,
     });
     Error::PlatformIo {
-        operation: PlatformOperation::from_label(operation).expect("closed IPC operation label"),
+        operation,
         raw_code,
     }
 }
@@ -30,10 +30,10 @@ impl<'a> PipeSession<'a> {
         output: BorrowedFd<'a>,
         deadline: Instant,
     ) -> Result<Self, Error> {
-        validate_pipe(input.as_raw_fd()).map_err(|e| failure("ipc", e))?;
-        validate_pipe(output.as_raw_fd()).map_err(|e| failure("ipc", e))?;
-        nonblocking(input.as_raw_fd()).map_err(|e| failure("ipc", e))?;
-        nonblocking(output.as_raw_fd()).map_err(|e| failure("ipc", e))?;
+        validate_pipe(input.as_raw_fd()).map_err(|e| failure(PlatformOperation::Ipc, e))?;
+        validate_pipe(output.as_raw_fd()).map_err(|e| failure(PlatformOperation::Ipc, e))?;
+        nonblocking(input.as_raw_fd()).map_err(|e| failure(PlatformOperation::Ipc, e))?;
+        nonblocking(output.as_raw_fd()).map_err(|e| failure(PlatformOperation::Ipc, e))?;
         Ok(Self {
             input,
             output,
@@ -53,7 +53,7 @@ impl SessionIo for PipeSession<'_> {
                 }],
                 self.deadline,
             )
-            .map_err(|e| failure("ipc", e))?;
+            .map_err(|e| failure(PlatformOperation::Ipc, e))?;
             let mut buf = [0; 4096];
             match read(self.input.as_raw_fd(), &mut buf) {
                 Ok(0) => return Ok(out),
@@ -74,12 +74,13 @@ impl SessionIo for PipeSession<'_> {
                         e.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) => {}
-                Err(e) => return Err(failure("ipc", e)),
+                Err(e) => return Err(failure(PlatformOperation::Ipc, e)),
             }
         }
     }
     fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        write_all(self.output.as_raw_fd(), bytes, self.deadline).map_err(|e| failure("ipc", e))
+        write_all(self.output.as_raw_fd(), bytes, self.deadline)
+            .map_err(|e| failure(PlatformOperation::Ipc, e))
     }
 }
 fn validate_pipe(fd: RawFd) -> io::Result<()> {
@@ -172,7 +173,10 @@ mod tests {
 
     #[test]
     fn failure_preserves_explicit_ebadf() {
-        let error = failure("ipc", io::Error::from_raw_os_error(libc::EBADF));
+        let error = failure(
+            PlatformOperation::Ipc,
+            io::Error::from_raw_os_error(libc::EBADF),
+        );
         assert!(matches!(
             error,
             Error::PlatformIo { raw_code, .. } if raw_code == libc::EBADF

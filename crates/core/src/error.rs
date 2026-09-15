@@ -17,24 +17,6 @@ pub enum PlatformOperation {
 }
 
 impl PlatformOperation {
-    pub fn from_label(label: &str) -> Option<Self> {
-        Some(match label {
-            "open" => Self::Open,
-            "read" => Self::Read,
-            "write" => Self::Write,
-            "metadata" => Self::Metadata,
-            "lock" => Self::Lock,
-            "fsync" | "flush" => Self::Flush,
-            "rename" | "replace" => Self::Replace,
-            "ipc" => Self::Ipc,
-            "reboot" => Self::Reboot,
-            "random" => Self::Random,
-            "process" => Self::Process,
-            "security" => Self::Security,
-            _ => return None,
-        })
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -50,17 +32,6 @@ impl PlatformOperation {
             Self::Process => "process",
             Self::Security => "security",
         }
-    }
-}
-
-impl From<&str> for PlatformOperation {
-    fn from(value: &str) -> Self {
-        Self::from_label(value).expect("unknown platform operation label")
-    }
-}
-impl PartialEq<&str> for PlatformOperation {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
     }
 }
 

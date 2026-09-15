@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 mod support;
-use boothop_core::{Error, RecordState};
+use boothop_core::{Error, PlatformOperation, RecordState};
 use boothop_platform::{ProtectedStore, linux::store::LockedStore};
 use support::*;
 
@@ -75,7 +75,9 @@ fn configure_does_not_repair_install_layout() {
         let fs = FakeFs::installed();
         fs.0.borrow_mut().nodes.remove(path);
         let result = LockedStore::acquire(fs.clone()).and_then(|mut s| s.save(&target()));
-        assert!(matches!(result,Err(Error::PlatformIo{operation,raw_code:2}) if operation=="open"));
+        assert!(
+            matches!(result,Err(Error::PlatformIo{operation,raw_code:2}) if operation == PlatformOperation::Open)
+        );
         assert!(!fs.0.borrow().nodes.contains_key(path));
         assert_eq!(fs.record(), None);
     }
@@ -89,14 +91,14 @@ fn permission_error_not_missing() {
     assert_eq!(
         store.load(),
         Err(Error::PlatformIo {
-            operation: "open".into(),
+            operation: PlatformOperation::Open,
             raw_code: 13
         })
     );
     assert_eq!(
         store.save(&target()),
         Err(Error::PlatformIo {
-            operation: "open".into(),
+            operation: PlatformOperation::Open,
             raw_code: 13
         })
     );
@@ -122,10 +124,10 @@ fn corrupt_and_oversize_records_are_not_overwritten() {
 #[test]
 fn pre_rename_failures_preserve_old_record() {
     for (stage, operation, code) in [
-        ("create", "open", 28),
-        ("read", "read", 5),
-        ("write", "write", 28),
-        ("rename", "rename", 5),
+        ("create", PlatformOperation::Open, 28),
+        ("read", PlatformOperation::Read, 5),
+        ("write", PlatformOperation::Write, 28),
+        ("rename", PlatformOperation::Replace, 5),
     ] {
         let fs = FakeFs::installed();
         fs.set_record(boothop_core::encode_record(&target()).unwrap());
@@ -135,7 +137,7 @@ fn pre_rename_failures_preserve_old_record() {
         assert_eq!(
             store.save(&target()),
             Err(Error::PlatformIo {
-                operation: operation.into(),
+                operation,
                 raw_code: code
             })
         );
@@ -156,7 +158,7 @@ fn temp_fsync_platform_io_preserves_old() {
     assert_eq!(
         store.save(&target()),
         Err(Error::PlatformIo {
-            operation: "fsync".into(),
+            operation: PlatformOperation::Flush,
             raw_code: 5
         })
     );
@@ -252,16 +254,16 @@ fn busy_lock_has_no_record_mutation() {
 
 #[test]
 fn lock_errors_preserve_errno_and_release_open_handles() {
-    for (stage, op, code) in [
-        ("root", "open", 13),
-        ("metadata", "metadata", 5),
-        ("lock", "lock", 4),
-        ("lock", "lock", 13),
+    for (stage, operation, code) in [
+        ("root", PlatformOperation::Open, 13),
+        ("metadata", PlatformOperation::Metadata, 5),
+        ("lock", PlatformOperation::Lock, 4),
+        ("lock", PlatformOperation::Lock, 13),
     ] {
         let fs = FakeFs::installed();
         fs.0.borrow_mut().fail = Some((stage, code));
         assert!(
-            matches!(LockedStore::acquire(fs.clone()),Err(Error::PlatformIo{operation,raw_code}) if operation==op&&raw_code==code)
+            matches!(LockedStore::acquire(fs.clone()),Err(Error::PlatformIo{operation: actual,raw_code}) if actual == operation&&raw_code==code)
         );
         assert_eq!(fs.record(), None);
         assert!(!fs.held());
@@ -284,7 +286,7 @@ fn changed_record_size_is_not_a_complete_read() {
         assert_eq!(
             store.load(),
             Err(Error::PlatformIo {
-                operation: "read".into(),
+                operation: PlatformOperation::Read,
                 raw_code: 5
             })
         );
@@ -343,7 +345,7 @@ fn zero_write_and_partial_write_error_preserve_old_bytes() {
         assert_eq!(
             store.save(&target()),
             Err(Error::PlatformIo {
-                operation: "write".into(),
+                operation: PlatformOperation::Write,
                 raw_code: if zero { 5 } else { 28 }
             })
         );
@@ -363,7 +365,7 @@ fn cleanup_never_deletes_replaced_temporary_name() {
     assert_eq!(
         store.save(&target()),
         Err(Error::PlatformIo {
-            operation: "write".into(),
+            operation: PlatformOperation::Write,
             raw_code: 28
         })
     );
@@ -382,7 +384,7 @@ fn growing_record_is_bounded_and_never_returned_as_complete() {
         (
             vec![b' '],
             Error::PlatformIo {
-                operation: "read".into(),
+                operation: PlatformOperation::Read,
                 raw_code: 5,
             },
         ),
@@ -406,7 +408,7 @@ fn exclusive_temp_collision_is_preserved_without_retry_or_rename() {
     assert_eq!(
         store.save(&target()),
         Err(Error::PlatformIo {
-            operation: "open".into(),
+            operation: PlatformOperation::Open,
             raw_code: 17
         })
     );
@@ -444,7 +446,7 @@ fn insecure_temporary_object_is_not_published_or_repaired() {
         assert_eq!(
             store.save(&target()),
             Err(Error::PlatformIo {
-                operation: "metadata".into(),
+                operation: PlatformOperation::Metadata,
                 raw_code: 1
             })
         );
@@ -476,7 +478,11 @@ fn metadata_or_cleanup_failure_preserves_primary_error_and_old_record() {
         assert_eq!(
             store.save(&target()),
             Err(Error::PlatformIo {
-                operation: if metadata { "metadata" } else { "write" }.into(),
+                operation: if metadata {
+                    PlatformOperation::Metadata
+                } else {
+                    PlatformOperation::Write
+                },
                 raw_code: if metadata { 5 } else { 28 }
             })
         );
@@ -585,7 +591,7 @@ fn same_length_in_place_change_during_short_read_is_rejected() {
         assert_eq!(
             result,
             Err(Error::PlatformIo {
-                operation: "read".into(),
+                operation: PlatformOperation::Read,
                 raw_code: 5
             }),
             "timestamp component {stamp}"

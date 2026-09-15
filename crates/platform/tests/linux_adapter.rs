@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-use boothop_core::{BootId, Error, Platform, RecordState, TargetRecord};
+use boothop_core::{BootId, Error, Platform, PlatformOperation, RecordState, TargetRecord};
 use boothop_platform::{
     ProtectedStore,
     linux::{
@@ -185,7 +185,7 @@ impl LinuxCalls for FakeLinuxCalls {
         let mut s = self.0.borrow_mut();
         s.events.push("names".into());
         if let Some(("names", code)) = s.fail {
-            return Err(io("read", code));
+            return Err(io(PlatformOperation::Read, code));
         }
         Ok(s.files.keys().map(|k| k.as_bytes().to_vec()).collect())
     }
@@ -296,10 +296,10 @@ fn environment_checks_versions_exact_method_and_permission_before_firmware() {
         );
     }
     let calls = inventory_calls();
-    calls.0.borrow_mut().probe = Err(io("reboot", 2));
+    calls.0.borrow_mut().probe = Err(io(PlatformOperation::Reboot, 2));
     assert_eq!(
         LinuxPlatform::new(&mut Store, calls.clone()).check_environment(),
-        Err(io("reboot", 2))
+        Err(io(PlatformOperation::Reboot, 2))
     );
 }
 
@@ -385,7 +385,10 @@ fn boot_next_single_exclusive_six_byte_write_at_zero() {
             .events
             .contains(&format!("open:{}:CreateNext", name("BootNext")))
     );
-    assert_eq!(platform.write_next(BootId(8)), Err(io("open", 17)));
+    assert_eq!(
+        platform.write_next(BootId(8)),
+        Err(io(PlatformOperation::Open, 17))
+    );
     assert_eq!(calls.0.borrow().writes.len(), 1);
     assert_eq!(
         calls.0.borrow().files[&name("BootNext")],
@@ -421,7 +424,7 @@ fn short_or_failed_write_never_replayed_or_cleaned() {
         calls.0.borrow_mut().write_result = result;
         assert_eq!(
             LinuxPlatform::new(&mut Store, calls.clone()).write_next(BootId(3)),
-            Err(io("write", result.err().unwrap_or(5)))
+            Err(io(PlatformOperation::Write, result.err().unwrap_or(5)))
         );
         assert_eq!(calls.0.borrow().writes, [(0, vec![7, 0, 0, 0, 3, 0])]);
         assert!(calls.0.borrow().files.contains_key(&name("BootNext")));
@@ -432,9 +435,9 @@ fn short_or_failed_write_never_replayed_or_cleaned() {
 fn read_next(calls: &FakeLinuxCalls) -> Result<Option<BootId>, Error> {
     LinuxPlatform::new(&mut Store, calls.clone()).read_next()
 }
-fn io(op: &str, code: i32) -> Error {
+fn io(operation: PlatformOperation, code: i32) -> Error {
     Error::PlatformIo {
-        operation: op.into(),
+        operation,
         raw_code: code,
     }
 }
@@ -481,10 +484,25 @@ fn enoent_is_contextual_and_errno_preserved() {
 #[test]
 fn wrong_filesystem_type_readonly_and_changed_read_are_rejected() {
     for (mode, filesystem, readonly, expected) in [
-        (0o040755, 1, false, io("metadata", 19)),
-        (0o120777, 0xde5e81e4, false, io("metadata", 1)),
-        (0o100644, 0xde5e81e4, false, io("metadata", 1)),
-        (0o040755, 0xde5e81e4, true, io("metadata", 30)),
+        (0o040755, 1, false, io(PlatformOperation::Metadata, 19)),
+        (
+            0o120777,
+            0xde5e81e4,
+            false,
+            io(PlatformOperation::Metadata, 1),
+        ),
+        (
+            0o100644,
+            0xde5e81e4,
+            false,
+            io(PlatformOperation::Metadata, 1),
+        ),
+        (
+            0o040755,
+            0xde5e81e4,
+            true,
+            io(PlatformOperation::Metadata, 30),
+        ),
     ] {
         let calls = FakeLinuxCalls::new();
         calls.set("BootNext", &[7, 0, 0, 0, 1, 0]);
@@ -504,7 +522,7 @@ fn wrong_filesystem_type_readonly_and_changed_read_are_rejected() {
     let calls = FakeLinuxCalls::new();
     calls.set("BootNext", &[7, 0, 0, 0, 1, 0]);
     calls.0.borrow_mut().changed = true;
-    assert_eq!(read_next(&calls), Err(io("read", 5)));
+    assert_eq!(read_next(&calls), Err(io(PlatformOperation::Read, 5)));
 }
 
 // Catches decoding a single short read instead of assembling and checking EOF.
@@ -723,14 +741,14 @@ fn missing_control_references_and_disappearing_entries_fail_whole_inventory() {
     for stem in ["BootOrder", "BootCurrent"] {
         let calls = inventory_calls();
         calls.0.borrow_mut().files.remove(&name(stem));
-        assert_eq!(options(&calls), Err(io("open", 2)));
+        assert_eq!(options(&calls), Err(io(PlatformOperation::Open, 2)));
     }
     let calls = inventory_calls();
     calls.set("BootOrder", &[7, 0, 0, 0, 8, 0]);
     assert_eq!(options(&calls), Err(Error::TargetMissing));
     let calls = inventory_calls();
     calls.0.borrow_mut().fail = Some(("Boot0007-8be4df61-93ca-11d2-aa0d-00e098032b8c", 2));
-    assert_eq!(options(&calls), Err(io("open", 2)));
+    assert_eq!(options(&calls), Err(io(PlatformOperation::Open, 2)));
 }
 
 // Catches counting payload only, or returning a truncated partial list at the aggregate cap.
@@ -754,23 +772,53 @@ fn replaced_leaf_and_changed_enumeration_fail_without_leaking_handles() {
     let calls = FakeLinuxCalls::new();
     calls.set("BootNext", &[7, 0, 0, 0, 7, 0]);
     calls.0.borrow_mut().replace_on_reopen = true;
-    assert_eq!(read_next(&calls), Err(io("read", 5)));
+    assert_eq!(read_next(&calls), Err(io(PlatformOperation::Read, 5)));
     assert_eq!(calls.0.borrow().live_handles, 0);
     let calls = inventory_calls();
     calls.0.borrow_mut().changed_names = true;
-    assert_eq!(options(&calls), Err(io("read", 5)));
+    assert_eq!(options(&calls), Err(io(PlatformOperation::Read, 5)));
     assert_eq!(calls.0.borrow().live_handles, 0);
 }
 
 #[test]
 fn file_descriptor_metadata_and_enumeration_errors_remain_failures() {
     for (mode, filesystem, readonly, size, expected) in [
-        (0o120777, 0xde5e81e4, false, 6, io("metadata", 1)),
-        (0o040755, 0xde5e81e4, false, 6, io("metadata", 1)),
-        (0o010600, 0xde5e81e4, false, 6, io("metadata", 1)),
-        (0o100644, 1, false, 6, io("metadata", 19)),
-        (0o100644, 0xde5e81e4, true, 6, io("metadata", 30)),
-        (0o100644, 0xde5e81e4, false, 5, io("read", 5)),
+        (
+            0o120777,
+            0xde5e81e4,
+            false,
+            6,
+            io(PlatformOperation::Metadata, 1),
+        ),
+        (
+            0o040755,
+            0xde5e81e4,
+            false,
+            6,
+            io(PlatformOperation::Metadata, 1),
+        ),
+        (
+            0o010600,
+            0xde5e81e4,
+            false,
+            6,
+            io(PlatformOperation::Metadata, 1),
+        ),
+        (0o100644, 1, false, 6, io(PlatformOperation::Metadata, 19)),
+        (
+            0o100644,
+            0xde5e81e4,
+            true,
+            6,
+            io(PlatformOperation::Metadata, 30),
+        ),
+        (
+            0o100644,
+            0xde5e81e4,
+            false,
+            5,
+            io(PlatformOperation::Read, 5),
+        ),
         (0o100644, 0xde5e81e4, false, 1_048_581, Error::ResourceLimit),
     ] {
         let calls = FakeLinuxCalls::new();
@@ -791,7 +839,7 @@ fn file_descriptor_metadata_and_enumeration_errors_remain_failures() {
     for code in [2, 13, 1, 30, 40, 20, 21, 5, 19, 22, 28, 122, 12, 4, 110] {
         let calls = inventory_calls();
         calls.0.borrow_mut().fail = Some(("names", code));
-        assert_eq!(options(&calls), Err(io("read", code)));
+        assert_eq!(options(&calls), Err(io(PlatformOperation::Read, code)));
         assert_eq!(calls.0.borrow().live_handles, 0);
     }
 }
@@ -966,7 +1014,10 @@ fn switch_write_failures_race_conflict_and_readback_never_reboot() {
         let Error::FlowFailure { cause, stages, .. } = error else {
             panic!("flow failure")
         };
-        assert_eq!(*cause, io("write", result.err().unwrap_or(5)));
+        assert_eq!(
+            *cause,
+            io(PlatformOperation::Write, result.err().unwrap_or(5))
+        );
         assert_eq!(
             stages,
             [
@@ -986,7 +1037,7 @@ fn switch_write_failures_race_conflict_and_readback_never_reboot() {
     let Error::FlowFailure { cause, .. } = error else {
         panic!("flow failure")
     };
-    assert_eq!(*cause, io("open", 17));
+    assert_eq!(*cause, io(PlatformOperation::Open, 17));
     assert_eq!(
         calls.0.borrow().files[&name("BootNext")],
         [7, 0, 0, 0, 9, 0]
@@ -1042,7 +1093,7 @@ fn switch_explicitly_reads_boot_next_and_fails_closed_on_malformed_or_inaccessib
     let Error::FlowFailure { cause, stages, .. } = switch(&calls).unwrap_err() else {
         panic!("flow failure")
     };
-    assert_eq!(*cause, io("open", 13));
+    assert_eq!(*cause, io(PlatformOperation::Open, 13));
     assert_eq!(stages, [boothop_core::Stage::TargetValidated]);
     let events = calls.0.borrow().events.clone();
     let names = events.iter().position(|event| event == "names").unwrap();

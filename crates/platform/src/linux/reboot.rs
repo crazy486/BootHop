@@ -19,7 +19,7 @@ use boothop_core::Error;
 
 pub(crate) fn validate_probe(probe: &Probe) -> Result<(), Error> {
     if probe.effective_uid != 0 {
-        return Err(super::firmware::io("reboot", 1));
+        return Err(super::firmware::io(PlatformOperation::Reboot, 1));
     }
     fn version(text: &str) -> Option<u32> {
         text.split(|c: char| !c.is_ascii_digit())
@@ -146,7 +146,7 @@ pub(crate) fn native_probe(
 ) -> Result<Probe, Error> {
     let uid = rustix::process::geteuid().as_raw();
     if uid != 0 {
-        return Err(super::firmware::io("reboot", 1));
+        return Err(super::firmware::io(PlatformOperation::Reboot, 1));
     }
     // Fixed system bus socket; ignore environment-selected bus addresses.
     let conn =
@@ -247,10 +247,10 @@ mod tests {
         assert_eq!(
             probe_via(0, |_| {
                 count += 1;
-                Err(super::super::firmware::io("reboot", 13))
+                Err(super::super::firmware::io(PlatformOperation::Reboot, 13))
             })
             .unwrap_err(),
-            super::super::firmware::io("reboot", 13)
+            super::super::firmware::io(PlatformOperation::Reboot, 13)
         );
         assert_eq!(count, 1);
     }
