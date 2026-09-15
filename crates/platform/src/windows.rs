@@ -100,11 +100,21 @@ pub struct ProductionPlatform {
     >,
 }
 
-/// Construct the native platform for the trusted helper entry point.  This
-/// deliberately exposes no injected generic seams and performs no operation
-/// until the returned platform is driven by shared core.
+/// Construct the native platform after the trusted helper has acquired its
+/// operation guard. This opens and validates the protected ProgramData store;
+/// it does not access firmware, enable privileges, request shutdown, or
+/// reboot.
+///
+/// # Safety
+///
+/// The caller must already hold `Global\\BootHop.Operation.v1` exclusively and
+/// retain that guard for the entire lifetime of the returned platform. The
+/// helper must not release the guard until the terminal response has been
+/// transmitted. This boundary is unsafe because the capability proving that
+/// invariant is owned by the separate helper crate.
 #[cfg(windows)]
-pub fn production() -> Result<ProductionPlatform, boothop_core::Error> {
+pub unsafe fn production_after_operation_guard() -> Result<ProductionPlatform, boothop_core::Error>
+{
     let store = store::WindowsProtectedStore::open(
         store::native::SystemWindowsStoreCalls::new(),
         store::OperationCapability::new(),

@@ -425,10 +425,24 @@ fn windows_default_rollback_is_always_unsafe_and_non_mutating() {
 
 #[cfg(windows)]
 #[test]
-fn production_factory_is_public_without_exposing_injected_boundaries() {
-    // Compile-only accessibility proof for a separate dependent crate.  Do
-    // not invoke it: construction would touch native protected-store APIs.
-    let _factory = boothop_platform::windows::production;
+fn production_factory_requires_explicit_unsafe_and_hides_concrete_boundaries() {
+    // Compile-only external-crate contract. Construction is unsafe because
+    // the helper must hold the global operation guard for the platform's full
+    // lifetime. Do not invoke it: construction touches protected-store APIs.
+    unsafe fn external_style_call() {
+        let _ = unsafe { boothop_platform::windows::production_after_operation_guard() };
+    }
+    let _factory = external_style_call as unsafe fn();
+    let source = include_str!("../src/windows.rs");
+    assert!(!source.contains("pub fn production("));
+    assert!(source.contains("pub unsafe fn production_after_operation_guard"));
+    let store_source = include_str!("../src/windows/store.rs");
+    assert!(store_source.contains("pub(crate) struct WindowsProtectedStore"));
+    assert!(!store_source.contains("pub struct WindowsProtectedStore"));
+    assert!(!store_source.contains("pub fn new(calls:"));
+    let firmware_source = include_str!("../src/windows/firmware.rs");
+    assert!(firmware_source.contains("pub(crate) struct SystemWindowsCalls"));
+    assert!(!firmware_source.contains("pub struct SystemWindowsCalls"));
 }
 
 #[test]
