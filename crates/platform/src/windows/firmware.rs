@@ -332,7 +332,7 @@ pub(crate) fn set_boot_next<C: WindowsCalls>(calls: &mut C, target: BootId) -> R
 
 #[cfg(windows)]
 #[allow(dead_code)]
-mod native {
+pub(crate) mod native {
     use super::*;
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
@@ -357,7 +357,7 @@ mod native {
 
     impl SystemWindowsCalls {
         #[allow(dead_code)]
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 token: NativeTokenCalls::new(),
             }

@@ -17,13 +17,20 @@ use std::rc::Rc;
 struct Store {
     state: RecordState,
     saves: usize,
+    events: Option<Rc<RefCell<Vec<&'static str>>>>,
 }
 
 impl ProtectedStore for Store {
     fn load(&mut self) -> Result<RecordState, Error> {
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("load-record");
+        }
         Ok(self.state.clone())
     }
     fn save(&mut self, target: &TargetRecord) -> Result<(), Error> {
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("save-record");
+        }
         self.saves += 1;
         self.state = RecordState::Ready(target.clone());
         Ok(())
@@ -161,11 +168,46 @@ fn option_payload() -> Vec<u8> {
 }
 
 #[test]
+fn inspect_composes_store_environment_and_option_reads_in_order() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut store = Store {
+        state: RecordState::Ready(target()),
+        saves: 0,
+        events: Some(events.clone()),
+    };
+    let firmware = Firmware {
+        events: events.clone(),
+        firmware_type: FirmwareType::Uefi,
+        next: Some(BootId(7)),
+        readback: None,
+        next_reads: 0,
+        writes: 0,
+    };
+    let reboot = Reboot {
+        events: events.clone(),
+        reply: RebootReply::Accepted,
+    };
+    let mut platform = WindowsPlatform::new(&mut store, firmware, reboot);
+    execute(Request::Inspect, Os::Linux, &mut platform).unwrap();
+    assert_eq!(
+        &*events.borrow(),
+        &[
+            "load-record",
+            "environment",
+            "read-order",
+            "read-current",
+            "read-option"
+        ]
+    );
+}
+
+#[test]
 fn configure_saves_only_and_never_writes_or_reboots() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut store = Store {
         state: RecordState::Missing,
         saves: 0,
+        events: None,
     };
     let firmware = Firmware {
         events: events.clone(),
@@ -202,6 +244,7 @@ fn switch_reads_back_before_reboot_and_maps_acceptance() {
     let mut store = Store {
         state: RecordState::Ready(target()),
         saves: 0,
+        events: None,
     };
     let firmware = Firmware {
         events: events.clone(),
@@ -239,6 +282,7 @@ fn switch_conflict_stops_before_write_or_reboot() {
     let mut store = Store {
         state: RecordState::Ready(target()),
         saves: 0,
+        events: None,
     };
     let firmware = Firmware {
         events: events.clone(),
@@ -271,6 +315,7 @@ fn switch_readback_mismatch_stops_before_reboot() {
     let mut store = Store {
         state: RecordState::Ready(target()),
         saves: 0,
+        events: None,
     };
     let firmware = Firmware {
         events: events.clone(),
@@ -309,6 +354,7 @@ fn rejected_and_unknown_reboot_replies_map_without_reordering() {
         let mut store = Store {
             state: RecordState::Ready(target()),
             saves: 0,
+            events: None,
         };
         let firmware = Firmware {
             events: events.clone(),
@@ -355,6 +401,7 @@ fn windows_default_rollback_is_always_unsafe_and_non_mutating() {
     let mut store = Store {
         state: RecordState::Ready(target()),
         saves: 0,
+        events: None,
     };
     let firmware = Firmware {
         events: events.clone(),
@@ -372,6 +419,50 @@ fn windows_default_rollback_is_always_unsafe_and_non_mutating() {
     assert_eq!(
         platform.rollback_next(Some(BootId(4)), BootId(7)),
         boothop_core::RollbackOutcome::Unsafe
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn production_factory_is_public_without_exposing_injected_boundaries() {
+    // Compile-only accessibility proof for a separate dependent crate.  Do
+    // not invoke it: construction would touch native protected-store APIs.
+    let _factory = boothop_platform::windows::production;
+}
+
+#[test]
+fn accepted_shutdown_call_with_restore_failure_is_unknown() {
+    assert_eq!(
+        boothop_platform::windows::classify_reboot_result(
+            true,
+            Err(Error::PrivilegeRestoreFailed { raw_code: 5 }),
+        ),
+        RebootReply::Unknown
+    );
+}
+
+#[test]
+fn only_definite_zero_native_return_is_rejected() {
+    assert_eq!(
+        boothop_platform::windows::classify_reboot_result(
+            false,
+            Err(Error::PlatformIo {
+                operation: boothop_core::PlatformOperation::Reboot,
+                raw_code: 5,
+            }),
+        ),
+        RebootReply::Rejected { raw_code: 5 }
+    );
+    assert_eq!(
+        boothop_platform::windows::classify_reboot_result(
+            false,
+            Err(Error::PrivilegeEnableFailed { raw_code: 1300 }),
+        ),
+        RebootReply::Rejected { raw_code: 1300 }
+    );
+    assert_eq!(
+        boothop_platform::windows::classify_reboot_result(true, Ok(())),
+        RebootReply::Accepted
     );
 }
 

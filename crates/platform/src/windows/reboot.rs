@@ -17,6 +17,34 @@ pub enum RebootReply {
     Unknown,
 }
 
+/// Classify the result of the native call plus privilege-scope teardown.  A
+/// successful shutdown dispatch followed by failed restoration is Unknown:
+/// the shutdown may already be in progress, so rejection observation and
+/// rollback are unsafe.
+pub fn classify_reboot_result(
+    call_accepted: bool,
+    result: Result<(), boothop_core::Error>,
+) -> RebootReply {
+    match (call_accepted, result) {
+        (true, Ok(())) => RebootReply::Accepted,
+        (true, Err(_)) => RebootReply::Unknown,
+        (false, Err(error)) => RebootReply::Rejected {
+            raw_code: reboot_error_code(&error),
+        },
+        (false, Ok(())) => RebootReply::Rejected { raw_code: 1 },
+    }
+}
+
+fn reboot_error_code(error: &boothop_core::Error) -> i32 {
+    match error {
+        boothop_core::Error::PrivilegeUnavailable => 1300,
+        boothop_core::Error::PrivilegeEnableFailed { raw_code }
+        | boothop_core::Error::PrivilegeRestoreFailed { raw_code }
+        | boothop_core::Error::PlatformIo { raw_code, .. } => *raw_code,
+        _ => 1,
+    }
+}
+
 impl RebootReply {
     pub(crate) const fn into_core(self) -> RebootOutcome {
         match self {
@@ -75,7 +103,7 @@ mod tests {
 }
 
 #[cfg(windows)]
-mod native {
+pub(crate) mod native {
     use super::with_shutdown_privilege;
     use super::*;
     use crate::windows::privilege::native::NativeTokenCalls;
@@ -83,9 +111,6 @@ mod native {
     use windows_sys::Win32::System::Shutdown::{
         InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
     };
-
-    #[allow(dead_code)]
-    const ERROR_NOT_ALL_ASSIGNED: i32 = 1300;
 
     /// Native reboot calls have no public constructor.  The helper is the only
     /// production owner permitted to wire this backend.
@@ -96,7 +121,7 @@ mod native {
 
     impl SystemRebootCalls {
         #[allow(dead_code)]
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 token: NativeTokenCalls::new(),
             }
@@ -107,6 +132,7 @@ mod native {
         fn request_reboot(&mut self) -> RebootReply {
             // SeShutdownPrivilege has its own exact-state RAII scope and is
             // enabled only after core has completed BootNext readback.
+            let mut call_accepted = false;
             let result = with_shutdown_privilege(&mut self.token, |_| {
                 unsafe { SetLastError(0) };
                 let accepted = unsafe {
@@ -126,21 +152,11 @@ mod native {
                         raw_code,
                     })
                 } else {
+                    call_accepted = true;
                     Ok(())
                 }
             });
-            match result {
-                Ok(()) => RebootReply::Accepted,
-                Err(error) => RebootReply::Rejected {
-                    raw_code: match error {
-                        boothop_core::Error::PrivilegeUnavailable => ERROR_NOT_ALL_ASSIGNED,
-                        boothop_core::Error::PrivilegeEnableFailed { raw_code }
-                        | boothop_core::Error::PrivilegeRestoreFailed { raw_code }
-                        | boothop_core::Error::PlatformIo { raw_code, .. } => raw_code,
-                        _ => 1,
-                    },
-                },
-            }
+            classify_reboot_result(call_accepted, result)
         }
     }
 }

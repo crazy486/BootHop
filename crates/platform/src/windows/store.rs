@@ -667,7 +667,7 @@ fn reduce_security_descriptor(
 
 #[cfg(windows)]
 #[allow(dead_code)]
-mod native {
+pub(crate) mod native {
     //! Native adapter.  It is intentionally private; only the trusted helper
     //! entry point may construct it in a later integration task.
     use super::*;
@@ -716,7 +716,7 @@ mod native {
     pub(crate) struct SystemWindowsStoreCalls;
 
     impl SystemWindowsStoreCalls {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self
         }
     }

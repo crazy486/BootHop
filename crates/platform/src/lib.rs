@@ -7,6 +7,16 @@ pub trait ProtectedStore {
     fn save(&mut self, target: &TargetRecord) -> Result<(), Error>;
 }
 
+impl<T: ProtectedStore + ?Sized> ProtectedStore for &mut T {
+    fn load(&mut self) -> Result<RecordState, Error> {
+        (**self).load()
+    }
+
+    fn save(&mut self, target: &TargetRecord) -> Result<(), Error> {
+        (**self).save(target)
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

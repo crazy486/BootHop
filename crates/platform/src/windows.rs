@@ -1,8 +1,8 @@
 //! Portable Windows firmware policy.
 //!
-//! This module deliberately contains no Win32 imports.  The native call
-//! implementation is added behind `windows::native` in a later task; this
-//! boundary stays available to host tests and to Windows builds alike.
+//! Policy and composition boundary for Windows.  Win32 implementations remain
+//! in private target-gated child modules; this public surface is available to
+//! host tests and to the Windows production helper wiring.
 
 pub mod firmware;
 pub mod privilege;
@@ -22,16 +22,16 @@ pub use reboot::{RebootCalls, RebootReply, with_shutdown_privilege};
 /// closed firmware and reboot seams.  All mutation ordering remains owned by
 /// `boothop_core::execute`; this type only maps each semantic operation to the
 /// appropriate mechanism.
-pub struct WindowsPlatform<'a, F: WindowsCalls, R: RebootCalls> {
-    store: &'a mut dyn crate::ProtectedStore,
+pub struct WindowsPlatform<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> {
+    store: S,
     firmware: F,
     reboot: R,
 }
 
-impl<'a, F: WindowsCalls, R: RebootCalls> WindowsPlatform<'a, F, R> {
+impl<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> WindowsPlatform<S, F, R> {
     /// Construct an adapter around injected boundaries.  Production native
     /// constructors are private and are wired only by the trusted helper.
-    pub fn new(store: &'a mut dyn crate::ProtectedStore, firmware: F, reboot: R) -> Self {
+    pub fn new(store: S, firmware: F, reboot: R) -> Self {
         Self {
             store,
             firmware,
@@ -40,7 +40,9 @@ impl<'a, F: WindowsCalls, R: RebootCalls> WindowsPlatform<'a, F, R> {
     }
 }
 
-impl<F: WindowsCalls, R: RebootCalls> boothop_core::Platform for WindowsPlatform<'_, F, R> {
+impl<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> boothop_core::Platform
+    for WindowsPlatform<S, F, R>
+{
     fn load_record(&mut self) -> Result<boothop_core::RecordState, boothop_core::Error> {
         self.store.load()
     }
@@ -81,5 +83,72 @@ impl<F: WindowsCalls, R: RebootCalls> boothop_core::Platform for WindowsPlatform
 
     fn check_environment(&mut self) -> Result<(), boothop_core::Error> {
         firmware::check_environment(&mut self.firmware)
+    }
+}
+
+pub use reboot::classify_reboot_result;
+
+/// Opaque owner of the native Windows production adapter.  The concrete
+/// protected store, firmware calls, reboot calls, and operation capability
+/// cannot be named or constructed by dependent crates.
+#[cfg(windows)]
+pub struct ProductionPlatform {
+    inner: WindowsPlatform<
+        store::WindowsProtectedStore<store::native::SystemWindowsStoreCalls>,
+        firmware::native::SystemWindowsCalls,
+        reboot::native::SystemRebootCalls,
+    >,
+}
+
+/// Construct the native platform for the trusted helper entry point.  This
+/// deliberately exposes no injected generic seams and performs no operation
+/// until the returned platform is driven by shared core.
+#[cfg(windows)]
+pub fn production() -> Result<ProductionPlatform, boothop_core::Error> {
+    let store = store::WindowsProtectedStore::open(
+        store::native::SystemWindowsStoreCalls::new(),
+        store::OperationCapability::new(),
+    )?;
+    Ok(ProductionPlatform {
+        inner: WindowsPlatform::new(
+            store,
+            firmware::native::SystemWindowsCalls::new(),
+            reboot::native::SystemRebootCalls::new(),
+        ),
+    })
+}
+
+#[cfg(windows)]
+impl boothop_core::Platform for ProductionPlatform {
+    fn load_record(&mut self) -> Result<boothop_core::RecordState, boothop_core::Error> {
+        self.inner.load_record()
+    }
+    fn save_record(
+        &mut self,
+        target: &boothop_core::TargetRecord,
+    ) -> Result<(), boothop_core::Error> {
+        self.inner.save_record(target)
+    }
+    fn read_options(&mut self) -> Result<boothop_core::OptionInventory, boothop_core::Error> {
+        self.inner.read_options()
+    }
+    fn read_next(&mut self) -> Result<Option<boothop_core::BootId>, boothop_core::Error> {
+        self.inner.read_next()
+    }
+    fn write_next(&mut self, target: boothop_core::BootId) -> Result<(), boothop_core::Error> {
+        self.inner.write_next(target)
+    }
+    fn rollback_next(
+        &mut self,
+        original: Option<boothop_core::BootId>,
+        written: boothop_core::BootId,
+    ) -> boothop_core::RollbackOutcome {
+        self.inner.rollback_next(original, written)
+    }
+    fn reboot(&mut self) -> boothop_core::RebootOutcome {
+        self.inner.reboot()
+    }
+    fn check_environment(&mut self) -> Result<(), boothop_core::Error> {
+        self.inner.check_environment()
     }
 }
