@@ -8,8 +8,9 @@ Status: approved architecture, software implementation authorized; real-system a
 This specification defines the Windows production adapter, protected store,
 transient elevated helper, GUI transport, packaging baseline, and their tests.
 It extends the approved shared design and its opaque-identity and Linux-first
-amendments; it does not replace them. The shared core remains the sole owner of
-target validation and the Inspect/Configure/Switch state machine.
+amendments. It supersedes only their protocol-v1 freeze as described below; all
+other shared and Linux requirements remain binding. The shared core remains the
+sole owner of target validation and the Inspect/Configure/Switch state machine.
 
 This implementation session may compile and link Win32 calls and may exercise
 only injected fakes, pure parsers, compile-time checks, and ordinary filesystem
@@ -129,12 +130,47 @@ never rolled back because the system may already be shutting down. Write or
 readback failures are treated as unknown mutation state and are not followed
 by a speculative rollback.
 
+Core records whether this invocation performed the BootNext write. After a
+definite reboot rejection, it makes one read-only post-rejection observation.
+If core did not perform the write, it never requests rollback. If the observed
+state already equals the exact original state, rollback is `NotNeeded`. If the
+observation is neither the exact original nor the value this invocation wrote,
+or if the observation fails, rollback is `Unsafe` and no rollback method is
+called. Only when the observation still equals the value written by this
+invocation may core call `rollback_next`; the adapter must still enforce its
+own exclusivity contract immediately before any restore write.
+
 The stage/report model adds `RollbackAttempted`, `RollbackRestored`,
 `RollbackUnsafe`, and `RollbackFailed`. A `RollbackAssessment` in
 `FlowFailure` records the closed result independently of the existing residual
 observation. `ResidualPossible` is retained whenever the post-failure state is
 not proven equal to the original. Protocol DTOs mirror these additions and the
-protocol version is incremented.
+protocol version is incremented to 2.
+
+This is a deliberate, narrow successor amendment to the earlier v1 freeze.
+There is no released mixed-version deployment to preserve: GUI and helper must
+be packaged and upgraded as one signed product unit. A v2 endpoint rejects v1 and
+vice versa; there is no downgrade, negotiation, or compatibility decoder. The
+Linux transport moves mechanically to the same v2 DTOs while preserving its
+domain behavior. This explicit atomic-upgrade rule replaces the former
+requirement to keep `PROTOCOL_VERSION == 1` unchanged.
+
+This branch can stage and verify a co-versioned GUI/helper pair, but it does not
+claim that a signed installer transaction or interrupted-upgrade recovery is
+complete. Production distribution remains blocked until an installer proves
+atomic replacement, rollback/recovery after interruption, and downgrade
+prevention. Package tests reject mixed protocol-version metadata.
+
+Stage semantics are exact: an already-original observation records
+`RollbackAssessment::NotNeeded` and no rollback stage; an unreadable or
+concurrently changed observation records `RollbackUnsafe` without
+`RollbackAttempted`; a call to `rollback_next` first records
+`RollbackAttempted`, then exactly one of restored/unsafe/failed. If the adapter
+atomically observes that another actor already restored the original, the
+assessment is `NotNeeded` with only `RollbackAttempted`. Restored or not-needed
+state clears the residual witness; unsafe, failed, or unreadable state retains
+`ResidualPossible`. Linux migrates the required trait method and test fakes,
+but its system adapter always returns `Unsafe` without a firmware write.
 
 ## Windows firmware reads
 
@@ -174,7 +210,11 @@ count and writes attributes separately; the adapter validates and combines
 those values before passing a `Boot####` payload to the shared parser.
 
 Reads start with 4 KiB and may grow only for an explicit insufficient-buffer
-result, up to 1 MiB per variable. Zero means failure and `GetLastError` is
+result, up to 1 MiB per variable and 1 MiB total raw inventory data across all
+controls and referenced options. Cumulative accounting charges each successful
+variable's returned payload byte count plus its four-byte attributes value.
+Exceeding either bound fails the whole inventory without returning a partial
+result. Zero means failure and `GetLastError` is
 captured immediately. No native error, including observed Win32 203, is
 silently converted to absence in the initial production policy. Consequently,
 absence-sensitive `BootNext` operations fail closed until an explicitly
@@ -190,8 +230,12 @@ Attributes and payload shapes are exact:
 | `BootNext` | `0x7` | exactly one LE `u16` |
 | `Boot####` | `0x7` | bounded raw EFI load-option payload |
 
-Option discovery is the deduplicated union of IDs referenced by `BootOrder`,
-`BootCurrent`, and a successfully read `BootNext`. It never scans
+Inspect/Configure option discovery is the deduplicated union of IDs referenced
+by `BootOrder` and `BootCurrent` only. `read_options` never reads `BootNext`, in
+accordance with the shared contract. Switch reads `BootNext` separately through
+`read_next`; a conflicting ID is sufficient to stop and is not expanded into
+another Boot#### read. Production therefore does not reuse the collector's
+three-control discovery union. It never scans
 `Boot0000`--`BootFFFF`, enumerates arbitrary variables, or repairs malformed
 state. Referenced missing, unreadable, malformed, or attribute-invalid options
 fail closed. Duplicate `BootOrder` entries become bounded diagnostics while
@@ -222,8 +266,7 @@ The `BootHop` directory and record have protected owner/DACL contracts:
 
 - owner: `SYSTEM` or `BUILTIN\Administrators`;
 - `SYSTEM` and `BUILTIN\Administrators`: full control;
-- ordinary users: read-only on the final record if product inspection needs
-  it, otherwise no access; never create/write/delete/change-permissions;
+- ordinary users: no access; never read/create/write/delete/change-permissions;
 - inherited ACEs that grant ordinary-user mutation are rejected;
 - reparse points, alternate target roots, and unexpected object types are
   rejected.
@@ -234,10 +277,16 @@ size, and record encoding before accepting `Missing` or `Ready`. `Missing` is
 valid only when the trusted directory is validated and the final component is
 confirmed absent.
 
-Save acquires a system-wide BootHop operation mutex for the whole helper
-operation, writes a bounded same-directory exclusive temporary file with the
-final protected DACL, flushes it, closes it, then uses `ReplaceFileW` when the
-record exists. First creation uses an exclusive create followed by directory
+The helper acquires the fixed `Global\BootHop.Operation.v1` mutex before it
+constructs the protected store, loads a record, or reads firmware, and holds it
+through terminal response transmission. The mutex has an explicit DACL granting
+only `SYSTEM` and `BUILTIN\Administrators` synchronization/full-control rights.
+Timeout maps to `Busy`; an abandoned mutex fails closed as a platform error and
+the operation does not inspect or mutate state. It is released exactly once on
+every normal/error/unwind path. Store Save relies on this already-held
+operation guard and writes a bounded same-directory exclusive temporary file
+with the final protected DACL, flushes it, closes it, then uses `ReplaceFileW`
+when the record exists. First creation uses an exclusive create followed by directory
 and ACL revalidation. `ReplaceFileW` flags that ignore ACL/merge errors are
 forbidden. Its unsupported `REPLACEFILE_WRITE_THROUGH` flag is not used.
 Because Win32 does not expose a portable directory-fsync durability guarantee,
@@ -254,9 +303,10 @@ ProgramData ACL was exercised.
 
 The installed GUI resolves a fixed helper path beneath Program Files and calls
 `ShellExecuteExW` with verb `runas` and `SEE_MASK_NOCLOSEPROCESS`. Arguments
-contain only a versioned mode marker, random 128-bit pipe suffix, GUI PID, and
-one-time 256-bit secret. The request itself travels only after the authenticated
-pipe handshake. UAC cancellation is reported as cancellation; launch failure
+contain only a versioned mode marker, random 128-bit pipe suffix, and GUI PID.
+The random suffix prevents accidental name collisions but is not treated as an
+authenticator or secret. The request itself travels only after OS-backed peer
+authentication. UAC cancellation is reported as cancellation; launch failure
 before complete request delivery is retryable only by explicit user action.
 
 The helper refuses unknown, duplicate, malformed, overlong, relative-path, or
@@ -278,19 +328,37 @@ Both endpoints authenticate the peer before request delivery:
 - helper obtains the server PID and verifies the original GUI process handle,
   session, fixed GUI image path, and continuity of that process;
 - a different administrator credential at UAC is allowed, so equal user SIDs
-  are not required;
-- both prove possession of the one-time secret in a versioned challenge before
-  the semantic request is accepted.
+  are not required.
+
+Authentication is complete only when all DACL, PID, live process handle,
+elevation/integrity, fixed image, and session checks succeed in both directions.
+There is no application cryptographic handshake, command-line secret, bearer
+token, or reusable credential. Failure ordering reveals only a generic
+authentication failure and closes the session before request bytes are read.
 
 The GUI keeps a synchronization handle to the launched helper and validates
 that the pipe peer PID is that process. Handles are closed once on all paths.
 
-Wire frames remain `u32` little-endian length plus canonical UTF-8 JSON,
-bounded to 64 KiB total for hello/request/response. Authentication/connect has
-one 120-second deadline; authenticated request/response and reboot dispatch
-have one 30-second deadline. Exactly one request and one response are allowed.
+Wire frames remain `u32` little-endian length plus canonical UTF-8 JSON, with
+the prefix included in every budget. The sole GUI-to-helper request frame is at
+most 65,536 bytes. All helper-to-GUI output for one operation—the hello and
+terminal response frames plus any bounded diagnostics/stderr—is at most 65,536
+bytes in aggregate. Authentication/connect has one 120-second deadline;
+authenticated request/response and reboot dispatch have one 30-second
+deadline. Exactly one request and one response are allowed.
 After complete request delivery, timeout, disconnect, malformed response, or
 helper exit maps to unknown-after-send and is never automatically replayed.
+
+Protocol v2 adds a required `request_id` to request and response envelopes. It
+is exactly 32 lowercase hexadecimal characters encoding a fresh, nonzero
+128-bit value generated from the OS random source for every GUI invocation.
+The helper validates the syntax, binds the ID to exactly one decoded intent,
+and echoes it unchanged in the sole response; the GUI rejects a mismatch as
+unknown-after-send. On Windows the same value is the named-pipe suffix passed
+at launch, binding the launched helper, pipe namespace, request, and response.
+It is correlation data, not an authenticator or secret. On Linux it is carried
+only in the request/response envelopes. IDs are never retried or reused, and
+compacted terminal responses retain the same ID.
 
 ### Trusted dispatch
 
@@ -340,7 +408,7 @@ production software test.
 ## Error mapping
 
 Platform errors retain a fixed operation label and the immediate raw Win32
-code, never a path, variable payload, user SID, pipe secret, or identity digest.
+code, never a path, variable payload, user SID, request ID, or identity digest.
 The model distinguishes at least:
 
 - `NotUefi`;
@@ -370,10 +438,12 @@ that place:
   command handler.
 
 The package manifest records architecture, binary hashes, requested execution
-level (GUI asInvoker; helper requireAdministrator), and publisher placeholder.
-CI may build and inspect staging output but does not install it. Production
-distribution requires code signing and an installer-signing/release process;
-self-signed development certificates are not a production acceptance claim.
+level (GUI asInvoker; helper requireAdministrator), publisher placeholder, and
+protocol version 2 for both binaries. Package checks reject a mixed pair. CI
+may build and inspect staging output but does not install it. Production
+distribution requires the atomic installer/recovery/downgrade work, code
+signing, and an installer-signing/release process; self-signed development
+certificates are not a production acceptance claim.
 
 ## Test strategy
 
@@ -416,7 +486,8 @@ All behavior is developed test-first. Required software tests include:
 ### IPC/security/GUI
 
 - strict argument grammar, first-instance local pipe, explicit DACL, PID/token/
-  image/session verification, different-admin elevation, nonce proof, one-shot
+  image/session verification, different-admin elevation, request-ID/pipe
+  correlation, one-shot
   frame and deadline behavior;
 - cancellation, before-send, and unknown-after-send classifications;
 - GUI cannot bypass helper and has no native mutation/reboot imports;
@@ -458,9 +529,12 @@ explicit authorization and private evidence:
 2. **W2 configure:** elevated helper, protected ProgramData store, ACL and
    record readback only; no firmware write or reboot.
 3. **W3 pre-switch:** target identity and BootNext conflict observations only.
-4. **W4 mutation:** one authorized BootNext write and immediate readback, with
-   automatic reboot disabled by an acceptance interlock.
-5. **W5 switch:** one authorized production Windows-to-Linux switch and reboot,
+4. **W4 mutation:** blocked until a separately reviewed and explicitly approved
+   mapping can distinguish confirmed native BootNext absence from unavailable
+   state. After that gate, one authorized BootNext write and immediate readback,
+   with automatic reboot disabled by an acceptance interlock.
+5. **W5 switch:** blocked by the same absence-mapping gate; afterward, one
+   authorized production Windows-to-Linux switch and reboot,
    followed by post-boot evidence.
 
 Windows1W API evidence and Linux Stage 5 post-boot closure may share an
@@ -487,6 +561,10 @@ software verification does not prove any real-system stage.
 - Contradiction audit: helper-only mutation, GUI untrustworthiness, one-shot
   transport, unknown-after-send, and no real-system operations agree across
   the shared, platform, IPC, GUI, CI, and acceptance sections.
+- Protocol audit: the rollback report requires v2; the earlier v1 freeze is
+  explicitly superseded for a co-versioned GUI/helper package with no
+  mixed-version fallback, while distribution stays blocked until atomic
+  installer/recovery/downgrade behavior is implemented and tested.
 - Linux divergence audit: core additions are additive reporting and a rollback
   hook whose Linux implementation is non-mutating; existing Linux firmware,
   reboot, store, and authorization mechanics remain unchanged.
