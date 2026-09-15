@@ -101,6 +101,7 @@ struct ShutdownToken {
     prior: TokenPrivileges,
     adjustments: Vec<TokenPrivileges>,
     closes: usize,
+    close_error: Option<i32>,
 }
 
 impl TokenCalls for ShutdownToken {
@@ -137,7 +138,7 @@ impl TokenCalls for ShutdownToken {
     }
     fn close_handle(&mut self, _: TokenHandle) -> Result<(), i32> {
         self.closes += 1;
-        Ok(())
+        self.close_error.map_or(Ok(()), Err)
     }
 }
 
@@ -432,13 +433,31 @@ fn production_factory_is_public_without_exposing_injected_boundaries() {
 
 #[test]
 fn accepted_shutdown_call_with_restore_failure_is_unknown() {
-    assert_eq!(
-        boothop_platform::windows::classify_reboot_result(
-            true,
-            Err(Error::PrivilegeRestoreFailed { raw_code: 5 }),
-        ),
-        RebootReply::Unknown
-    );
+    let mut token = ShutdownToken {
+        lookup: Ok(Luid(19)),
+        enable: Ok(()),
+        prior: TokenPrivileges::single(Luid(19), 0),
+        adjustments: Vec::new(),
+        closes: 0,
+        close_error: Some(5),
+    };
+    assert_eq!(fake_native_reboot(&mut token, true), RebootReply::Unknown);
+}
+
+fn fake_native_reboot(token: &mut ShutdownToken, native_success: bool) -> RebootReply {
+    let mut accepted = false;
+    let result = with_shutdown_privilege(token, |_| {
+        if native_success {
+            accepted = true;
+            Ok(())
+        } else {
+            Err(Error::PlatformIo {
+                operation: boothop_core::PlatformOperation::Reboot,
+                raw_code: 5,
+            })
+        }
+    });
+    boothop_platform::windows::classify_reboot_result(accepted, result)
 }
 
 #[test]
@@ -464,6 +483,18 @@ fn only_definite_zero_native_return_is_rejected() {
         boothop_platform::windows::classify_reboot_result(true, Ok(())),
         RebootReply::Accepted
     );
+    let mut token = ShutdownToken {
+        lookup: Ok(Luid(19)),
+        enable: Ok(()),
+        prior: TokenPrivileges::single(Luid(19), 0),
+        adjustments: Vec::new(),
+        closes: 0,
+        close_error: None,
+    };
+    assert_eq!(
+        fake_native_reboot(&mut token, false),
+        RebootReply::Rejected { raw_code: 5 }
+    );
 }
 
 #[test]
@@ -475,6 +506,7 @@ fn shutdown_privilege_scope_restores_exact_prior_state_and_closes_once() {
         prior: prior.clone(),
         adjustments: Vec::new(),
         closes: 0,
+        close_error: None,
     };
     with_shutdown_privilege(&mut token, |_| Ok::<_, Error>(())).unwrap();
     assert_eq!(token.adjustments.len(), 2);
@@ -490,6 +522,7 @@ fn shutdown_privilege_absence_and_not_all_assigned_fail_closed() {
         prior: TokenPrivileges::new(Vec::new()),
         adjustments: Vec::new(),
         closes: 0,
+        close_error: None,
     };
     assert_eq!(
         with_shutdown_privilege(&mut absent, |_| Ok::<_, Error>(())),
@@ -501,6 +534,7 @@ fn shutdown_privilege_absence_and_not_all_assigned_fail_closed() {
         prior: TokenPrivileges::single(Luid(19), 0),
         adjustments: Vec::new(),
         closes: 0,
+        close_error: None,
     };
     assert_eq!(
         with_shutdown_privilege(&mut denied, |_| Ok::<_, Error>(())),
