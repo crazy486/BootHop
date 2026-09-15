@@ -14,6 +14,7 @@ pub const ERROR_NOT_ALL_ASSIGNED: i32 = 1300;
 pub const ERROR_NO_SUCH_PRIVILEGE: i32 = 1313;
 pub const ERROR_INVALID_DATA: i32 = 13;
 
+#[cfg(windows)]
 fn previous_state_layout_valid(
     return_length: usize,
     count: usize,
@@ -39,6 +40,7 @@ fn previous_state_layout_valid(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Privilege {
     SystemEnvironment,
+    Shutdown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +80,7 @@ impl TokenPrivileges {
         Self::new(vec![(luid, attributes)])
     }
 
+    #[cfg(windows)]
     pub(crate) fn entries(&self) -> &[(Luid, u32)] {
         &self.entries
     }
@@ -105,17 +108,29 @@ pub trait TokenCalls {
 /// Run exactly one firmware operation with SeSystemEnvironmentPrivilege
 /// enabled, then restore the exact prior token state and close the handle.
 /// Restoration failure always supersedes the operation result.
-pub fn with_system_environment_privilege<C, T, F>(calls: &mut C, operation: F) -> Result<T, Error>
+pub fn with_privilege<C, T, F>(
+    calls: &mut C,
+    privilege: Privilege,
+    operation: F,
+) -> Result<T, Error>
 where
     C: TokenCalls,
     F: FnOnce(&mut C) -> Result<T, Error>,
 {
-    let mut scope = PrivilegeScope::acquire(calls)?;
+    let mut scope = PrivilegeScope::acquire(calls, privilege)?;
     if let Err(error) = scope.enable() {
         return scope.finish(Err(error));
     }
     let result = operation(scope.calls_mut());
     scope.finish(result)
+}
+
+pub fn with_system_environment_privilege<C, T, F>(calls: &mut C, operation: F) -> Result<T, Error>
+where
+    C: TokenCalls,
+    F: FnOnce(&mut C) -> Result<T, Error>,
+{
+    with_privilege(calls, Privilege::SystemEnvironment, operation)
 }
 
 struct PrivilegeScope<C: TokenCalls> {
@@ -131,13 +146,13 @@ struct PrivilegeScope<C: TokenCalls> {
 }
 
 impl<C: TokenCalls> PrivilegeScope<C> {
-    fn acquire(calls: &mut C) -> Result<Self, Error> {
+    fn acquire(calls: &mut C, privilege: Privilege) -> Result<Self, Error> {
         let handle = match calls.open_process_token(TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY) {
             Ok(handle) => handle,
             Err(raw_code) => return Err(Error::PrivilegeEnableFailed { raw_code }),
         };
         let calls_ptr = calls as *mut C;
-        match calls.lookup_privilege_value(Privilege::SystemEnvironment) {
+        match calls.lookup_privilege_value(privilege) {
             Ok(luid) => Ok(Self {
                 calls: calls_ptr,
                 handle,
@@ -269,7 +284,7 @@ pub(crate) mod native {
         CloseHandle, GetLastError, HANDLE, LUID as WinLuid, SetLastError,
     };
     use windows_sys::Win32::Security::{
-        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_SHUTDOWN_NAME,
         SE_SYSTEM_ENVIRONMENT_NAME, TOKEN_PRIVILEGES,
     };
     use windows_sys::Win32::System::Threading::OpenProcessToken;
@@ -319,6 +334,7 @@ pub(crate) mod native {
         fn lookup_privilege_value(&mut self, privilege: Privilege) -> Result<Luid, i32> {
             let name = match privilege {
                 Privilege::SystemEnvironment => SE_SYSTEM_ENVIRONMENT_NAME,
+                Privilege::Shutdown => SE_SHUTDOWN_NAME,
             };
             let mut luid = WinLuid::default();
             unsafe { SetLastError(0) };

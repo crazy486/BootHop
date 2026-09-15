@@ -470,11 +470,17 @@ fn enoent_is_contextual_and_errno_preserved() {
     let calls = FakeLinuxCalls::new();
     assert_eq!(read_next(&calls), Ok(None));
     for op in ["open", "metadata", "read"] {
+        let operation = match op {
+            "open" => PlatformOperation::Open,
+            "metadata" => PlatformOperation::Metadata,
+            "read" => PlatformOperation::Read,
+            _ => unreachable!(),
+        };
         for code in [2, 13, 1, 30, 40, 20, 21, 5, 19, 22, 28, 122, 12, 4, 110] {
             let calls = FakeLinuxCalls::new();
             calls.set("BootNext", &[7, 0, 0, 0, 1, 0]);
             calls.0.borrow_mut().fail = Some((op, code));
-            assert_eq!(read_next(&calls), Err(io(op, code)), "{op} {code}");
+            assert_eq!(read_next(&calls), Err(io(operation, code)), "{op} {code}");
             assert!(calls.0.borrow().reads <= 1, "unbounded retry");
         }
     }
