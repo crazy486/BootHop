@@ -3,7 +3,8 @@ mod windows_support;
 
 use boothop_core::{BootId, Error};
 use boothop_platform::windows::{
-    FirmwareType, ReadOutcome, VariableName, check_environment, read_next, read_options,
+    FirmwareType, GLOBAL_VARIABLE_GUID, ReadOutcome, VariableName, check_environment, read_next,
+    read_options,
 };
 use windows_support::{FakeWindowsCalls, error, id, install_inventory, order, success};
 
@@ -154,4 +155,47 @@ fn raw_firmware_errors_are_immediate_and_preserve_codes() {
         check_environment(&mut calls),
         Err(Error::FirmwareReadFailed { raw_code: 55 })
     );
+}
+
+#[test]
+fn production_uses_one_exact_global_variable_guid() {
+    assert_eq!(
+        GLOBAL_VARIABLE_GUID,
+        "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
+    );
+}
+
+#[test]
+fn successful_result_larger_than_requested_buffer_is_rejected() {
+    let mut calls = FakeWindowsCalls::uefi();
+    calls.set(
+        VariableName::BootNext,
+        ReadOutcome::success(7, vec![0; 4097]),
+    );
+    assert_eq!(read_next(&mut calls), Err(Error::ResourceLimit));
+}
+
+#[test]
+fn growth_reaches_one_mib_and_oversize_transition_fails() {
+    let mut calls = FakeWindowsCalls::uefi();
+    let mut script = Vec::new();
+    let mut size = 4096;
+    while size < 1_048_576 {
+        size *= 2;
+        script.push(ReadOutcome::buffer_too_small(size, 7));
+    }
+    script.push(success(7, id(7)));
+    calls.script(VariableName::BootNext, script);
+    assert_eq!(read_next(&mut calls), Ok(Some(BootId(7))));
+    assert_eq!(
+        calls.reads.last(),
+        Some(&(VariableName::BootNext, 1_048_576))
+    );
+
+    let mut calls = FakeWindowsCalls::uefi();
+    calls.set(
+        VariableName::BootNext,
+        ReadOutcome::buffer_too_small(1_048_577, 7),
+    );
+    assert_eq!(read_next(&mut calls), Err(Error::ResourceLimit));
 }

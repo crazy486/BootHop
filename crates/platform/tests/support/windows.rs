@@ -10,7 +10,7 @@ pub struct FakeWindowsCalls {
     pub values: HashMap<VariableName, ReadOutcome>,
     pub scripted: HashMap<VariableName, Vec<ReadOutcome>>,
     pub reads: Vec<(VariableName, usize)>,
-    pub writes: Vec<(VariableName, Vec<u8>, u32)>,
+    pub writes: Vec<[u8; 2]>,
 }
 
 impl FakeWindowsCalls {
@@ -58,13 +58,8 @@ impl WindowsCalls for FakeWindowsCalls {
             .unwrap_or_else(|| ReadOutcome::missing(203))
     }
 
-    fn write_variable(
-        &mut self,
-        variable: VariableName,
-        bytes: &[u8],
-        attributes: u32,
-    ) -> Result<(), CallError> {
-        self.writes.push((variable, bytes.to_vec(), attributes));
+    fn write_boot_next(&mut self, payload: [u8; 2]) -> Result<(), CallError> {
+        self.writes.push(payload);
         Ok(())
     }
 }

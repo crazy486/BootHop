@@ -9,6 +9,8 @@ pub const MAX_PAYLOAD_BYTES: usize = MAX_VARIABLE_BYTES;
 pub const MAX_ENUMERATION_BYTES: usize = MAX_RAW_INVENTORY_BYTES;
 pub const BOOT_ATTRIBUTES: u32 = 0x7;
 pub const BOOT_CURRENT_ATTRIBUTES: u32 = 0x6;
+/// The UEFI global-variable GUID used by every production firmware call.
+pub const GLOBAL_VARIABLE_GUID: &str = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
 
 /// The only variable names the firmware boundary can address.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -138,12 +140,10 @@ impl ReadOutcome {
 pub trait WindowsCalls {
     fn firmware_type(&mut self) -> Result<FirmwareType, CallError>;
     fn read_variable(&mut self, variable: VariableName, buffer_size: usize) -> ReadOutcome;
-    fn write_variable(
-        &mut self,
-        variable: VariableName,
-        bytes: &[u8],
-        attributes: u32,
-    ) -> Result<(), CallError>;
+    /// The native name, GUID, attributes, and payload length are fixed by
+    /// this boundary. Only the already-serialized two-byte BootNext value is
+    /// passed to the call implementation.
+    fn write_boot_next(&mut self, payload: [u8; 2]) -> Result<(), CallError>;
 }
 
 pub fn check_environment<C: WindowsCalls>(calls: &mut C) -> Result<(), Error> {
@@ -310,11 +310,7 @@ pub fn read_options<C: WindowsCalls>(calls: &mut C) -> Result<OptionInventory, E
 #[allow(dead_code)]
 pub(crate) fn set_boot_next<C: WindowsCalls>(calls: &mut C, target: BootId) -> Result<(), Error> {
     calls
-        .write_variable(
-            VariableName::BootNext,
-            &target.0.to_le_bytes(),
-            BOOT_ATTRIBUTES,
-        )
+        .write_boot_next(target.0.to_le_bytes())
         .map_err(|error| Error::FirmwareWriteFailed {
             raw_code: error.raw_code,
         })
@@ -338,13 +334,9 @@ mod tests {
             ReadOutcome::failure(0, 5)
         }
 
-        fn write_variable(
-            &mut self,
-            variable: VariableName,
-            bytes: &[u8],
-            attributes: u32,
-        ) -> Result<(), CallError> {
-            self.calls.push((variable, bytes.to_vec(), attributes));
+        fn write_boot_next(&mut self, payload: [u8; 2]) -> Result<(), CallError> {
+            self.calls
+                .push((VariableName::BootNext, payload.to_vec(), BOOT_ATTRIBUTES));
             self.result
         }
     }
@@ -385,12 +377,7 @@ mod tests {
             fn read_variable(&mut self, _: VariableName, _: usize) -> ReadOutcome {
                 self.0.clone()
             }
-            fn write_variable(
-                &mut self,
-                _: VariableName,
-                _: &[u8],
-                _: u32,
-            ) -> Result<(), CallError> {
+            fn write_boot_next(&mut self, _: [u8; 2]) -> Result<(), CallError> {
                 Ok(())
             }
         }
