@@ -1,7 +1,7 @@
 use boothop_core::Error;
 use boothop_platform::windows::privilege::{
-    ERROR_NOT_ALL_ASSIGNED, Luid, Privilege, TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY, TokenCalls,
-    TokenHandle, TokenPrivileges, with_system_environment_privilege,
+    ERROR_NOT_ALL_ASSIGNED, Luid, Privilege, TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY, TokenAdjustment,
+    TokenCalls, TokenHandle, TokenPrivileges, with_system_environment_privilege,
 };
 
 #[derive(Debug)]
@@ -55,28 +55,27 @@ impl TokenCalls for FakeToken {
         self.events.push("set-last-error");
     }
 
-    fn last_error(&mut self) -> i32 {
-        self.events.push("get-last-error");
-        if self.adjustments.len() <= 1 {
-            self.enable_error
-        } else {
-            self.restore_error
-        }
-    }
-
     fn adjust_token_privileges(
         &mut self,
         _: TokenHandle,
         new_state: &TokenPrivileges,
-        previous_state: &mut TokenPrivileges,
-    ) -> bool {
+    ) -> TokenAdjustment {
         self.events.push("adjust");
         self.adjustments.push(new_state.clone());
         if self.adjustments.len() == 1 {
-            *previous_state = self.prior.clone();
-            self.enable_success
+            TokenAdjustment {
+                success: self.enable_success,
+                last_error: self.enable_error,
+                previous_state: self.prior.clone(),
+                previous_state_valid: true,
+            }
         } else {
-            self.restore_success
+            TokenAdjustment {
+                success: self.restore_success,
+                last_error: self.restore_error,
+                previous_state: TokenPrivileges::new(Vec::new()),
+                previous_state_valid: true,
+            }
         }
     }
 
@@ -167,6 +166,96 @@ fn operation_error_still_restores_and_restore_failure_wins() {
 }
 
 #[test]
+fn bool_false_enable_failure_restores_the_returned_prior_state() {
+    let mut fake = FakeToken::ready();
+    fake.enable_success = false;
+    fake.enable_error = 5;
+    assert_eq!(
+        with_system_environment_privilege(&mut fake, |_| Ok::<_, Error>(())),
+        Err(Error::PrivilegeEnableFailed { raw_code: 5 })
+    );
+    assert_eq!(fake.adjustments.len(), 2);
+    assert_eq!(fake.adjustments[1], fake.prior);
+    assert_eq!(fake.close_count, 1);
+}
+
+#[test]
+fn zero_entry_prior_state_skips_restore_but_still_closes_once() {
+    let mut fake = FakeToken::ready();
+    fake.prior = TokenPrivileges::new(Vec::new());
+    assert_eq!(
+        with_system_environment_privilege(&mut fake, |_| Ok::<_, Error>(())),
+        Ok(())
+    );
+    assert_eq!(fake.adjustments.len(), 1);
+    assert_eq!(fake.close_count, 1);
+
+    let mut fake = FakeToken::ready();
+    fake.prior = TokenPrivileges::new(Vec::new());
+    fake.enable_success = false;
+    fake.enable_error = ERROR_NOT_ALL_ASSIGNED;
+    assert_eq!(
+        with_system_environment_privilege(&mut fake, |_| Ok::<_, Error>(())),
+        Err(Error::PrivilegeEnableFailed {
+            raw_code: ERROR_NOT_ALL_ASSIGNED,
+        })
+    );
+    assert_eq!(fake.adjustments.len(), 1);
+    assert_eq!(fake.close_count, 1);
+}
+
+#[test]
+fn close_failure_is_terminal_even_when_no_restore_adjustment_is_needed() {
+    let mut fake = FakeToken::ready();
+    fake.prior = TokenPrivileges::new(Vec::new());
+    fake.close_success = false;
+    fake.restore_error = 88;
+    assert_eq!(
+        with_system_environment_privilege(&mut fake, |_| Ok::<_, Error>(())),
+        Err(Error::PrivilegeRestoreFailed { raw_code: 88 })
+    );
+    assert_eq!(fake.close_count, 1);
+}
+
+#[test]
+fn panic_unwind_restores_and_closes_before_propagating_panic() {
+    let mut fake = FakeToken::ready();
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = with_system_environment_privilege(&mut fake, |_| -> Result<(), Error> {
+            panic!("synthetic operation panic")
+        });
+    }));
+    assert!(panic_result.is_err());
+    assert_eq!(fake.adjustments.len(), 2);
+    assert_eq!(fake.adjustments[1], fake.prior);
+    assert_eq!(fake.close_count, 1);
+}
+
+#[test]
+fn successful_operation_with_restore_failure_returns_restore_error() {
+    let mut fake = FakeToken::ready();
+    fake.restore_success = false;
+    fake.restore_error = 91;
+    assert_eq!(
+        with_system_environment_privilege(&mut fake, |_| Ok::<_, Error>(())),
+        Err(Error::PrivilegeRestoreFailed { raw_code: 91 })
+    );
+    assert_eq!(fake.close_count, 1);
+}
+
+#[test]
+fn adjustment_result_preserves_immediate_native_error_snapshot() {
+    let mut fake = FakeToken::ready();
+    fake.enable_success = false;
+    fake.enable_error = 1234;
+    assert_eq!(
+        with_system_environment_privilege(&mut fake, |_| Ok::<_, Error>(())),
+        Err(Error::PrivilegeEnableFailed { raw_code: 1234 })
+    );
+    assert_eq!(fake.adjustments.len(), 2);
+}
+
+#[test]
 fn native_backend_is_not_constructed_by_fake_tests() {
     // This test intentionally exercises only the injected TokenCalls seam.
     let mut fake = FakeToken::ready();
@@ -197,6 +286,16 @@ fn native_surface_is_fixed_direct_imports_and_has_no_process_or_reboot_path() {
     assert!(privilege.contains("CloseHandle"));
     assert!(privilege.contains("SetLastError"));
     assert!(privilege.contains("GetLastError"));
+    let adjust = privilege
+        .rfind("AdjustTokenPrivileges(")
+        .expect("native adjustment call");
+    let captured = privilege
+        .find("let last_error = raw_error();")
+        .expect("immediate native error capture");
+    let validation = privilege
+        .rfind("previous_state_layout_valid(")
+        .expect("strict prior-state validation");
+    assert!(adjust < captured && captured < validation);
     for forbidden in [
         "LoadLibrary",
         "GetProcAddress",

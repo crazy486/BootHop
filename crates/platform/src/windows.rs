@@ -11,4 +11,5 @@ pub use firmware::{
     BOOT_ATTRIBUTES, BOOT_CURRENT_ATTRIBUTES, CallError, FirmwareType, GLOBAL_VARIABLE_GUID,
     INITIAL_BUFFER_BYTES, MAX_ENUMERATION_BYTES, MAX_PAYLOAD_BYTES, ReadOutcome, ReadStatus,
     VariableName, WindowsCalls, check_environment, read_next, read_options,
+    validate_native_buffer_size,
 };

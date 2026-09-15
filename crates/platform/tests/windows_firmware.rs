@@ -4,7 +4,7 @@ mod windows_support;
 use boothop_core::{BootId, Error};
 use boothop_platform::windows::{
     FirmwareType, GLOBAL_VARIABLE_GUID, ReadOutcome, VariableName, check_environment, read_next,
-    read_options,
+    read_options, validate_native_buffer_size,
 };
 use windows_support::{FakeWindowsCalls, error, id, install_inventory, order, success};
 
@@ -198,4 +198,11 @@ fn growth_reaches_one_mib_and_oversize_transition_fails() {
         ReadOutcome::buffer_too_small(1_048_577, 7),
     );
     assert_eq!(read_next(&mut calls), Err(Error::ResourceLimit));
+}
+
+#[test]
+fn native_buffer_size_validation_rejects_zero_and_policy_oversize() {
+    assert!(validate_native_buffer_size(0).is_err());
+    assert!(validate_native_buffer_size(1_048_577).is_err());
+    assert_eq!(validate_native_buffer_size(4096), Ok(4096));
 }

@@ -17,6 +17,15 @@ pub const BOOT_CURRENT_ATTRIBUTES: u32 = 0x6;
 /// The UEFI global-variable GUID used by every production firmware call.
 pub const GLOBAL_VARIABLE_GUID: &str = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
 
+/// Validate a caller-provided native read size before it reaches the Win32
+/// boundary. The policy limit also makes the usize-to-u32 conversion explicit.
+pub fn validate_native_buffer_size(buffer_size: usize) -> Result<u32, CallError> {
+    u32::try_from(buffer_size)
+        .ok()
+        .filter(|size| *size != 0 && buffer_size <= MAX_VARIABLE_BYTES)
+        .ok_or_else(|| CallError::new(87))
+}
+
 /// The only variable names the firmware boundary can address.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VariableName {
@@ -337,6 +346,7 @@ mod native {
     };
 
     const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+    const ERROR_INVALID_DATA: i32 = 13;
 
     /// The native adapter has no public constructor. The helper production
     /// entry point will be the sole owner allowed to instantiate it.
@@ -378,6 +388,8 @@ mod native {
         variable: VariableName,
         buffer_size: usize,
     ) -> Result<ReadOutcome, Error> {
+        let native_size =
+            validate_native_buffer_size(buffer_size).map_err(|_| Error::ResourceLimit)?;
         let name = wide(&variable.to_string());
         let guid = wide(GLOBAL_VARIABLE_GUID);
         with_system_environment_privilege(token, |_| {
@@ -391,7 +403,7 @@ mod native {
                     name.as_ptr(),
                     guid.as_ptr(),
                     bytes.as_mut_ptr().cast::<c_void>(),
-                    buffer_size as u32,
+                    native_size,
                     &mut attributes,
                 )
             };
@@ -407,12 +419,29 @@ mod native {
                 }
                 return Ok(ReadOutcome::failure(0, last_error));
             }
-            let returned = returned as usize;
-            bytes.truncate(returned.min(bytes.len()));
-            Ok(ReadOutcome::success_with_last_error(
-                attributes, bytes, last_error,
+            Ok(successful_native_read(
+                returned,
+                buffer_size,
+                attributes,
+                last_error,
+                bytes,
             ))
         })
+    }
+
+    fn successful_native_read(
+        returned: u32,
+        buffer_size: usize,
+        attributes: u32,
+        last_error: i32,
+        mut bytes: Vec<u8>,
+    ) -> ReadOutcome {
+        let returned = returned as usize;
+        if returned > buffer_size || returned > bytes.len() {
+            return ReadOutcome::failure(returned, ERROR_INVALID_DATA);
+        }
+        bytes.truncate(returned);
+        ReadOutcome::success_with_last_error(attributes, bytes, last_error)
     }
 
     fn native_set_boot_next(
@@ -471,6 +500,20 @@ mod native {
 
         fn write_boot_next(&mut self, payload: [u8; 2]) -> Result<(), CallError> {
             native_set_boot_next(&mut self.token, payload)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::successful_native_read;
+        use crate::windows::firmware::ReadStatus;
+
+        #[test]
+        fn success_count_larger_than_buffer_is_rejected_without_truncation() {
+            let outcome = successful_native_read(9, 8, 7, 0, vec![0; 8]);
+            assert_eq!(outcome.status, ReadStatus::Error);
+            assert_eq!(outcome.bytes_returned, 9);
+            assert!(outcome.bytes.is_empty());
         }
     }
 }
