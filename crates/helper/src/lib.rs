@@ -3,6 +3,7 @@ pub mod dispatch;
 pub mod lock;
 #[cfg(target_os = "linux")]
 pub mod pipe;
+pub mod windows;
 /// Compatibility re-export. Production protocol ownership lives in the
 /// dependency-free (apart from core/serde) protocol crate; helper remains the
 /// only crate that adds privileged platform dispatch.

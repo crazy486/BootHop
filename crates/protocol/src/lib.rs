@@ -3,7 +3,7 @@ use boothop_core as c;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 pub const MAX_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 const MAX_COMPACT_STAGES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -11,6 +11,75 @@ pub enum ProtocolError {
     Version,
     ResourceLimit,
     Truncated,
+}
+
+/// Correlation data for exactly one GUI invocation.  This is deliberately
+/// opaque to the semantic protocol and is never accepted as an authenticator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RequestId(String);
+
+impl RequestId {
+    pub fn generate() -> Result<Self, ProtocolError> {
+        loop {
+            let mut bytes = [0_u8; 16];
+            getrandom::fill(&mut bytes).map_err(|_| ProtocolError::Invalid)?;
+            if bytes != [0; 16] {
+                return Ok(Self::from_bytes(bytes));
+            }
+        }
+    }
+
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        let mut text = String::with_capacity(32);
+        for byte in bytes {
+            use std::fmt::Write;
+            let _ = write!(&mut text, "{byte:02x}");
+        }
+        // A zero ID is never emitted by the production generator. Keep the
+        // constructor useful for tests while decode/validation remains strict.
+        Self(text)
+    }
+
+    pub fn parse(value: &str) -> Result<Self, ProtocolError> {
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || value.bytes().all(|byte| byte == b'0')
+        {
+            return Err(ProtocolError::Invalid);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for RequestId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(|_| serde::de::Error::custom("invalid request_id"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestEnvelope {
+    pub request_id: RequestId,
+    pub request: c::Request,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseEnvelope {
+    pub request_id: RequestId,
+    pub result: Result<c::Report, c::Error>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -533,12 +602,14 @@ impl From<Report> for c::Report {
 #[serde(deny_unknown_fields)]
 struct WireRequest {
     protocol_version: u32,
+    request_id: RequestId,
     request: Request,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireResponse {
     protocol_version: u32,
+    request_id: RequestId,
     result: Result<Report, Error>,
 }
 #[derive(Serialize, Deserialize)]
@@ -612,27 +683,67 @@ fn version(v: u32) -> Result<(), ProtocolError> {
         Err(ProtocolError::Version)
     }
 }
-pub fn encode_request(request: c::Request) -> Result<Vec<u8>, ProtocolError> {
+pub fn encode_request_with_id(
+    request_id: &RequestId,
+    request: c::Request,
+) -> Result<Vec<u8>, ProtocolError> {
+    RequestId::parse(request_id.as_str())?;
     encode(&WireRequest {
         protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
         request: request.into(),
     })
 }
-pub fn decode_request(frame: &[u8]) -> Result<c::Request, ProtocolError> {
+pub fn encode_request(request: c::Request) -> Result<Vec<u8>, ProtocolError> {
+    let request_id = RequestId::generate()?;
+    encode_request_with_id(&request_id, request)
+}
+pub fn decode_request_envelope(frame: &[u8]) -> Result<RequestEnvelope, ProtocolError> {
     let wire: WireRequest = decode(frame)?;
     version(wire.protocol_version)?;
-    Ok(wire.request.into())
+    Ok(RequestEnvelope {
+        request_id: wire.request_id,
+        request: wire.request.into(),
+    })
 }
-pub fn encode_response(result: Result<c::Report, c::Error>) -> Result<Vec<u8>, ProtocolError> {
+pub fn decode_request(frame: &[u8]) -> Result<c::Request, ProtocolError> {
+    Ok(decode_request_envelope(frame)?.request)
+}
+pub fn encode_response_with_id(
+    request_id: &RequestId,
+    result: Result<c::Report, c::Error>,
+) -> Result<Vec<u8>, ProtocolError> {
+    RequestId::parse(request_id.as_str())?;
     encode(&WireResponse {
         protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
         result: result.map(Into::into).map_err(Into::into),
     })
 }
-pub fn decode_response(frame: &[u8]) -> Result<Result<c::Report, c::Error>, ProtocolError> {
+pub fn encode_response(result: Result<c::Report, c::Error>) -> Result<Vec<u8>, ProtocolError> {
+    let request_id = RequestId::generate()?;
+    encode_response_with_id(&request_id, result)
+}
+pub fn decode_response_envelope(frame: &[u8]) -> Result<ResponseEnvelope, ProtocolError> {
     let wire: WireResponse = decode(frame)?;
     version(wire.protocol_version)?;
-    Ok(wire.result.map(Into::into).map_err(Into::into))
+    Ok(ResponseEnvelope {
+        request_id: wire.request_id,
+        result: wire.result.map(Into::into).map_err(Into::into),
+    })
+}
+pub fn decode_response(frame: &[u8]) -> Result<Result<c::Report, c::Error>, ProtocolError> {
+    Ok(decode_response_envelope(frame)?.result)
+}
+pub fn decode_response_for(
+    frame: &[u8],
+    expected: &RequestId,
+) -> Result<Result<c::Report, c::Error>, ProtocolError> {
+    let response = decode_response_envelope(frame)?;
+    if response.request_id != *expected {
+        return Err(ProtocolError::Invalid);
+    }
+    Ok(response.result)
 }
 pub fn encode_hello() -> Vec<u8> {
     encode(&Hello {
@@ -655,7 +766,16 @@ pub fn budgeted_response(
     result: Result<c::Report, c::Error>,
     used: usize,
 ) -> Result<Vec<u8>, ProtocolError> {
-    match encode_response(result.clone()) {
+    let request_id = RequestId::generate()?;
+    budgeted_response_with_id(&request_id, result, used)
+}
+
+pub fn budgeted_response_with_id(
+    request_id: &RequestId,
+    result: Result<c::Report, c::Error>,
+    used: usize,
+) -> Result<Vec<u8>, ProtocolError> {
+    match encode_response_with_id(request_id, result.clone()) {
         Ok(frame) if frame.len() <= MAX_BYTES.saturating_sub(used) => Ok(frame),
         _ => {
             // Once a mutation stage exists, replacing the result with a plain
@@ -665,7 +785,7 @@ pub fn budgeted_response(
             // limit response.
             let compact = match result {
                 Ok(report) if !report.stages.is_empty() => {
-                    encode_response(Ok(compact_report(report)))
+                    encode_response_with_id(request_id, Ok(compact_report(report)))
                 }
                 Err(c::Error::FlowFailure {
                     cause,
@@ -673,16 +793,20 @@ pub fn budgeted_response(
                     residual_assessment,
                     rollback_assessment,
                     ..
-                }) if !stages.is_empty() => encode_response(Err(c::Error::FlowFailure {
-                    cause: Box::new(compact_cause(*cause)),
-                    stages: compact_stages(stages),
-                    residual_assessment: compact_residual_assessment(residual_assessment),
-                    rollback_assessment: compact_rollback_assessment(rollback_assessment),
-                    diagnostics: Vec::new(),
-                })),
+                }) if !stages.is_empty() => encode_response_with_id(
+                    request_id,
+                    Err(c::Error::FlowFailure {
+                        cause: Box::new(compact_cause(*cause)),
+                        stages: compact_stages(stages),
+                        residual_assessment: compact_residual_assessment(residual_assessment),
+                        rollback_assessment: compact_rollback_assessment(rollback_assessment),
+                        diagnostics: Vec::new(),
+                    }),
+                ),
                 _ => Err(ProtocolError::ResourceLimit),
             };
-            let frame = compact.or_else(|_| encode_response(Err(c::Error::ResourceLimit)))?;
+            let frame = compact
+                .or_else(|_| encode_response_with_id(request_id, Err(c::Error::ResourceLimit)))?;
             if frame.len() <= MAX_BYTES.saturating_sub(used) {
                 Ok(frame)
             } else {

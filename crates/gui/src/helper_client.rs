@@ -66,7 +66,9 @@ impl<B: Boundary> HelperClient<B> {
         result
     }
     fn run_once(&mut self, request: Request) -> Result<Report, ClientError> {
-        let request = protocol::encode_request(request)
+        let request_id = protocol::RequestId::generate()
+            .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
+        let request = protocol::encode_request_with_id(&request_id, request)
             .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
         let hello_deadline = self.boundary.now() + Duration::from_secs(120);
         let spec = SpawnSpec {
@@ -121,7 +123,7 @@ impl<B: Boundary> HelperClient<B> {
             }
             match event {
                 Event::Exit(0) => {
-                    return protocol::decode_response(&stdout)
+                    return protocol::decode_response_for(&stdout, &request_id)
                         .map_err(|_| ClientError::UnknownAfterSend(TransportError::Protocol))?
                         .map_err(ClientError::Domain);
                 }

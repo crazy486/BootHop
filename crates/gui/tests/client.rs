@@ -40,6 +40,31 @@ impl Boundary for Fake {
     fn send(&mut self, bytes: &[u8], deadline: Duration) -> Result<(), TransportError> {
         self.deadlines.push(deadline);
         self.writes.push(bytes.to_vec());
+        // Test transport models the helper echoing the request correlation ID
+        // for complete response frames produced by the protocol convenience
+        // encoder. Malformed/fragmented fixtures remain untouched.
+        if let Ok(request) = boothop_protocol::decode_request_envelope(bytes) {
+            let mut rewritten = VecDeque::new();
+            while let Some(event) = self.events.pop_front() {
+                let event = match event {
+                    Ok(Event::Stdout(frame)) => {
+                        if let Ok(response) = boothop_protocol::decode_response_envelope(&frame) {
+                            let frame = boothop_protocol::encode_response_with_id(
+                                &request.request_id,
+                                response.result,
+                            )
+                            .unwrap();
+                            Ok(Event::Stdout(frame))
+                        } else {
+                            Ok(Event::Stdout(frame))
+                        }
+                    }
+                    other => other,
+                };
+                rewritten.push_back(event);
+            }
+            self.events = rewritten;
+        }
         Ok(())
     }
     fn stop(&mut self) {}

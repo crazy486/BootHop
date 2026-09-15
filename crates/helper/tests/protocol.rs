@@ -6,9 +6,68 @@ use boothop_core::{
 use boothop_helper::protocol::*;
 use boothop_helper::protocol::{decode_request, encode_request};
 
+#[test]
+fn v2_id_is_exact_nonzero_lowercase_and_response_echo_is_checked() {
+    let id = RequestId::parse("0123456789abcdef0123456789abcde1").unwrap();
+    let request = encode_request_with_id(&id, Request::Inspect).unwrap();
+    assert_eq!(decode_request_envelope(&request).unwrap().request_id, id);
+    let response = encode_response_with_id(&id, Err(Error::Busy)).unwrap();
+    assert_eq!(decode_response_for(&response, &id), Ok(Err(Error::Busy)));
+    let other = RequestId::parse("0123456789abcdef0123456789abcde2").unwrap();
+    assert_eq!(
+        decode_response_for(&response, &other),
+        Err(ProtocolError::Invalid)
+    );
+    for value in [
+        "",
+        "0",
+        "00000000000000000000000000000000",
+        "0123456789ABCDEF0123456789abcdef",
+        "0123456789abcdef0123456789abcde",
+    ] {
+        assert!(
+            RequestId::parse(value).is_err(),
+            "accepted invalid request_id {value:?}"
+        );
+    }
+}
+
+#[test]
+fn v2_rejects_missing_id_and_credential_or_arbitrary_transport_fields() {
+    let raw = |json: &str| {
+        let mut frame = (json.len() as u32).to_le_bytes().to_vec();
+        frame.extend(json.as_bytes());
+        frame
+    };
+    assert!(decode_request(&raw(r#"{"protocol_version":2,"request":"Inspect"}"#)).is_err());
+    assert!(decode_request(&raw(r#"{"protocol_version":2,"request_id":"0123456789abcdef0123456789abcde1","request":"Inspect","credential":"x"}"#)).is_err());
+    assert!(decode_request(&raw(r#"{"protocol_version":2,"request_id":"0123456789abcdef0123456789abcde1","request":"Inspect","path":"C:\\x"}"#)).is_err());
+}
+
+#[test]
+fn task6_protocol_is_v2_and_requires_request_correlation() {
+    assert_eq!(boothop_helper::protocol::PROTOCOL_VERSION, 2);
+    let frame = frame(
+        r#"{"protocol_version":2,"request_id":"00000000000000000000000000000001","request":"Inspect"}"#,
+    );
+    assert!(decode_request(&frame).is_ok());
+}
+
 fn frame(json: &str) -> Vec<u8> {
-    let mut frame = (json.len() as u32).to_le_bytes().to_vec();
-    frame.extend(json.as_bytes());
+    let mut body = json.to_owned();
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json)
+        && let Some(object) = value.as_object_mut()
+        && (object.contains_key("request") || object.contains_key("result"))
+        && !object.contains_key("request_id")
+    {
+        object.insert(
+            "request_id".into(),
+            serde_json::Value::String("00000000000000000000000000000001".into()),
+        );
+        body = value.to_string();
+    }
+    let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+    frame.extend(body.as_bytes());
     frame
 }
 
@@ -16,12 +75,12 @@ fn frame(json: &str) -> Vec<u8> {
 fn request_and_hello_require_canonical_object_shapes() {
     let requests = [
         r#"[1,"Inspect"]"#,
-        r#"{"protocol_version":1,"request":{"Configure":[7,"Windows"]}}"#,
-        r#"{"protocol_version":1,"request":{"Switch":["Windows"]}}"#,
-        r#"{"protocol_version":1,"request":{"Inspect":null}}"#,
-        r#"{"protocol_version":1,"request":{"Switch":{"os":{"Windows":null}}}}"#,
-        r#"{"protocol_version":1,"request":{"Switch":{"os":{"Linux":null}}}}"#,
-        r#"{"protocol_version":1,"request":["Inspect"]}"#,
+        r#"{"protocol_version":2,"request":{"Configure":[7,"Windows"]}}"#,
+        r#"{"protocol_version":2,"request":{"Switch":["Windows"]}}"#,
+        r#"{"protocol_version":2,"request":{"Inspect":null}}"#,
+        r#"{"protocol_version":2,"request":{"Switch":{"os":{"Windows":null}}}}"#,
+        r#"{"protocol_version":2,"request":{"Switch":{"os":{"Linux":null}}}}"#,
+        r#"{"protocol_version":2,"request":["Inspect"]}"#,
     ];
     let accepted: Vec<_> = requests
         .into_iter()
@@ -47,61 +106,61 @@ fn all_response_struct_payloads_require_maps_including_recursive_errors() {
     let cases = [
         (
             "response",
-            json!({"protocol_version":1,"result":{"Err":"Busy"}}),
+            json!({"protocol_version":2,"result":{"Err":"Busy"}}),
             "",
             json!([1,{"Err":"Busy"}]),
         ),
         (
             "report",
-            json!({"protocol_version":1,"result":{"Ok":empty_report}}),
+            json!({"protocol_version":2,"result":{"Ok":empty_report}}),
             "/result/Ok",
             json!([[], "Missing", [], []]),
         ),
         (
             "candidate",
-            json!({"protocol_version":1,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[65],"classification":"NeedsConfirmation","ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}),
+            json!({"protocol_version":2,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[65],"classification":"NeedsConfirmation","ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}),
             "/result/Ok/candidates/0",
             json!([7, [65], "NeedsConfirmation", false]),
         ),
         (
             "record ready",
-            json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":"Windows"}},"stages":[],"diagnostics":[]}}}),
+            json!({"protocol_version":2,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":"Windows"}},"stages":[],"diagnostics":[]}}}),
             "/result/Ok/record/Ready",
             json!([7, "Windows"]),
         ),
         (
             "record version error",
-            json!({"protocol_version":1,"result":{"Err":{"UnsupportedRecordVersion":{"found":999}}}}),
+            json!({"protocol_version":2,"result":{"Err":{"UnsupportedRecordVersion":{"found":999}}}}),
             "/result/Err/UnsupportedRecordVersion",
             json!([999]),
         ),
         (
             "platform error",
-            json!({"protocol_version":1,"result":{"Err":{"PlatformIo":{"operation":"Read","raw_code":5}}}}),
+            json!({"protocol_version":2,"result":{"Err":{"PlatformIo":{"operation":"Read","raw_code":5}}}}),
             "/result/Err/PlatformIo",
             json!(["read", 5]),
         ),
         (
             "durability error",
-            json!({"protocol_version":1,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5}}}}),
+            json!({"protocol_version":2,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5}}}}),
             "/result/Err/StoreDurabilityUnknown",
             json!([5]),
         ),
         (
             "flow error",
-            json!({"protocol_version":1,"result":{"Err":flow}}),
+            json!({"protocol_version":2,"result":{"Err":flow}}),
             "/result/Err/FlowFailure",
             json!(["Busy", [], "NotChecked", "NotNeeded", []]),
         ),
         (
             "recursive cause",
-            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":flow,"stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}}}}),
+            json!({"protocol_version":2,"result":{"Err":{"FlowFailure":{"cause":flow,"stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}}}}),
             "/result/Err/FlowFailure/cause/FlowFailure",
             json!(["Busy", [], "NotChecked", "NotNeeded", []]),
         ),
         (
             "recursive residual",
-            json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":{"ReadFailed":{"StoreDurabilityUnknown":{"raw_code":5}}},"rollback_assessment":"NotNeeded","diagnostics":[]}}}}),
+            json!({"protocol_version":2,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":{"ReadFailed":{"StoreDurabilityUnknown":{"raw_code":5}}},"rollback_assessment":"NotNeeded","diagnostics":[]}}}}),
             "/result/Err/FlowFailure/residual_assessment/ReadFailed/StoreDurabilityUnknown",
             json!([5]),
         ),
@@ -142,17 +201,17 @@ fn all_response_struct_payloads_require_maps_including_recursive_errors() {
 fn canonical_shape_allows_field_order_whitespace_and_equivalent_escapes() {
     assert_eq!(
         decode_request(&frame(
-            r#"{ "request" : { "Switch" : { "os" : "\u0057indows" } }, "protocol_version" : 1 }"#
+            r#"{ "request" : { "Switch" : { "os" : "\u0057indows" } }, "protocol_version":2 }"#
         )),
         Ok(Request::Switch { os: Os::Windows })
     );
     assert_eq!(
-        decode_hello(&frame(r#"{ "hello": true, "protocol_version": 1 }"#)),
+        decode_hello(&frame(r#"{ "hello": true, "protocol_version":2 }"#)),
         Ok(())
     );
     assert_eq!(
         decode_response(&frame(
-            r#"{ "result" : { "Err" : { "PlatformIo" : { "raw_code": 5, "operation": "Read" } } }, "protocol_version": 1 }"#
+            r#"{ "result" : { "Err" : { "PlatformIo" : { "raw_code": 5, "operation": "Read" } } }, "protocol_version":2 }"#
         )),
         Ok(Err(Error::PlatformIo {
             operation: PlatformOperation::Read,
@@ -184,7 +243,7 @@ fn all_unit_enum_families_reject_object_and_array_alternatives() {
         "PrivilegeUnavailable",
     ] {
         cases.push((
-            json!({"protocol_version":1,"result":{"Err":variant}}),
+            json!({"protocol_version":2,"result":{"Err":variant}}),
             "/result/Err",
         ));
     }
@@ -200,15 +259,15 @@ fn all_unit_enum_families_reject_object_and_array_alternatives() {
         "RollbackFailed",
         "ResidualPossible",
     ] {
-        cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[variant],"diagnostics":[]}}}), "/result/Ok/stages/0"));
+        cases.push((json!({"protocol_version":2,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[variant],"diagnostics":[]}}}), "/result/Ok/stages/0"));
     }
     for variant in ["NeedsConfirmation", "Unsupported"] {
-        cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[],"classification":variant,"ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/candidates/0/classification"));
+        cases.push((json!({"protocol_version":2,"result":{"Ok":{"candidates":[{"boot_id":7,"description_utf16":[],"classification":variant,"ambiguous":false}],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/candidates/0/classification"));
     }
-    cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/record"));
-    cases.push((json!({"protocol_version":1,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}}}}), "/result/Err/FlowFailure/residual_assessment"));
+    cases.push((json!({"protocol_version":2,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[]}}}), "/result/Ok/record"));
+    cases.push((json!({"protocol_version":2,"result":{"Err":{"FlowFailure":{"cause":"Busy","stages":[],"residual_assessment":"NotChecked","rollback_assessment":"NotNeeded","diagnostics":[]}}}}), "/result/Err/FlowFailure/residual_assessment"));
     for variant in ["Windows", "Linux"] {
-        cases.push((json!({"protocol_version":1,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":variant}},"stages":[],"diagnostics":[]}}}), "/result/Ok/record/Ready/os"));
+        cases.push((json!({"protocol_version":2,"result":{"Ok":{"candidates":[],"record":{"Ready":{"boot_id":7,"os":variant}},"stages":[],"diagnostics":[]}}}), "/result/Ok/record/Ready/os"));
     }
     let mut accepted = vec![];
     for (original, pointer) in cases {
@@ -283,7 +342,7 @@ fn hostile_request_fields_types_and_duplicate_keys_rejected() {
         ] {
             assert!(
                 decode_request(&frame(&format!(
-                    r#"{{"protocol_version":1,"request":{request}}}"#
+                    r#"{{"protocol_version":2,"request":{request}}}"#
                 )))
                 .is_err(),
                 "{extra}"
@@ -291,22 +350,22 @@ fn hostile_request_fields_types_and_duplicate_keys_rejected() {
         }
         assert!(
             decode_request(&frame(&format!(
-                r#"{{"protocol_version":1,"request":"Inspect","{extra}":7}}"#
+                r#"{{"protocol_version":2,"request":"Inspect","{extra}":7}}"#
             )))
             .is_err()
         );
     }
     for json in [
-        r#"{"protocol_version":1,"protocol_version":1,"request":"Inspect"}"#,
-        r#"{"protocol_version":1,"request":"Inspect","request":"Inspect"}"#,
-        r#"{"protocol_version":1,"request":{"Switch":{"os":"Windows","os":"Linux"}}}"#,
-        r#"{"protocol_version":1,"request":{"Configure":{"os":"Windows","boot_id":7,"boot_id":8}}}"#,
-        r#"{"protocol_version":1,"request":{"Switch":{"os":"Other"}}}"#,
+        r#"{"protocol_version":2,"protocol_version":2,"request":"Inspect"}"#,
+        r#"{"protocol_version":2,"request":"Inspect","request":"Inspect"}"#,
+        r#"{"protocol_version":2,"request":{"Switch":{"os":"Windows","os":"Linux"}}}"#,
+        r#"{"protocol_version":2,"request":{"Configure":{"os":"Windows","boot_id":7,"boot_id":8}}}"#,
+        r#"{"protocol_version":2,"request":{"Switch":{"os":"Other"}}}"#,
         r#"{"protocol_version":"1","request":"Inspect"}"#,
-        r#"{"protocol_version":1,"request":{"Configure":{"os":"Windows","boot_id":65536}}}"#,
-        r#"{"protocol_version":1,"request":{"Configure":{"os":"Windows","boot_id":-1}}}"#,
-        r#"{"protocol_version":1,"request":"Delete"}"#,
-        r#"{"protocol_version":1,"request":null}"#,
+        r#"{"protocol_version":2,"request":{"Configure":{"os":"Windows","boot_id":65536}}}"#,
+        r#"{"protocol_version":2,"request":{"Configure":{"os":"Windows","boot_id":-1}}}"#,
+        r#"{"protocol_version":2,"request":"Delete"}"#,
+        r#"{"protocol_version":2,"request":null}"#,
     ] {
         assert!(decode_request(&frame(json)).is_err(), "{json}");
     }
@@ -314,7 +373,7 @@ fn hostile_request_fields_types_and_duplicate_keys_rejected() {
 #[test]
 fn version_truncation_trailing_and_frame_limit_fail_closed() {
     assert_eq!(
-        decode_request(&frame(r#"{"protocol_version":2,"request":"Inspect"}"#)),
+        decode_request(&frame(r#"{"protocol_version":1,"request":"Inspect"}"#)),
         Err(ProtocolError::Version)
     );
     let bytes = encode_request(Request::Inspect).unwrap();
@@ -322,7 +381,7 @@ fn version_truncation_trailing_and_frame_limit_fail_closed() {
         assert!(decode_request(&bytes[..n]).is_err());
     }
     assert!(decode_request(&[bytes.clone(), vec![0]].concat()).is_err());
-    assert!(decode_request(&frame(r#"{"protocol_version":1,"request":"Inspect"} {}"#)).is_err());
+    assert!(decode_request(&frame(r#"{"protocol_version":2,"request":"Inspect"} {}"#)).is_err());
     assert_eq!(
         decode_request(&65533_u32.to_le_bytes()),
         Err(ProtocolError::ResourceLimit)
@@ -337,9 +396,9 @@ fn hello_is_strict_and_versioned() {
     assert_eq!(decode_hello(&encode_hello()), Ok(()));
     for json in [
         r#"{"protocol_version":2,"hello":true}"#,
-        r#"{"protocol_version":1,"hello":false}"#,
-        r#"{"protocol_version":1,"hello":true,"hello":true}"#,
-        r#"{"protocol_version":1,"hello":true,"path":"/tmp"}"#,
+        r#"{"protocol_version":2,"hello":false}"#,
+        r#"{"protocol_version":2,"hello":true,"hello":true}"#,
+        r#"{"protocol_version":2,"hello":true,"path":"/tmp"}"#,
     ] {
         assert!(decode_hello(&frame(json)).is_err());
     }
@@ -387,7 +446,7 @@ fn rollback_assessments_stages_and_closed_error_labels_roundtrip_without_secrets
         assert_eq!(decode_response(&encoded), Ok(Err(error)));
     }
     assert!(decode_response(&frame(
-        r#"{"protocol_version":1,"result":{"Err":{"PlatformIo":{"operation":"secret_identity","raw_code":5}}}}"#
+        r#"{"protocol_version":2,"result":{"Err":{"PlatformIo":{"operation":"secret_identity","raw_code":5}}}}"#
     ))
     .is_err());
 }
@@ -483,12 +542,12 @@ fn every_report_shape_roundtrip_without_protected_data() {
 #[test]
 fn response_rejects_unknown_duplicate_and_malformed_results() {
     for json in [
-        r#"{"protocol_version":1,"result":{"Err":"FutureError"}}"#,
+        r#"{"protocol_version":2,"result":{"Err":"FutureError"}}"#,
         r#"{"protocol_version":2,"result":{"Err":"Busy"}}"#,
-        r#"{"protocol_version":1,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5,"raw_code":6}}}}"#,
-        r#"{"protocol_version":1,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5,"path":"x"}}}}"#,
-        r#"{"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[],"identity":"x"}}}"#,
-        r#"{"protocol_version":1,"result":{"Ok":{"candidates":[],"record":"Missing","stages":["FutureStage"],"diagnostics":[]}}}"#,
+        r#"{"protocol_version":2,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5,"raw_code":6}}}}"#,
+        r#"{"protocol_version":2,"result":{"Err":{"StoreDurabilityUnknown":{"raw_code":5,"path":"x"}}}}"#,
+        r#"{"protocol_version":2,"result":{"Ok":{"candidates":[],"record":"Missing","stages":[],"diagnostics":[],"identity":"x"}}}"#,
+        r#"{"protocol_version":2,"result":{"Ok":{"candidates":[],"record":"Missing","stages":["FutureStage"],"diagnostics":[]}}}"#,
     ] {
         assert!(decode_response(&frame(json)).is_err());
     }
@@ -684,7 +743,7 @@ fn three_operations_roundtrip_and_switch_rejects_cached_id() {
             Ok(request)
         );
     }
-    let json = br#"{"protocol_version":1,"request":{"Switch":{"os":"Windows","boot_id":7}}}"#;
+    let json = br#"{"protocol_version":2,"request":{"Switch":{"os":"Windows","boot_id":7}}}"#;
     let mut frame = (json.len() as u32).to_le_bytes().to_vec();
     frame.extend(json);
     assert!(decode_request(&frame).is_err());
