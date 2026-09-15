@@ -1,5 +1,10 @@
 use boothop_core::{BootId, EnumerationDiagnostic, Error, OptionInventory, parse_load_option};
 
+#[cfg(windows)]
+use super::privilege::native::NativeTokenCalls;
+#[cfg(windows)]
+use super::privilege::with_system_environment_privilege;
+
 pub const INITIAL_BUFFER_BYTES: usize = 4 * 1024;
 pub const MAX_VARIABLE_BYTES: usize = 1_048_576;
 pub const MAX_RAW_INVENTORY_BYTES: usize = 1_048_576;
@@ -314,6 +319,160 @@ pub(crate) fn set_boot_next<C: WindowsCalls>(calls: &mut C, target: BootId) -> R
         .map_err(|error| Error::FirmwareWriteFailed {
             raw_code: error.raw_code,
         })
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+mod native {
+    use super::*;
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+    use windows_sys::Win32::System::SystemInformation::{
+        FIRMWARE_TYPE, FirmwareTypeBios as FIRMWARE_TYPE_BIOS,
+        FirmwareTypeUefi as FIRMWARE_TYPE_UEFI, FirmwareTypeUnknown as FIRMWARE_TYPE_UNKNOWN,
+        GetFirmwareType,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::{
+        GetFirmwareEnvironmentVariableExW, SetFirmwareEnvironmentVariableExW,
+    };
+
+    const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+
+    /// The native adapter has no public constructor. The helper production
+    /// entry point will be the sole owner allowed to instantiate it.
+    #[allow(dead_code)]
+    pub(crate) struct SystemWindowsCalls {
+        token: NativeTokenCalls,
+    }
+
+    impl SystemWindowsCalls {
+        #[allow(dead_code)]
+        fn new() -> Self {
+            Self {
+                token: NativeTokenCalls::new(),
+            }
+        }
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn native_error(error: &Error) -> i32 {
+        match error {
+            Error::PrivilegeEnableFailed { raw_code }
+            | Error::PrivilegeRestoreFailed { raw_code }
+            | Error::FirmwareReadFailed { raw_code }
+            | Error::FirmwareWriteFailed { raw_code }
+            | Error::BootNextUnavailable { raw_code }
+            | Error::ProtectedStoreViolation { raw_code }
+            | Error::StoreReplaceFailed { raw_code }
+            | Error::StoreDurabilityUnknown { raw_code }
+            | Error::PlatformIo { raw_code, .. } => *raw_code,
+            _ => 1,
+        }
+    }
+
+    fn read_firmware(
+        token: &mut NativeTokenCalls,
+        variable: VariableName,
+        buffer_size: usize,
+    ) -> Result<ReadOutcome, Error> {
+        let name = wide(&variable.to_string());
+        let guid = wide(GLOBAL_VARIABLE_GUID);
+        with_system_environment_privilege(token, |_| {
+            let mut bytes = vec![0u8; buffer_size];
+            let mut attributes = 0u32;
+            // SetLastError is required because a zero return is the only
+            // failure signal and the error must be captured immediately.
+            unsafe { SetLastError(0) };
+            let returned = unsafe {
+                GetFirmwareEnvironmentVariableExW(
+                    name.as_ptr(),
+                    guid.as_ptr(),
+                    bytes.as_mut_ptr().cast::<c_void>(),
+                    buffer_size as u32,
+                    &mut attributes,
+                )
+            };
+            let last_error = unsafe { GetLastError() as i32 };
+            if returned == 0 {
+                if last_error == ERROR_INSUFFICIENT_BUFFER {
+                    let required_size = if buffer_size >= MAX_VARIABLE_BYTES {
+                        MAX_VARIABLE_BYTES + 1
+                    } else {
+                        buffer_size.saturating_mul(2).min(MAX_VARIABLE_BYTES)
+                    };
+                    return Ok(ReadOutcome::buffer_too_small(required_size, attributes));
+                }
+                return Ok(ReadOutcome::failure(0, last_error));
+            }
+            let returned = returned as usize;
+            bytes.truncate(returned.min(bytes.len()));
+            Ok(ReadOutcome::success_with_last_error(
+                attributes, bytes, last_error,
+            ))
+        })
+    }
+
+    fn native_set_boot_next(
+        token: &mut NativeTokenCalls,
+        payload: [u8; 2],
+    ) -> Result<(), CallError> {
+        let name = wide("BootNext");
+        let guid = wide(GLOBAL_VARIABLE_GUID);
+        with_system_environment_privilege(token, |_| {
+            // This is the only SetFirmwareEnvironmentVariableExW call in the
+            // crate. A fixed two-byte payload cannot delete a variable.
+            unsafe { SetLastError(0) };
+            let success = unsafe {
+                SetFirmwareEnvironmentVariableExW(
+                    name.as_ptr(),
+                    guid.as_ptr(),
+                    payload.as_ptr().cast::<c_void>(),
+                    payload.len() as u32,
+                    BOOT_ATTRIBUTES,
+                )
+            };
+            let last_error = unsafe { GetLastError() as i32 };
+            if success == 0 {
+                Err(Error::FirmwareWriteFailed {
+                    raw_code: last_error,
+                })
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(|error| CallError::new(native_error(&error)))
+    }
+
+    impl WindowsCalls for SystemWindowsCalls {
+        fn firmware_type(&mut self) -> Result<FirmwareType, CallError> {
+            let mut firmware_type: FIRMWARE_TYPE = FIRMWARE_TYPE_UNKNOWN;
+            unsafe { SetLastError(0) };
+            let success = unsafe { GetFirmwareType(&mut firmware_type) };
+            let last_error = unsafe { GetLastError() as i32 };
+            if success == 0 {
+                return Err(CallError::new(last_error));
+            }
+            Ok(match firmware_type {
+                FIRMWARE_TYPE_UEFI => FirmwareType::Uefi,
+                FIRMWARE_TYPE_BIOS => FirmwareType::Bios,
+                other => FirmwareType::Unknown(other as u32),
+            })
+        }
+
+        fn read_variable(&mut self, variable: VariableName, buffer_size: usize) -> ReadOutcome {
+            match read_firmware(&mut self.token, variable, buffer_size) {
+                Ok(outcome) => outcome,
+                Err(error) => ReadOutcome::failure(0, native_error(&error)),
+            }
+        }
+
+        fn write_boot_next(&mut self, payload: [u8; 2]) -> Result<(), CallError> {
+            native_set_boot_next(&mut self.token, payload)
+        }
+    }
 }
 
 #[cfg(test)]
