@@ -338,6 +338,15 @@ impl<C: WindowsStoreCalls> WindowsProtectedStore<C> {
                 .calls
                 .create_exclusive_file(&self.directory, RECORD_NAME, &SecurityDescriptor::PROTECTED)
                 .map_err(create_error)?;
+            if self.validate_file(&file).is_err() {
+                // CREATE_NEW has already changed durable namespace state. A
+                // returned handle with an unexpected type, reparse state,
+                // containment, identity, or security descriptor therefore
+                // remains an artifact and is never treated as an ordinary
+                // pre-mutation rejection.
+                let raw_code = self.calls.close(file).err().unwrap_or(POLICY_ERROR);
+                return Err(Error::StoreDurabilityUnknown { raw_code });
+            }
             let result = self.write_and_flush(&mut file, &bytes);
             let close_result = self.calls.close(file);
             if let Err(error) = result {
@@ -1029,7 +1038,8 @@ mod native {
                 descriptor_end,
                 acl_start,
                 std::mem::size_of::<ACL>(),
-            ) {
+            ) || !acl_start.is_multiple_of(std::mem::align_of::<ACL>())
+            {
                 return Err(POLICY_ERROR);
             }
             let mut control = 0u16;
@@ -1433,6 +1443,9 @@ mod tests {
         close_error: Option<i32>,
         remove_error: Option<i32>,
         opened_records: usize,
+        create_kind: Option<ObjectKind>,
+        create_reparse: bool,
+        create_security: Option<SecurityDescriptor>,
     }
 
     impl TestCalls {
@@ -1446,6 +1459,9 @@ mod tests {
                 close_error: None,
                 remove_error: None,
                 opened_records: 0,
+                create_kind: None,
+                create_reparse: false,
+                create_security: None,
             }
         }
 
@@ -1540,10 +1556,18 @@ mod tests {
             security: &SecurityDescriptor,
         ) -> Result<Self::Handle, i32> {
             self.events.push(format!("create:{name}"));
-            Ok(TestHandle {
+            let mut handle = TestHandle {
                 security: *security,
                 ..self.file(name, Vec::new())
-            })
+            };
+            if let Some(kind) = self.create_kind {
+                handle.metadata.kind = kind;
+            }
+            handle.metadata.reparse_point = self.create_reparse;
+            if let Some(security) = self.create_security {
+                handle.security = security;
+            }
+            Ok(handle)
         }
 
         fn write(&mut self, handle: &mut Self::Handle, bytes: &[u8]) -> Result<usize, i32> {
@@ -1824,6 +1848,49 @@ mod tests {
                 .iter()
                 .any(|event| event.starts_with("remove:"))
         );
+    }
+
+    #[test]
+    fn first_create_rejects_returned_handle_anomalies_before_write() {
+        let cases = [
+            (Some(ObjectKind::Directory), false, None),
+            (None, true, None),
+            (
+                None,
+                false,
+                Some(SecurityDescriptor {
+                    owner: Owner::Other,
+                    dacl: Dacl::PROTECTED,
+                }),
+            ),
+        ];
+        for (kind, reparse, security) in cases {
+            let mut calls = TestCalls::new(None);
+            calls.create_kind = kind;
+            calls.create_reparse = reparse;
+            calls.create_security = security;
+            let mut store =
+                WindowsProtectedStore::open(calls, OperationCapability::for_testing()).unwrap();
+            assert_eq!(
+                store.save(&target()),
+                Err(Error::StoreDurabilityUnknown {
+                    raw_code: POLICY_ERROR
+                })
+            );
+            let calls = store.into_calls();
+            assert!(
+                calls
+                    .events
+                    .iter()
+                    .any(|event| event == "create:targets.json")
+            );
+            assert!(
+                !calls
+                    .events
+                    .iter()
+                    .any(|event| event == "write:targets.json")
+            );
+        }
     }
 
     #[test]
