@@ -15,6 +15,7 @@ pub const MAX_RECORD_BYTES: usize = 1_048_576;
 pub const RECORD_NAME: &str = "targets.json";
 pub const TEMP_PREFIX: &str = ".targets-";
 const POLICY_ERROR: i32 = 1;
+const NATIVE_AMBIGUITY: i32 = i32::MIN;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// An opaque proof supplied by the trusted helper after it has acquired the
@@ -318,9 +319,9 @@ impl<C: WindowsStoreCalls> WindowsProtectedStore<C> {
         let close = self.calls.close(file);
         let remove = self.calls.remove_file(&self.directory, name);
         if let Err(raw_code) = close {
-            return Err(io(PlatformOperation::Open, raw_code));
+            return Err(cleanup_error(raw_code));
         }
-        remove.map_err(|raw_code| io(PlatformOperation::Open, raw_code))
+        remove.map_err(cleanup_error)
     }
 
     fn save_inner(&mut self, target: &TargetRecord) -> Result<(), Error> {
@@ -336,7 +337,7 @@ impl<C: WindowsStoreCalls> WindowsProtectedStore<C> {
             let mut file = self
                 .calls
                 .create_exclusive_file(&self.directory, RECORD_NAME, &SecurityDescriptor::PROTECTED)
-                .map_err(|e| io(PlatformOperation::Open, e))?;
+                .map_err(create_error)?;
             let result = self.write_and_flush(&mut file, &bytes);
             let close_result = self.calls.close(file);
             if let Err(error) = result {
@@ -370,7 +371,7 @@ impl<C: WindowsStoreCalls> WindowsProtectedStore<C> {
         let mut temporary = self
             .calls
             .create_exclusive_file(&self.directory, &name, &SecurityDescriptor::PROTECTED)
-            .map_err(|e| io(PlatformOperation::Open, e))?;
+            .map_err(create_error)?;
         if let Err(error) = self
             .validate_file(&temporary)
             .and_then(|_| self.write_and_flush(&mut temporary, &bytes))
@@ -380,7 +381,7 @@ impl<C: WindowsStoreCalls> WindowsProtectedStore<C> {
         if let Err(error) = self.calls.close(temporary) {
             let cleanup = self.calls.remove_file(&self.directory, &name);
             return Err(cleanup
-                .map_err(|raw_code| io(PlatformOperation::Open, raw_code))
+                .map_err(cleanup_error)
                 .err()
                 .unwrap_or_else(|| io(PlatformOperation::Open, error)));
         }
@@ -391,7 +392,13 @@ impl<C: WindowsStoreCalls> WindowsProtectedStore<C> {
             // ReplaceFileW may have completed the rename before reporting a
             // failure. Never delete the replacement in this state and never
             // retry; the artifact is part of the durability-unknown outcome.
-            return Err(Error::StoreDurabilityUnknown { raw_code: error });
+            return Err(Error::StoreDurabilityUnknown {
+                raw_code: if error == NATIVE_AMBIGUITY {
+                    POLICY_ERROR
+                } else {
+                    error
+                },
+            });
         }
         if let Err(_error) = self.revalidate_directory_and_record() {
             return Err(Error::StoreDurabilityUnknown {
@@ -470,6 +477,46 @@ fn io(operation: PlatformOperation, raw_code: i32) -> Error {
     }
 }
 
+fn create_error(raw_code: i32) -> Error {
+    if raw_code == NATIVE_AMBIGUITY {
+        Error::StoreDurabilityUnknown {
+            raw_code: POLICY_ERROR,
+        }
+    } else {
+        io(PlatformOperation::Open, raw_code)
+    }
+}
+
+fn cleanup_error(raw_code: i32) -> Error {
+    if raw_code == NATIVE_AMBIGUITY {
+        Error::StoreDurabilityUnknown {
+            raw_code: POLICY_ERROR,
+        }
+    } else {
+        io(PlatformOperation::Open, raw_code)
+    }
+}
+
+fn known_folder_result(hr: i32, pointer_is_null: bool) -> Result<(), i32> {
+    if hr < 0 || pointer_is_null {
+        Err(if hr < 0 { hr } else { POLICY_ERROR })
+    } else {
+        Ok(())
+    }
+}
+
+fn contains_range(base: usize, end: usize, start: usize, length: usize) -> bool {
+    start >= base
+        && start <= end
+        && start
+            .checked_add(length)
+            .is_some_and(|range_end| range_end <= end)
+}
+
+fn identity_matches(expected: u128, observed: Option<u128>) -> bool {
+    observed == Some(expected)
+}
+
 fn policy(raw_code: i32) -> Error {
     Error::ProtectedStoreViolation { raw_code }
 }
@@ -519,6 +566,8 @@ enum AcePrincipal {
     System,
     Administrators,
     Ordinary,
+    Everyone,
+    AuthenticatedUsers,
     Unknown,
 }
 
@@ -534,18 +583,14 @@ struct AceFact {
     kind: AceKind,
     principal: AcePrincipal,
     mask: u32,
-    inherited: bool,
+    flags: u8,
 }
 
 const FULL_CONTROL_MASK: u32 = 0x001f01ff;
-const MUTATION_MASK: u32 = 0x0000_0002
-    | 0x0000_0004
-    | 0x0000_0010
-    | 0x0000_0040
-    | 0x0000_0100
-    | 0x0001_0000
-    | 0x0004_0000
-    | 0x0008_0000;
+// Explicit read/list/traverse/read-attribute/read-EA/read-control/synchronize
+// rights. Generic bits and all write/delete/security rights are intentionally
+// absent: native ACE masks are expected to contain their mapped concrete bits.
+const ROOT_READ_ALLOWED_MASK: u32 = 0x0012_00a9;
 
 /// Reduce an already-parsed native descriptor to closed policy facts. Every
 /// ACE must be understood; no deny, inherited, unknown, duplicate, or extra
@@ -569,7 +614,12 @@ fn reduce_security_descriptor(
     let mut administrators = false;
     let mut ordinary = false;
     for ace in aces {
-        if ace.inherited || ace.kind != AceKind::Allow {
+        // OBJECT_INHERIT (0x01), CONTAINER_INHERIT (0x02), NO_PROPAGATE
+        // (0x04), INHERIT_ONLY (0x08), INHERITED (0x10), SUCCESS_AUDIT
+        // (0x40), FAILURE_AUDIT (0x80), and every unknown combination are
+        // rejected. Protected store ACEs are explicit, non-propagating
+        // allow ACEs only; the root read exception uses the same exact set.
+        if ace.flags != 0 || ace.kind != AceKind::Allow {
             return Err(POLICY_ERROR);
         }
         match ace.principal {
@@ -577,12 +627,16 @@ fn reduce_security_descriptor(
             AcePrincipal::Administrators if ace.mask == FULL_CONTROL_MASK && !administrators => {
                 administrators = true
             }
-            AcePrincipal::Ordinary if allow_root_read && ace.mask & MUTATION_MASK == 0 => {
+            AcePrincipal::Ordinary
+                if allow_root_read && ace.mask != 0 && ace.mask & !ROOT_READ_ALLOWED_MASK == 0 =>
+            {
                 ordinary = true
             }
             AcePrincipal::System
             | AcePrincipal::Administrators
             | AcePrincipal::Ordinary
+            | AcePrincipal::Everyone
+            | AcePrincipal::AuthenticatedUsers
             | AcePrincipal::Unknown => return Err(POLICY_ERROR),
         }
     }
@@ -617,10 +671,13 @@ mod native {
     use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
-        EqualSid, GetAce, GetSecurityDescriptorControl, IsValidSid, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, WELL_KNOWN_SID_TYPE,
-        WinAuthenticatedUserSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, WinWorldSid,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_INFORMATION_CLASS, ACL_REVISION,
+        ACL_SIZE_INFORMATION, AclSizeInformation, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorControl,
+        GetSecurityDescriptorLength, IsValidAcl, IsValidSecurityDescriptor, IsValidSid,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, WELL_KNOWN_SID_TYPE, WinAuthenticatedUserSid,
+        WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WinLocalSystemSid, WinWorldSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -673,11 +730,18 @@ mod native {
         if directory {
             flags |= FILE_FLAG_BACKUP_SEMANTICS;
         }
+        // Directory handles are held for the lifetime of the store and do
+        // not share DELETE, preventing ordinary parent rename/delete while a
+        // path-based ReplaceFileW/remove operation is in flight. SYSTEM or
+        // Administrators can still bypass sharing; those equal-privilege
+        // races are detected by the before/after identity checks.
+        let share =
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if directory { 0 } else { FILE_SHARE_DELETE };
         let raw_handle = unsafe {
             CreateFileW(
                 wide_path.as_ptr(),
                 FILE_GENERIC_READ | if write { FILE_GENERIC_WRITE } else { 0 },
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                share,
                 std::ptr::null(),
                 OPEN_EXISTING,
                 flags | FILE_ATTRIBUTE_NORMAL,
@@ -818,7 +882,7 @@ mod native {
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 &attributes,
                 CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                 std::ptr::null_mut(),
             )
         };
@@ -857,10 +921,9 @@ mod native {
     unsafe fn sid_kind(sid: PSID) -> AcePrincipal {
         let system = well_known(WinLocalSystemSid).ok();
         let administrators = well_known(WinBuiltinAdministratorsSid).ok();
-        let ordinary = [
-            well_known(WinWorldSid).ok(),
-            well_known(WinAuthenticatedUserSid).ok(),
-        ];
+        let everyone = well_known(WinWorldSid).ok();
+        let authenticated_users = well_known(WinAuthenticatedUserSid).ok();
+        let ordinary = well_known(WinBuiltinUsersSid).ok();
         if unsafe { IsValidSid(sid) } == 0 {
             return AcePrincipal::Unknown;
         }
@@ -874,10 +937,19 @@ mod native {
             .is_some_and(|known| unsafe { EqualSid(sid, known.as_ptr().cast_mut().cast()) != 0 })
         {
             AcePrincipal::Administrators
+        } else if everyone
+            .as_deref()
+            .is_some_and(|known| unsafe { EqualSid(sid, known.as_ptr().cast_mut().cast()) != 0 })
+        {
+            AcePrincipal::Everyone
+        } else if authenticated_users
+            .as_deref()
+            .is_some_and(|known| unsafe { EqualSid(sid, known.as_ptr().cast_mut().cast()) != 0 })
+        {
+            AcePrincipal::AuthenticatedUsers
         } else if ordinary
-            .iter()
-            .flatten()
-            .any(|known| unsafe { EqualSid(sid, known.as_ptr().cast_mut().cast()) != 0 })
+            .as_deref()
+            .is_some_and(|known| unsafe { EqualSid(sid, known.as_ptr().cast_mut().cast()) != 0 })
         {
             AcePrincipal::Ordinary
         } else {
@@ -893,6 +965,39 @@ mod native {
     ) -> Result<SecurityDescriptor, i32> {
         (|| {
             if owner_sid.is_null() || dacl.is_null() || descriptor.is_null() {
+                return Err(POLICY_ERROR);
+            }
+            if unsafe { IsValidSecurityDescriptor(descriptor) } == 0 {
+                return Err(POLICY_ERROR);
+            }
+            let descriptor_start = descriptor as usize;
+            let descriptor_length = unsafe { GetSecurityDescriptorLength(descriptor) } as usize;
+            let Some(descriptor_end) = descriptor_start.checked_add(descriptor_length) else {
+                return Err(POLICY_ERROR);
+            };
+            if descriptor_length == 0 {
+                return Err(POLICY_ERROR);
+            }
+            let sid_header_size = 8usize;
+            if !contains_range(
+                descriptor_start,
+                descriptor_end,
+                owner_sid as usize,
+                sid_header_size,
+            ) || !(owner_sid as usize).is_multiple_of(std::mem::align_of::<u32>())
+                || unsafe { IsValidSid(owner_sid) } == 0
+            {
+                return Err(POLICY_ERROR);
+            }
+            let owner_sid_length = unsafe { GetLengthSid(owner_sid) } as usize;
+            if owner_sid_length < sid_header_size
+                || !contains_range(
+                    descriptor_start,
+                    descriptor_end,
+                    owner_sid as usize,
+                    owner_sid_length,
+                )
+            {
                 return Err(POLICY_ERROR);
             }
             let owner = unsafe { sid_kind(owner_sid) };
@@ -918,6 +1023,15 @@ mod native {
             {
                 return Err(POLICY_ERROR);
             }
+            let acl_start = observed_dacl as usize;
+            if !contains_range(
+                descriptor_start,
+                descriptor_end,
+                acl_start,
+                std::mem::size_of::<ACL>(),
+            ) {
+                return Err(POLICY_ERROR);
+            }
             let mut control = 0u16;
             let mut revision = 0u32;
             if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0
@@ -925,10 +1039,58 @@ mod native {
                 return Err(POLICY_ERROR);
             }
             let acl = unsafe { &*observed_dacl };
-            if acl.AclRevision != 2 {
+            let Some(acl_end_capacity) = acl_start.checked_add(usize::from(acl.AclSize)) else {
+                return Err(POLICY_ERROR);
+            };
+            if acl.AclSize < std::mem::size_of::<ACL>() as u16
+                || !contains_range(
+                    descriptor_start,
+                    descriptor_end,
+                    acl_start,
+                    usize::from(acl.AclSize),
+                )
+                || unsafe { IsValidAcl(observed_dacl) } == 0
+            {
+                return Err(POLICY_ERROR);
+            }
+            if acl.AclRevision != ACL_REVISION as u8 {
+                return Err(POLICY_ERROR);
+            }
+            let mut size_info = ACL_SIZE_INFORMATION {
+                AceCount: 0,
+                AclBytesInUse: 0,
+                AclBytesFree: 0,
+            };
+            if unsafe {
+                GetAclInformation(
+                    observed_dacl,
+                    (&mut size_info as *mut ACL_SIZE_INFORMATION).cast(),
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation as ACL_INFORMATION_CLASS,
+                )
+            } == 0
+                || size_info.AceCount != u32::from(acl.AceCount)
+                || size_info.AclBytesInUse < std::mem::size_of::<ACL>() as u32
+                || size_info.AclBytesInUse > u32::from(acl.AclSize)
+                || !contains_range(
+                    descriptor_start,
+                    descriptor_end,
+                    acl_start,
+                    size_info.AclBytesInUse as usize,
+                )
+            {
+                return Err(POLICY_ERROR);
+            }
+            let acl_end = acl_start
+                .checked_add(size_info.AclBytesInUse as usize)
+                .ok_or(POLICY_ERROR)?;
+            if acl_end > acl_end_capacity {
                 return Err(POLICY_ERROR);
             }
             let mut facts = Vec::with_capacity(acl.AceCount as usize);
+            let mut expected_ace_start = acl_start
+                .checked_add(std::mem::size_of::<ACL>())
+                .ok_or(POLICY_ERROR)?;
             for index in 0..acl.AceCount {
                 let mut raw_ace = std::ptr::null_mut();
                 if unsafe { GetAce(observed_dacl, index as u32, &mut raw_ace) } == 0
@@ -936,12 +1098,46 @@ mod native {
                 {
                     return Err(POLICY_ERROR);
                 }
+                let ace_start = raw_ace as usize;
+                if !contains_range(
+                    acl_start,
+                    acl_end,
+                    ace_start,
+                    std::mem::size_of::<ACE_HEADER>(),
+                ) {
+                    return Err(POLICY_ERROR);
+                }
+                if ace_start != expected_ace_start
+                    || !ace_start.is_multiple_of(std::mem::align_of::<ACE_HEADER>())
+                {
+                    return Err(POLICY_ERROR);
+                }
                 let header = unsafe { &*(raw_ace.cast::<ACE_HEADER>()) };
-                if header.AceSize < std::mem::size_of::<ACCESS_ALLOWED_ACE>() as u16 {
+                let ace_size = usize::from(header.AceSize);
+                let Some(ace_end) = ace_start.checked_add(ace_size) else {
+                    return Err(POLICY_ERROR);
+                };
+                if ace_size < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+                    || !ace_size.is_multiple_of(std::mem::align_of::<ACE_HEADER>())
+                    || !contains_range(acl_start, acl_end, ace_start, ace_size)
+                {
                     return Err(POLICY_ERROR);
                 }
                 let ace = unsafe { &*(raw_ace.cast::<ACCESS_ALLOWED_ACE>()) };
                 let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                let sid_start = sid as usize;
+                if !contains_range(ace_start, ace_end, sid_start, sid_header_size)
+                    || !sid_start.is_multiple_of(std::mem::align_of::<u32>())
+                    || unsafe { IsValidSid(sid) } == 0
+                {
+                    return Err(POLICY_ERROR);
+                }
+                let sid_length = unsafe { GetLengthSid(sid) } as usize;
+                if sid_length < sid_header_size
+                    || !contains_range(ace_start, ace_end, sid_start, sid_length)
+                {
+                    return Err(POLICY_ERROR);
+                }
                 facts.push(AceFact {
                     kind: match header.AceType {
                         0 => AceKind::Allow,
@@ -950,8 +1146,12 @@ mod native {
                     },
                     principal: unsafe { sid_kind(sid) },
                     mask: ace.Mask,
-                    inherited: header.AceFlags & 0x10 != 0,
+                    flags: header.AceFlags,
                 });
+                expected_ace_start = ace_end;
+            }
+            if expected_ace_start != acl_end {
+                return Err(POLICY_ERROR);
             }
             reduce_security_descriptor(
                 owner,
@@ -975,9 +1175,7 @@ mod native {
                     &mut raw_path,
                 )
             };
-            if hr < 0 {
-                return Err(hr);
-            }
+            known_folder_result(hr, raw_path.is_null())?;
             let mut len = 0;
             while unsafe { *raw_path.add(len) } != 0 {
                 len += 1;
@@ -1099,8 +1297,14 @@ mod native {
                 trusted_root: false,
                 parent_id: Some(parent_id),
             };
-            if object_id(parent)? != parent_id || !is_direct_child(parent, &created)? {
-                return Err(POLICY_ERROR);
+            let parent_unchanged = identity_matches(parent_id, object_id(parent).ok())
+                && final_path(parent).ok().as_deref() == path.parent();
+            let child_is_direct = is_direct_child(parent, &created).unwrap_or(false);
+            if !parent_unchanged || !child_is_direct {
+                // The CREATE_NEW mutation happened, but its resulting
+                // identity/containment cannot be established. Preserve the
+                // artifact and make the store report durability unknown.
+                return Err(NATIVE_AMBIGUITY);
             }
             Ok(created)
         }
@@ -1136,15 +1340,15 @@ mod native {
             // unavoidable path-based ReplaceFileW call.
             let target_handle = open_child(parent, record_name, false)?;
             let replacement_handle = open_child(parent, temporary_name, false)?;
-            if object_id(parent)? != parent_id
-                || object_id(&target_handle)? == object_id(&replacement_handle)?
+            let replacement_id = object_id(&replacement_handle)?;
+            if !identity_matches(parent_id, Some(object_id(parent)?))
+                || object_id(&target_handle)? == replacement_id
+                || final_path(parent)? != parent_path
             {
                 return Err(POLICY_ERROR);
             }
             validate_child_file(self, parent, &target_handle)?;
             validate_child_file(self, parent, &replacement_handle)?;
-            drop(target_handle);
-            drop(replacement_handle);
             let target = wide(&parent_path.join(record_name));
             let replacement = wide(&parent_path.join(temporary_name));
             let ok = unsafe {
@@ -1157,17 +1361,49 @@ mod native {
                     std::ptr::null_mut(),
                 )
             };
-            if ok == 0 { Err(raw()) } else { Ok(()) }
+            let replace_error = if ok == 0 { Some(raw()) } else { None };
+            let parent_unchanged = identity_matches(parent_id, object_id(parent).ok())
+                && final_path(parent).ok().as_deref() == Some(parent_path.as_path());
+            let after = if parent_unchanged {
+                open_child(parent, record_name, false).and_then(|after_handle| {
+                    validate_child_file(self, parent, &after_handle)?;
+                    if object_id(&after_handle)? != replacement_id {
+                        return Err(NATIVE_AMBIGUITY);
+                    }
+                    Ok(())
+                })
+            } else {
+                Err(NATIVE_AMBIGUITY)
+            };
+            // ReplaceFileW has no compare-and-swap contract. Preserve its
+            // exact failure if it failed; otherwise any post-call identity
+            // divergence is an ambiguous mutation and is never success.
+            match (replace_error, after) {
+                (Some(error), _) => Err(error),
+                (None, Ok(())) => Ok(()),
+                (None, Err(error)) => Err(if error == POLICY_ERROR {
+                    NATIVE_AMBIGUITY
+                } else {
+                    error
+                }),
+            }
         }
         fn remove_file(&mut self, parent: &Self::Handle, name: &str) -> Result<(), i32> {
             let parent_id = object_id(parent)?;
+            let parent_path = final_path(parent)?;
             let child = open_child(parent, name, false)?;
-            validate_child_file(self, parent, &child)?;
-            drop(child);
-            let path = final_path(parent)?.join(name);
-            let result = std::fs::remove_file(path).map_err(|e| e.raw_os_error().unwrap_or(1));
-            if object_id(parent)? != parent_id {
+            if !identity_matches(parent_id, Some(object_id(parent)?))
+                || final_path(parent)? != parent_path
+            {
                 return Err(POLICY_ERROR);
+            }
+            validate_child_file(self, parent, &child)?;
+            let path = parent_path.join(name);
+            let result = std::fs::remove_file(path).map_err(|e| e.raw_os_error().unwrap_or(1));
+            let parent_unchanged = identity_matches(parent_id, object_id(parent).ok())
+                && final_path(parent).ok().as_deref() == Some(parent_path.as_path());
+            if !parent_unchanged {
+                return Err(NATIVE_AMBIGUITY);
             }
             result
         }
@@ -1377,7 +1613,7 @@ mod tests {
             kind: AceKind::Allow,
             principal,
             mask,
-            inherited: false,
+            flags: 0,
         }
     }
 
@@ -1410,6 +1646,18 @@ mod tests {
                 Owner::System,
                 true,
                 true,
+                vec![ace(AcePrincipal::Everyone, FULL_CONTROL_MASK)],
+            ),
+            (
+                Owner::System,
+                true,
+                true,
+                vec![ace(AcePrincipal::AuthenticatedUsers, FULL_CONTROL_MASK)],
+            ),
+            (
+                Owner::System,
+                true,
+                true,
                 vec![ace(AcePrincipal::Unknown, FULL_CONTROL_MASK)],
             ),
             (
@@ -1426,7 +1674,7 @@ mod tests {
                 true,
                 true,
                 vec![AceFact {
-                    inherited: true,
+                    flags: 0x10,
                     ..ace(AcePrincipal::System, FULL_CONTROL_MASK)
                 }],
             ),
@@ -1452,10 +1700,73 @@ mod tests {
         extra[0].mask |= 0x8000_0000;
         assert!(reduce_security_descriptor(Owner::System, true, true, &extra, false).is_err());
         let mut root = exact();
-        root.push(ace(AcePrincipal::Ordinary, 0x120089));
+        root.push(ace(AcePrincipal::Ordinary, ROOT_READ_ALLOWED_MASK));
         assert!(reduce_security_descriptor(Owner::System, true, false, &root, true).is_ok());
         root[2].mask |= 2;
         assert!(reduce_security_descriptor(Owner::System, true, false, &root, true).is_err());
+    }
+
+    #[test]
+    fn descriptor_parser_rejects_every_ace_propagation_and_audit_flag() {
+        for flags in [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xff] {
+            let facts = vec![AceFact {
+                flags,
+                ..ace(AcePrincipal::System, FULL_CONTROL_MASK)
+            }];
+            assert!(reduce_security_descriptor(Owner::System, true, true, &facts, false).is_err());
+        }
+    }
+
+    #[test]
+    fn root_ordinary_access_accepts_only_positive_read_allowlist() {
+        let mut facts = exact();
+        facts.push(ace(AcePrincipal::Ordinary, ROOT_READ_ALLOWED_MASK));
+        assert!(reduce_security_descriptor(Owner::System, true, false, &facts, true).is_ok());
+        for forbidden in [
+            0,
+            0x0000_0002,
+            0x0001_0000,
+            0x0004_0000,
+            0x0008_0000,
+            0x8000_0000,
+            0x2000_0000,
+            ROOT_READ_ALLOWED_MASK | 0x0000_0002,
+        ] {
+            let mut hostile = exact();
+            hostile.push(ace(AcePrincipal::Ordinary, forbidden));
+            assert!(
+                reduce_security_descriptor(Owner::System, true, false, &hostile, true).is_err(),
+                "mask {forbidden:#x} unexpectedly accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn native_boundary_helpers_fail_closed_for_null_known_folder_results() {
+        assert!(known_folder_result(0, false).is_ok());
+        assert_eq!(known_folder_result(0, true), Err(POLICY_ERROR));
+        assert_eq!(known_folder_result(-1, true), Err(-1));
+    }
+
+    #[test]
+    fn descriptor_range_helper_rejects_before_after_overflow_and_trailing_ranges() {
+        assert!(contains_range(100, 200, 100, 100));
+        assert!(contains_range(100, 200, 120, 80));
+        assert!(!contains_range(100, 200, 99, 1));
+        assert!(!contains_range(100, 200, 150, 51));
+        assert!(!contains_range(
+            usize::MAX - 4,
+            usize::MAX,
+            usize::MAX - 2,
+            8
+        ));
+    }
+
+    #[test]
+    fn held_identity_divergence_is_never_treated_as_stable() {
+        assert!(identity_matches(7, Some(7)));
+        assert!(!identity_matches(7, Some(8)));
+        assert!(!identity_matches(7, None));
     }
 
     #[test]
