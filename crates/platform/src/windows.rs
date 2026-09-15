@@ -6,6 +6,7 @@
 
 pub mod firmware;
 pub mod privilege;
+pub mod store;
 
 pub use firmware::{
     BOOT_ATTRIBUTES, BOOT_CURRENT_ATTRIBUTES, CallError, FirmwareType, GLOBAL_VARIABLE_GUID,
