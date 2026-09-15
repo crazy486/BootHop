@@ -20,11 +20,20 @@ fn previous_state_layout_valid(
     capacity: usize,
     entry_size: usize,
 ) -> bool {
-    return_length >= size_of::<u32>()
-        && return_length <= capacity
-        && entry_size != 0
-        && (return_length - size_of::<u32>()).is_multiple_of(entry_size)
-        && count <= (return_length - size_of::<u32>()) / entry_size
+    if return_length > capacity || entry_size == 0 {
+        return false;
+    }
+    // A zero-entry TOKEN_PRIVILEGES result is represented by its DWORD
+    // PrivilegeCount header alone. Do not accept a larger buffer with no
+    // entries: those bytes would be unconsumed native state.
+    if count == 0 {
+        return_length == size_of::<u32>()
+    } else {
+        count
+            .checked_mul(entry_size)
+            .and_then(|entries| entries.checked_add(size_of::<u32>()))
+            == Some(return_length)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -426,9 +435,12 @@ mod tests {
 
     #[test]
     fn malformed_previous_state_lengths_and_counts_are_rejected() {
-        assert!(!previous_state_layout_valid(65, 1, 64, 16));
-        assert!(!previous_state_layout_valid(3, 0, 64, 16));
-        assert!(!previous_state_layout_valid(20, 2, 64, 16));
-        assert!(previous_state_layout_valid(20, 1, 64, 16));
+        assert!(previous_state_layout_valid(16, 1, 64, 12));
+        assert!(!previous_state_layout_valid(28, 1, 64, 12));
+        assert!(previous_state_layout_valid(28, 2, 64, 12));
+        assert!(!previous_state_layout_valid(15, 1, 64, 12));
+        assert!(!previous_state_layout_valid(17, 1, 64, 12));
+        assert!(previous_state_layout_valid(4, 0, 64, 12));
+        assert!(!previous_state_layout_valid(16, 0, 64, 12));
     }
 }
