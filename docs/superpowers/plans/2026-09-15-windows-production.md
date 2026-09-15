@@ -67,15 +67,32 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
 - Modify: `crates/core/src/error.rs`
 - Modify: `crates/core/src/flow.rs`
 - Modify: `crates/core/tests/flow.rs`
+- Modify: `crates/core/tests/support/mod.rs`
 - Modify: `crates/protocol/src/lib.rs`
 - Modify: `crates/helper/tests/protocol.rs`
+- Modify: `crates/platform/src/linux.rs`
+- Modify: `crates/platform/src/linux/firmware.rs`
+- Modify: `crates/platform/src/linux/store.rs`
+- Modify: `crates/platform/tests/linux_adapter.rs`
+- Modify: `crates/platform/tests/store.rs`
+- Modify: `crates/helper/src/dispatch.rs`
+- Modify: `crates/helper/src/lock.rs`
+- Modify: `crates/helper/src/pipe.rs`
+- Modify: `crates/helper/tests/pipe.rs`
+- Modify: `crates/helper/tests/trust.rs`
+- Modify: `crates/gui/src/controller.rs`
+- Modify: `crates/gui/tests/client.rs`
+- Modify: `crates/gui/tests/controller.rs`
 
 **Interfaces:**
 - Add closed rollback outcome/assessment and stages from the spec.
 - Extend `Platform` with the narrow `rollback_next(original, written)` method.
-- Increment the protocol version from 1 to 2 under the spec's atomic package
-  upgrade rule and map every new closed variant both ways; no negotiation or
-  v1 fallback.
+- Map every new closed domain variant both ways while leaving envelope version
+  and request-ID migration to Task 6.
+- Replace free-form `PlatformIo.operation: String` with a closed operation enum
+  and add the spec's closed Windows semantic error variants. Raw codes remain
+  numeric; no error contains a path, variable/GUID, SID, request ID, option
+  bytes, OptionalData, or identity digest.
 
 - [ ] Add RED core tests for: exact-original restore; safe clear in an
   exclusive fake; same-target pre-existence causing no rollback; rejected
@@ -83,10 +100,9 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
   rollback; write/readback failures causing no speculative rollback;
   concurrent/unsafe/failure outcomes; original `RebootRejected` retained when
   rollback fails; correct residual/stage reporting.
-- [ ] Add RED protocol tests for round trips, strict shape rejection, compact
-  failure preservation, exact nonzero lowercase-hex 128-bit request IDs,
-  response echo/mismatch rejection, compact-response ID retention, and v2-only
-  version rejection.
+- [ ] Add RED protocol tests for rollback/error round trips, strict shape
+  rejection, compact failure preservation, closed operation labels, and proof
+  that seeded sensitive strings cannot appear in encoded errors/reports.
 - [ ] Implement the smallest shared changes. Give the existing Linux fake and
   adapters an explicitly non-mutating `Unsafe` result; do not change Linux
   firmware writes or reboot flow.
@@ -110,6 +126,10 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
   abstractions with no caller-controlled native names or GUID.
 - Pure bounded reader/parser/discovery functions and a private
   `set_boot_next(BootId)` function reachable only by the adapter.
+- `boothop_platform::windows` is portable and always compiled so pure policy
+  and fakes run on Linux and Windows. Only `windows::native` and direct Win32
+  imports are under `cfg(windows)`; non-Windows builds never expose a system
+  constructor.
 
 - [ ] Add RED fake tests for UEFI/non-UEFI/unknown; exact attribute and payload
   shapes; 4 KiB growth to 1 MiB; non-increasing/oversized/truncated results;
@@ -122,8 +142,9 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
   attributes `7`, one call/no retry, and no arbitrary writer surface.
 - [ ] Implement the pure state machine and fake boundary. Do not add native
   imports in this task.
-- [ ] Run `cargo test -p boothop-platform --test windows_firmware`, fmt, and
-  scoped clippy to GREEN on the host without native calls.
+- [ ] Run `cargo test -p boothop-platform --test windows_firmware` on the host,
+  `cargo check -p boothop-platform --target x86_64-pc-windows-msvc`, fmt, and
+  scoped clippy to GREEN without native calls.
 - [ ] Commit as `feat(platform): add Windows firmware state machine`.
 
 ### Task 3: Exact-state privilege scope and native firmware backend
@@ -173,8 +194,7 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
 - [ ] Add RED fake tests for trusted known-folder resolution; root containment;
   reparse/object/owner/DACL rejection; mutation-capable inherited ACE
   rejection; validated absence only; bounded reads; corrupt/unsupported
-  records; fixed global mutex DACL, timeout/abandonment failure, and
-  exactly-once release by the guard primitive.
+  records; store operations must require an already-held operation capability.
 - [ ] Add RED save tests for explicit protected DACL, same-directory exclusive
   temp, bounded encoding, flush/close/replace order, first creation,
   `ReplaceFileW` flags zero, cleanup, ACL revalidation, logical success versus
@@ -214,15 +234,20 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
   scoped clippy.
 - [ ] Commit as `feat(platform): integrate Windows production adapter`.
 
-### Task 6: Protocol authentication and trusted Windows dispatch
+### Task 6: Protocol v2 correlation and trusted Windows dispatch
 
 **Files:**
 - Modify: `crates/protocol/src/lib.rs`
 - Modify: `crates/helper/src/lib.rs`
 - Modify: `crates/helper/src/dispatch.rs`
 - Create: `crates/helper/src/windows.rs`
+- Create: `crates/helper/src/windows/lock.rs`
 - Create: `crates/helper/tests/windows_dispatch.rs`
 - Modify: `crates/helper/tests/protocol.rs`
+- Modify: `crates/gui/src/helper_client.rs`
+- Modify: `crates/gui/src/helper_client/linux.rs`
+- Modify: `crates/gui/tests/client.rs`
+- Modify: `crates/gui/Cargo.toml`
 
 **Interfaces:**
 - Keep authentication out of semantic protocol DTOs: the transport accepts a
@@ -232,16 +257,25 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
 - `run_windows` always calls shared core with `Os::Windows`; system production
   wiring constructs the locked protected store and Windows platform only after
   authentication.
+- `WindowsOperationGuard` is helper-owned RAII. It acquires the fixed secured
+  global mutex before store/platform construction and remains owned by the
+  response-sending stack frame until the terminal send completes.
 
 - [ ] Add RED protocol tests for v2-only hello/request/response, duplicate/
   unknown fields, invalid lengths, arbitrary path/name/GUID/command rejection,
   exact response-ID echo/mismatch handling, frame and aggregate budget, and no
   credential/authenticator field.
+- [ ] Add RED platform-neutral GUI/client tests for fresh nonzero OS-random
+  lowercase-hex IDs, request/response equality, mismatch as unknown-after-send,
+  no reuse, and unchanged Linux launch/authorization classification.
 - [ ] Add RED dispatch tests for non-elevated rejection, single request/single
   response, host OS fixed to Windows, helper revalidation through core,
   authentication-before-request, mutex acquisition before store/firmware work,
   ownership through terminal reporting, timeout/abandonment failure, no retry
   after send, and handle/store lock lifetime.
+- [ ] Add RED guard tests for the exact mutex name and DACL, timeout as `Busy`,
+  abandonment as fail-closed platform error, acquisition ordering, and one
+  release on success/error/unwind only after the terminal-send attempt.
 - [ ] Implement pure authentication and dispatch with injectable boundaries.
   No real pipe or helper entry point is launched in this task.
 - [ ] Run protocol/helper tests, Windows target check, fmt, and scoped clippy.
@@ -261,9 +295,14 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
   PID only.
 - Fakeable pipe/process/token/image/session boundary; Windows-only system
   implementation uses first-instance local named pipe with explicit DACL.
+- A closed helper self-integrity validator checks the current token is elevated
+  and high-integrity and canonicalizes the current executable by an opened
+  process/file handle before exact comparison with the fixed installed helper
+  identity; it accepts no caller-supplied expected path.
 
 - [ ] Add RED pure/fake tests for exact argument grammar; traversal/extra/
-  duplicate/malformed arguments; first-instance and remote rejection; one
+  duplicate/malformed/overlong/relative-path/command-shaped arguments;
+  non-elevated/low-integrity or wrong/reparse/changed helper image; first-instance and remote rejection; one
   connection; explicit allowed principals/minimum rights; server PID/session/
   fixed GUI image/continuous-process verification; generic pre-request auth
   failure; exact pipe/request/response ID correlation; proof no command-line
@@ -322,7 +361,8 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
 
 - [ ] Add RED cache tests for fixed known-folder resolution, absolute
   containment, reparse/oversize/malformed handling, atomic user-file update,
-  sanitized descriptions, and no identity/raw-data fields.
+  sanitization before persistence (controls, invalid UTF-16, bidi controls),
+  and no identity/raw-data fields in persisted bytes.
 - [ ] Add RED controller/static tests for distinct validated/BootNext/reboot/
   rollback/unknown-after-send messages and proof the GUI source has no firmware,
   privilege, reboot, BCD, arbitrary process, or generic writer capability.
@@ -354,6 +394,9 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
   placeholders; no service/autostart/driver/BCD behavior.
 - GitHub Windows job compiles and runs only pure/fake tests and static/package
   audits.
+- `.github/workflows/test.yml` adds job `windows` on `windows-latest`, uses
+  `actions/checkout@v4` and `dtolnay/rust-toolchain@1.98.1` with rustfmt/clippy,
+  and never executes a built BootHop binary directly.
 
 - [ ] Add RED fake package tests for fixed Program Files/ProgramData layout,
   manifests, no install side effects, no external paths, stable hashes, no
@@ -365,6 +408,15 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
 - [ ] Implement scripts and update CI. The CI job must contain no UAC,
   production helper execution, firmware/BCD, ACL mutation, shutdown, or reboot
   step.
+- [ ] Make the Windows job run, in order: `cargo fmt --check`;
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+  `cargo test --workspace --locked`; `cargo build --workspace --release
+  --locked`; `packaging/windows/tests/package_fake.ps1`;
+  `packaging/windows/stage.ps1` with explicit release GUI/helper inputs and a
+  runner-temp output; `packaging/windows/check-package.ps1`; and
+  `packaging/windows/check-capabilities.ps1` over source plus both produced PEs.
+  Resolve Visual Studio `dumpbin.exe` through installed `vswhere.exe`; missing
+  dumpbin or either PE is a hard job failure, never a skipped audit.
 - [ ] Update acceptance docs with W1--W5 separately authorized stages,
   Windows1W/Stage5 separation, Win32-203 limitation, signing requirement, and
   exact no-overclaim status.
@@ -385,8 +437,9 @@ PowerShell packaging checks, GitHub Actions Windows MSVC CI.
 - [ ] Run `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked
   -- -D warnings`, `cargo test --workspace --locked`, all Windows-target compile
   checks, Linux package/isolation checks, Windows package/capability checks,
-  source audits, PE import audit when a PE can be produced, and clean-worktree/
-  ignore checks.
+  source audits, and the mandatory Windows-CI PE import audit over both GUI and
+  helper. Missing PE/import-tool evidence blocks software completion. Also run
+  clean-worktree/ignore checks.
 - [ ] If Smart App Control 4551 blocks local execution, record the exact error;
   do not weaken policy. Use trusted-target compile/tests where permitted and
   require both GitHub Linux and Windows jobs green before a software-complete

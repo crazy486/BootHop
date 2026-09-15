@@ -407,17 +407,24 @@ production software test.
 
 ## Error mapping
 
-Platform errors retain a fixed operation label and the immediate raw Win32
-code, never a path, variable payload, user SID, request ID, or identity digest.
-The model distinguishes at least:
+Platform errors retain a closed `PlatformOperation` and the immediate raw
+Win32 code, never a path, variable payload, user SID, request ID, or identity
+digest. `PlatformOperation` has only `Open`, `Read`, `Write`, `Metadata`,
+`Lock`, `Flush`, `Replace`, `Ipc`, `Reboot`, `Random`, `Process`, and `Security`;
+protocol v2 has no free-form operation string. The error model has these closed
+Windows semantic variants in addition to the existing shared record/identity/
+flow errors:
 
-- `NotUefi`;
-- `PrivilegeUnavailable` / `PrivilegeEnableFailed` /
-  `PrivilegeRestoreFailed`;
-- `FirmwareReadFailed` / `FirmwareWriteFailed`;
-- `BootNextUnavailable` / `BootNextConflict`;
+- `NotUefi` and `PrivilegeUnavailable`;
+- `PrivilegeEnableFailed { raw_code }` and
+  `PrivilegeRestoreFailed { raw_code }`;
+- `FirmwareReadFailed { raw_code }` and
+  `FirmwareWriteFailed { raw_code }`;
+- `BootNextUnavailable { raw_code }` and existing `BootNextConflict`;
+- `ProtectedStoreViolation { raw_code }` and
+  `StoreReplaceFailed { raw_code }`;
+- existing `StoreDurabilityUnknown { raw_code }`;
 - `TargetMissing` / `IdentityMismatch` / unsupported record or identity;
-- protected-store validation, replacement, and durability failures;
 - `ReadbackFailed`;
 - `RebootRejected` / unknown-after-send;
 - rollback unsafe and rollback failed.
