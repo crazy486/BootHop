@@ -15,7 +15,7 @@ pub enum Reply {
     TimedOutAfterSend,
     NotSent,
 }
-use boothop_core::Error;
+use boothop_core::{Error, PlatformOperation};
 
 pub(crate) fn validate_probe(probe: &Probe) -> Result<(), Error> {
     if probe.effective_uid != 0 {
@@ -182,7 +182,7 @@ pub(crate) fn native_reboot(connection: &Option<zbus::blocking::Connection>, fla
 fn bus_error(error: zbus::Error) -> Error {
     match error {
         zbus::Error::InputOutput(e) | zbus::Error::Connection(e, _) => super::firmware::io(
-            "reboot",
+            PlatformOperation::Reboot,
             e.raw_os_error()
                 .unwrap_or(if e.kind() == std::io::ErrorKind::TimedOut {
                     110
