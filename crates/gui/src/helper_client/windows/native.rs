@@ -1,7 +1,7 @@
 //! Win32 implementation of the GUI transport. This module is never linked
 //! on non-Windows hosts, and all policy inputs are fixed by the parent module.
 
-use super::{FileIdentity, HELPER_IMAGE_PATH, WindowsLaunchSpec, WindowsPipeSpec};
+use super::{FileIdentity, HELPER_IMAGE_PATH, WatchdogState, WindowsLaunchSpec, WindowsPipeSpec};
 use crate::helper_client::{Event, TransportError};
 use boothop_protocol::RequestId;
 use std::{
@@ -11,7 +11,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GetLastError,
-        HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED,
+        HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED, WAIT_OBJECT_0,
     },
     Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -30,7 +30,7 @@ use windows_sys::Win32::{
         PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
     },
     System::{
-        IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED},
+        IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED},
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
             PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -46,6 +46,7 @@ use windows_sys::Win32::{
 const ERROR_CANCELLED: u32 = 1223;
 const ERROR_NOT_FOUND: u32 = 1168;
 const STILL_ACTIVE: u32 = 259;
+const WAIT_TIMEOUT: u32 = 258;
 
 struct Handle(HANDLE);
 impl Drop for Handle {
@@ -54,6 +55,7 @@ impl Drop for Handle {
             && self.0 != INVALID_HANDLE_VALUE
             && unsafe { CloseHandle(self.0) } == 0
         {
+            let _error = unsafe { GetLastError() };
             // A native handle must never disappear silently on a
             // security-critical failure path.
             std::process::abort();
@@ -63,11 +65,14 @@ impl Drop for Handle {
 impl Handle {
     fn close_checked(self) -> Result<(), TransportError> {
         let handle = self.0;
-        std::mem::forget(self);
         if unsafe { CloseHandle(handle) } == 0 {
             let _error = unsafe { GetLastError() };
+            // Keep ownership until Drop retries the close; if that retry also
+            // fails Drop aborts before a security-critical handle is lost.
+            drop(self);
             Err(TransportError::Io)
         } else {
+            std::mem::forget(self);
             Ok(())
         }
     }
@@ -84,33 +89,151 @@ fn free_local(ptr: *mut core::ffi::c_void) -> Result<(), TransportError> {
     }
 }
 
+struct WatchdogShared {
+    state: WatchdogState,
+    worker_started: bool,
+    worker_finished: bool,
+    abort_issued: bool,
+}
+
 struct Watchdog {
-    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shared: std::sync::Arc<(std::sync::Mutex<WatchdogShared>, std::sync::Condvar)>,
+    deadline: Instant,
+    abort: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+enum IoCompletion {
+    Completed(u32),
+    Aborted,
 }
 impl Watchdog {
     fn arm(deadline: Instant) -> Self {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let armed = std::sync::Arc::new(AtomicBool::new(true));
-        let worker = armed.clone();
-        std::thread::Builder::new()
+        Self::arm_with_abort(deadline, std::sync::Arc::new(|| std::process::abort()))
+    }
+    fn arm_with_abort(
+        deadline: Instant,
+        abort: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Self {
+        let shared = std::sync::Arc::new((
+            std::sync::Mutex::new(WatchdogShared {
+                state: WatchdogState::Armed,
+                worker_started: false,
+                worker_finished: false,
+                abort_issued: false,
+            }),
+            std::sync::Condvar::new(),
+        ));
+        let thread_shared = shared.clone();
+        let thread_abort = abort.clone();
+        let worker = std::thread::Builder::new()
             .name("boothop-windows-client-deadline".into())
             .spawn(move || {
-                let now = Instant::now();
-                if deadline > now {
-                    std::thread::sleep(deadline.duration_since(now));
-                }
-                if worker.swap(false, Ordering::AcqRel) {
-                    // Ignored UAC or a stuck Win32 wait is fail-closed. The
-                    // watchdog is intentionally not cancellable by cleanup.
-                    std::process::abort();
+                let (lock, wake) = &*thread_shared;
+                let mut guard = match lock.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => std::process::abort(),
+                };
+                guard.worker_started = true;
+                wake.notify_all();
+                loop {
+                    if guard.state != WatchdogState::Armed {
+                        guard.worker_finished = true;
+                        wake.notify_all();
+                        return;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        guard.state = WatchdogState::Expired;
+                        guard.abort_issued = true;
+                        wake.notify_all();
+                        drop(guard);
+                        thread_abort();
+                        guard = match lock.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => std::process::abort(),
+                        };
+                        guard.worker_finished = true;
+                        wake.notify_all();
+                        return;
+                    }
+                    let remaining = deadline.duration_since(now);
+                    guard = match wake.wait_timeout(guard, remaining) {
+                        Ok((guard, _)) => guard,
+                        Err(_) => std::process::abort(),
+                    };
                 }
             })
-            .expect("watchdog thread must start");
-        Self { armed }
+            .unwrap_or_else(|_| std::process::abort());
+
+        // Do not return until the worker has observed Armed. This closes the
+        // construction race with synchronous ShellExecuteExW/connect work.
+        let (lock, wake) = &*shared;
+        let mut guard = match lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => std::process::abort(),
+        };
+        while !guard.worker_started {
+            guard = match wake.wait(guard) {
+                Ok(guard) => guard,
+                Err(_) => std::process::abort(),
+            };
+        }
+        drop(guard);
+        Self {
+            shared,
+            deadline,
+            abort,
+            worker: Some(worker),
+        }
     }
-    fn disarm(&self) {
-        use std::sync::atomic::Ordering;
-        self.armed.store(false, Ordering::Release);
+    fn disarm(&mut self) {
+        let should_abort = {
+            let (lock, wake) = &*self.shared;
+            let mut guard = match lock.lock() {
+                Ok(guard) => guard,
+                Err(_) => std::process::abort(),
+            };
+            let next = if guard.state == WatchdogState::Armed && Instant::now() < self.deadline {
+                WatchdogState::Disarmed
+            } else if guard.state == WatchdogState::Armed || guard.state == WatchdogState::Expired {
+                WatchdogState::Expired
+            } else {
+                WatchdogState::Disarmed
+            };
+            guard.state = next;
+            let should_abort = next == WatchdogState::Expired && !guard.abort_issued;
+            if should_abort {
+                guard.abort_issued = true;
+            }
+            wake.notify_all();
+            should_abort
+        };
+        if self.worker.is_some() {
+            let (lock, wake) = &*self.shared;
+            let guard = match lock.lock() {
+                Ok(guard) => guard,
+                Err(_) => std::process::abort(),
+            };
+            let (guard, timeout) =
+                match wake.wait_timeout_while(guard, Duration::from_millis(100), |state| {
+                    !state.worker_finished
+                }) {
+                    Ok(value) => value,
+                    Err(_) => std::process::abort(),
+                };
+            if timeout.timed_out() && !guard.worker_finished {
+                std::process::abort();
+            }
+        }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            std::process::abort();
+        }
+        if should_abort {
+            (self.abort)();
+        }
     }
 }
 impl Drop for Watchdog {
@@ -129,6 +252,7 @@ pub struct SystemWindowsBoundary {
     helper_pid: u32,
     session_id: u32,
     connected: bool,
+    request_committed: bool,
     cleanup_error: Option<TransportError>,
 }
 
@@ -144,6 +268,7 @@ impl Default for SystemWindowsBoundary {
             helper_pid: 0,
             session_id: 0,
             connected: false,
+            request_committed: false,
             cleanup_error: None,
         }
     }
@@ -276,9 +401,15 @@ impl SystemWindowsBoundary {
         deadline: Duration,
     ) -> Result<u32, TransportError> {
         let end = self.io_deadline(deadline);
-        let remaining = end
-            .checked_duration_since(Instant::now())
-            .ok_or(TransportError::Timeout)?;
+        let remaining = match end.checked_duration_since(Instant::now()) {
+            Some(remaining) => remaining,
+            None => {
+                return match Self::cancel_and_join(handle, overlapped)? {
+                    IoCompletion::Completed(bytes) => Ok(bytes),
+                    IoCompletion::Aborted => Err(TransportError::Timeout),
+                };
+            }
+        };
         let timeout = remaining.as_millis().min(u128::from(u32::MAX)) as u32;
         let mut transferred = 0;
         if unsafe { GetOverlappedResultEx(handle, overlapped, &mut transferred, timeout, 1) } != 0 {
@@ -288,30 +419,61 @@ impl SystemWindowsBoundary {
         // Cancellation is followed by a completion barrier before the event,
         // OVERLAPPED, and its backing buffer can be released.
         if error == 1460 || error == 258 {
-            let cancel = unsafe { CancelIoEx(handle, overlapped) };
-            let cancel_error = if cancel == 0 {
-                unsafe { GetLastError() }
-            } else {
-                0
+            return match Self::cancel_and_join(handle, overlapped)? {
+                IoCompletion::Completed(bytes) => Ok(bytes),
+                IoCompletion::Aborted => Err(TransportError::Timeout),
             };
-            let mut completed = 0;
-            let barrier =
-                unsafe { GetOverlappedResultEx(handle, overlapped, &mut completed, 1_000, 1) };
-            let barrier_error = if barrier == 0 {
-                unsafe { GetLastError() }
-            } else {
-                0
-            };
-            if barrier_error != 0 && barrier_error != ERROR_OPERATION_ABORTED {
-                return Err(TransportError::Io);
-            }
-            if cancel_error != 0 && cancel_error != ERROR_NOT_FOUND {
-                return Err(TransportError::Io);
-            }
-            return Err(TransportError::Timeout);
         }
-        let _ = ERROR_IO_PENDING;
-        Err(TransportError::Io)
+        // WAIT_FAILED and every unexpected result are still subject to an
+        // outstanding operation race. Prove completion before returning an
+        // ordinary error; an unprovable state aborts fail-closed.
+        match Self::cancel_and_join(handle, overlapped)? {
+            IoCompletion::Completed(bytes) => Ok(bytes),
+            IoCompletion::Aborted => Err(TransportError::Io),
+        }
+    }
+
+    /// Cancel an issued overlapped operation and prove that the kernel has
+    /// stopped using its event, OVERLAPPED, and caller-owned buffer. Any state
+    /// that cannot be proven terminal aborts before those values can drop.
+    fn cancel_and_join(
+        handle: HANDLE,
+        overlapped: &OVERLAPPED,
+    ) -> Result<IoCompletion, TransportError> {
+        let event = overlapped.hEvent;
+        let cancel_ok = unsafe { CancelIoEx(handle, overlapped) } != 0;
+        let cancel_error = if cancel_ok {
+            0
+        } else {
+            unsafe { GetLastError() }
+        };
+        if !cancel_ok && cancel_error != ERROR_NOT_FOUND {
+            std::process::abort();
+        }
+        if !cancel_ok {
+            // ERROR_NOT_FOUND is only safe when the operation has already
+            // signalled its event and GetOverlappedResult proves completion.
+            if unsafe { WaitForSingleObject(event, 0) } != WAIT_OBJECT_0 {
+                std::process::abort();
+            }
+        } else if unsafe { WaitForSingleObject(event, 1_000) } != WAIT_OBJECT_0 {
+            std::process::abort();
+        }
+        let mut transferred = 0;
+        let completed = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 0) };
+        let completion_error = if completed == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        if completed == 0 && completion_error != ERROR_OPERATION_ABORTED {
+            std::process::abort();
+        }
+        if completed != 0 {
+            Ok(IoCompletion::Completed(transferred))
+        } else {
+            Ok(IoCompletion::Aborted)
+        }
     }
 
     fn sid() -> Result<String, TransportError> {
@@ -509,6 +671,7 @@ impl SystemWindowsBoundary {
             || session == 0
             || session != expected_session
         {
+            let _error = unsafe { GetLastError() };
             return Err(TransportError::Authentication);
         }
         Ok(())
@@ -520,6 +683,9 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
         self.epoch.elapsed()
     }
     fn next(&mut self, deadline: Duration) -> Result<Event, TransportError> {
+        if let Some(error) = self.cleanup_error.take() {
+            return Err(error);
+        }
         let pipe = self.pipe.as_ref().ok_or(TransportError::Io)?.0;
         if self.epoch.elapsed() >= deadline {
             return Err(TransportError::Timeout);
@@ -550,6 +716,10 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
             hEvent: event.0,
             ..Default::default()
         };
+        if self.epoch.elapsed() >= deadline {
+            event.close_checked()?;
+            return Err(TransportError::Timeout);
+        }
         let ok = unsafe {
             ReadFile(
                 pipe,
@@ -591,6 +761,14 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
             .as_ref()
             .ok_or(TransportError::Authentication)?
             .0;
+        let liveness = unsafe { WaitForSingleObject(helper, 0) };
+        if liveness == WAIT_FAILED {
+            let _error = unsafe { GetLastError() };
+            return Err(TransportError::Io);
+        }
+        if liveness != WAIT_TIMEOUT {
+            return Err(TransportError::Authentication);
+        }
         Self::authenticate_helper(helper, self.helper_pid, self.session_id)?;
         self.revalidate_fixed_helper()?;
         let mut written = 0;
@@ -604,6 +782,10 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
             hEvent: event.0,
             ..Default::default()
         };
+        if self.epoch.elapsed() >= deadline {
+            event.close_checked()?;
+            return Err(TransportError::Timeout);
+        }
         if unsafe {
             WriteFile(
                 pipe,
@@ -623,7 +805,10 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
         if written != bytes.len() as u32 {
             return Err(TransportError::Io);
         }
-        event.close_checked()?;
+        self.request_committed = true;
+        if let Err(error) = event.close_checked() {
+            self.cleanup_error.get_or_insert(error);
+        }
         Ok(())
     }
     fn stop(&mut self) {
@@ -644,22 +829,25 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
         self.helper_pid = 0;
         self.session_id = 0;
         self.helper_file_identity = None;
-        self.cleanup_error = cleanup_error;
+        self.cleanup_error = cleanup_error.or(self.cleanup_error.take());
         // The operation watchdog is disarmed only after all security-critical
         // process/file/pipe handles have had their explicit close attempt.
-        if let Some(watchdog) = self.operation_watchdog.take() {
+        if let Some(mut watchdog) = self.operation_watchdog.take() {
             watchdog.disarm();
         }
     }
     fn take_cleanup_error(&mut self) -> Option<TransportError> {
         self.cleanup_error.take()
     }
+    fn request_committed(&self) -> bool {
+        self.request_committed
+    }
     fn start_until(
         &mut self,
         request_id: &RequestId,
         deadline: Duration,
     ) -> Result<(), TransportError> {
-        let watchdog = Watchdog::arm(self.epoch + deadline);
+        let mut watchdog = Watchdog::arm(self.epoch + deadline);
         let result = self.start_inner(request_id, deadline);
         watchdog.disarm();
         result
@@ -675,6 +863,8 @@ impl SystemWindowsBoundary {
         request_id: &RequestId,
         deadline: Duration,
     ) -> Result<(), TransportError> {
+        self.request_committed = false;
+        self.cleanup_error = None;
         let gui_pid = unsafe { GetCurrentProcessId() };
         let (helper_file, helper_identity) = Self::open_fixed_helper()?;
         self.helper_file = Some(helper_file);
@@ -717,12 +907,23 @@ impl SystemWindowsBoundary {
                 &attributes,
             )
         };
-        free_local(descriptor.cast())?;
+        let pipe_error = if pipe.is_null() || pipe == INVALID_HANDLE_VALUE {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        let descriptor_result = free_local(descriptor.cast());
         if pipe.is_null() || pipe == INVALID_HANDLE_VALUE {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Io);
+            return Err(descriptor_result.err().unwrap_or(TransportError::Io));
         }
-        self.pipe = Some(Handle(pipe));
+        let pipe = Handle(pipe);
+        if let Err(error) = descriptor_result {
+            pipe.close_checked()?;
+            let _ = pipe_error;
+            return Err(error);
+        }
+        let pipe_handle = pipe.0;
+        self.pipe = Some(pipe);
         let launch = WindowsLaunchSpec::for_request(request_id.clone(), gui_pid);
         let helper = Self::launch(&launch)?;
         self.helper = Some(Handle(helper));
@@ -741,19 +942,26 @@ impl SystemWindowsBoundary {
             hEvent: event.0,
             ..Default::default()
         };
-        if unsafe { ConnectNamedPipe(pipe, &mut overlapped) } == 0 {
+        if self.epoch.elapsed() >= deadline {
+            event.close_checked()?;
+            return Err(TransportError::Timeout);
+        }
+        if unsafe { ConnectNamedPipe(pipe_handle, &mut overlapped) } == 0 {
             let error = unsafe { GetLastError() };
             if error == 535 {
                 // The client won the connect race and the instance is ready.
             } else if error == ERROR_IO_PENDING {
-                self.wait_io(pipe, &mut overlapped, deadline)?;
+                self.wait_io(pipe_handle, &mut overlapped, deadline)?;
             } else {
                 return Err(TransportError::Authentication);
             }
         }
         event.close_checked()?;
+        if self.epoch.elapsed() >= deadline {
+            return Err(TransportError::Timeout);
+        }
         let mut peer_pid = 0;
-        if unsafe { GetNamedPipeClientProcessId(pipe, &mut peer_pid) } == 0 {
+        if unsafe { GetNamedPipeClientProcessId(pipe_handle, &mut peer_pid) } == 0 {
             let _error = unsafe { GetLastError() };
             return Err(TransportError::Authentication);
         }

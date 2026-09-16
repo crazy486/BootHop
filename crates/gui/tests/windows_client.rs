@@ -1,8 +1,10 @@
 use boothop_core::Request;
 use boothop_gui::helper_client::windows::{
     FileIdentity, GUI_EXECUTION_LEVEL, GUI_IMAGE_PATH, HELPER_IMAGE_PATH, HELPER_RUNAS_VERB,
-    PeerIdentity, WindowsBoundary, WindowsClient, WindowsLaunchSpec, WindowsPipeSpec,
-    authenticate_helper, authenticate_helper_continuity,
+    OverlappedCancel, OverlappedDecision, OverlappedResult, PeerIdentity, WatchdogDecision,
+    WatchdogState, WindowsBoundary, WindowsClient, WindowsLaunchSpec, WindowsPipeSpec,
+    authenticate_helper, authenticate_helper_continuity, overlapped_cancel_decision,
+    watchdog_decision, watchdog_disarm_state, watchdog_worker_state,
 };
 use boothop_gui::helper_client::{ClientError, Event, TransportError};
 use boothop_protocol::{RequestId, decode_request_envelope, encode_hello, encode_response};
@@ -19,6 +21,81 @@ struct Fake {
     mismatch_response: bool,
     start_deadlines: Vec<Duration>,
     expire_start: bool,
+    cleanup_error: Option<TransportError>,
+    request_committed: bool,
+}
+
+fn assert_watchdog_decisions_fail_closed_at_deadline_and_survive_disarm_race() {
+    assert_eq!(
+        watchdog_worker_state(
+            WatchdogState::Armed,
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ),
+        WatchdogState::Expired
+    );
+    assert_eq!(
+        watchdog_disarm_state(
+            WatchdogState::Armed,
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ),
+        WatchdogState::Expired
+    );
+    assert_eq!(
+        watchdog_decision(
+            WatchdogState::Armed,
+            Duration::from_secs(10),
+            Duration::from_secs(9)
+        ),
+        WatchdogDecision::Wait
+    );
+    assert_eq!(
+        watchdog_decision(
+            WatchdogState::Disarmed,
+            Duration::from_secs(10),
+            Duration::from_secs(11)
+        ),
+        WatchdogDecision::Disarmed
+    );
+    assert_eq!(
+        watchdog_decision(
+            WatchdogState::Expired,
+            Duration::from_secs(10),
+            Duration::from_secs(9)
+        ),
+        WatchdogDecision::Abort
+    );
+    assert_eq!(
+        overlapped_cancel_decision(
+            OverlappedCancel::Succeeded,
+            true,
+            OverlappedResult::Completed,
+        ),
+        OverlappedDecision::Completed
+    );
+    assert_eq!(
+        overlapped_cancel_decision(
+            OverlappedCancel::AlreadyComplete,
+            true,
+            OverlappedResult::OperationAborted,
+        ),
+        OverlappedDecision::Aborted
+    );
+    for (cancel, signalled, result) in [
+        (OverlappedCancel::Failed, true, OverlappedResult::Completed),
+        (
+            OverlappedCancel::AlreadyComplete,
+            false,
+            OverlappedResult::Completed,
+        ),
+        (OverlappedCancel::Succeeded, true, OverlappedResult::Other),
+    ] {
+        assert_eq!(
+            overlapped_cancel_decision(cancel, signalled, result),
+            OverlappedDecision::AbortProcess
+        );
+    }
 }
 
 impl Fake {
@@ -34,6 +111,8 @@ impl Fake {
             mismatch_response: false,
             start_deadlines: vec![],
             expire_start: false,
+            cleanup_error: None,
+            request_committed: false,
         }
     }
 }
@@ -51,6 +130,7 @@ impl WindowsBoundary for Fake {
     fn send(&mut self, bytes: &[u8], deadline: Duration) -> Result<(), TransportError> {
         self.deadlines.push(deadline);
         self.writes.push(bytes.to_vec());
+        self.request_committed = true;
         if let Ok(request) = decode_request_envelope(bytes) {
             let mut events = VecDeque::new();
             while let Some(event) = self.events.pop_front() {
@@ -81,6 +161,12 @@ impl WindowsBoundary for Fake {
         Ok(())
     }
     fn stop(&mut self) {}
+    fn take_cleanup_error(&mut self) -> Option<TransportError> {
+        self.cleanup_error.take()
+    }
+    fn request_committed(&self) -> bool {
+        self.request_committed
+    }
     fn start(&mut self, id: &RequestId) -> Result<(), TransportError> {
         if let Some(error) = self.start_error.take() {
             return Err(error);
@@ -153,6 +239,8 @@ fn fixed_windows_launch_and_pipe_specs_bind_request_id_without_generic_paths() {
 
 #[test]
 fn windows_client_reports_cancel_and_launch_failure_before_send() {
+    assert_watchdog_decisions_fail_closed_at_deadline_and_survive_disarm_race();
+    assert_cleanup_failure_keeps_before_send_and_committed_phases_distinct();
     for (error, expected) in [
         (TransportError::Cancelled, ClientError::Cancelled),
         (
@@ -167,6 +255,28 @@ fn windows_client_reports_cancel_and_launch_failure_before_send() {
         let fake = client.into_boundary();
         assert!(fake.writes.is_empty());
     }
+}
+
+fn assert_cleanup_failure_keeps_before_send_and_committed_phases_distinct() {
+    let mut before = Fake::new(vec![]);
+    before.start_error = Some(TransportError::Launch);
+    before.cleanup_error = Some(TransportError::Io);
+    let mut client = WindowsClient::new(before);
+    assert_eq!(
+        client.run(Request::Inspect),
+        Err(ClientError::BeforeSend(TransportError::Io))
+    );
+
+    let mut after = Fake::new(vec![
+        Ok(Event::Stdout(encode_hello())),
+        Err(TransportError::Timeout),
+    ]);
+    after.cleanup_error = Some(TransportError::Io);
+    let mut client = WindowsClient::new(after);
+    assert_eq!(
+        client.run(Request::Inspect),
+        Err(ClientError::UnknownAfterSend(TransportError::Io))
+    );
 }
 
 #[test]

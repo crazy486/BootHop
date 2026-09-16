@@ -8,6 +8,7 @@
 use super::{ClientError, TransportError, run_exchange};
 use boothop_core::{Report, Request};
 use boothop_protocol::RequestId;
+use std::time::Duration;
 
 pub const GUI_IMAGE_PATH: &str = r"C:\Program Files\BootHop\boothop-gui.exe";
 pub const HELPER_IMAGE_PATH: &str = r"C:\Program Files\BootHop\boothop-helper.exe";
@@ -147,7 +148,9 @@ pub fn authenticate_helper(
     expected_pid: u32,
     expected_session: u32,
 ) -> Result<(), TransportError> {
-    if peer.pid == expected_pid
+    if expected_pid != 0
+        && expected_session != 0
+        && peer.pid == expected_pid
         && peer.elevated
         && peer.high_integrity
         && peer.image == HELPER_IMAGE_PATH
@@ -175,6 +178,103 @@ pub fn authenticate_helper_continuity(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchdogState {
+    Armed,
+    Disarmed,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchdogDecision {
+    Wait,
+    Abort,
+    Disarmed,
+}
+
+/// Pure watchdog worker transition. Equality with the deadline is expired.
+pub fn watchdog_worker_state(
+    state: WatchdogState,
+    deadline: Duration,
+    now: Duration,
+) -> WatchdogState {
+    if state == WatchdogState::Armed && now >= deadline {
+        WatchdogState::Expired
+    } else {
+        state
+    }
+}
+
+/// Pure disarm transition. The worker and disarm path use the same boundary,
+/// so a race at the deadline fails closed regardless of lock acquisition order.
+pub fn watchdog_disarm_state(
+    state: WatchdogState,
+    deadline: Duration,
+    now: Duration,
+) -> WatchdogState {
+    if state == WatchdogState::Armed && now < deadline {
+        WatchdogState::Disarmed
+    } else if state == WatchdogState::Armed || state == WatchdogState::Expired {
+        WatchdogState::Expired
+    } else {
+        WatchdogState::Disarmed
+    }
+}
+
+pub fn watchdog_decision(
+    state: WatchdogState,
+    deadline: Duration,
+    now: Duration,
+) -> WatchdogDecision {
+    match watchdog_worker_state(state, deadline, now) {
+        WatchdogState::Armed => WatchdogDecision::Wait,
+        WatchdogState::Disarmed => WatchdogDecision::Disarmed,
+        WatchdogState::Expired => WatchdogDecision::Abort,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverlappedCancel {
+    Succeeded,
+    AlreadyComplete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverlappedResult {
+    Completed,
+    OperationAborted,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverlappedDecision {
+    Completed,
+    Aborted,
+    AbortProcess,
+}
+
+/// Pure completion-barrier policy used by the native cancellation path.
+/// `AlreadyComplete` models `ERROR_NOT_FOUND`; it is safe only when the event
+/// was already signalled and the result is terminal.
+pub fn overlapped_cancel_decision(
+    cancel: OverlappedCancel,
+    event_signalled: bool,
+    result: OverlappedResult,
+) -> OverlappedDecision {
+    if matches!(cancel, OverlappedCancel::Failed)
+        || !event_signalled
+        || matches!(result, OverlappedResult::Other)
+    {
+        return OverlappedDecision::AbortProcess;
+    }
+    match result {
+        OverlappedResult::Completed => OverlappedDecision::Completed,
+        OverlappedResult::OperationAborted => OverlappedDecision::Aborted,
+        OverlappedResult::Other => unreachable!(),
+    }
+}
+
 pub trait WindowsBoundary {
     fn now(&self) -> std::time::Duration;
     fn next(&mut self, deadline: std::time::Duration) -> Result<super::Event, TransportError>;
@@ -182,6 +282,9 @@ pub trait WindowsBoundary {
     fn stop(&mut self);
     fn take_cleanup_error(&mut self) -> Option<TransportError> {
         None
+    }
+    fn request_committed(&self) -> bool {
+        false
     }
     /// Create the explicit-DACL pipe, launch the fixed helper, and complete
     /// OS-backed peer authentication before hello/request bytes are read.
@@ -255,9 +358,15 @@ impl<B: WindowsBoundary> WindowsClient<B> {
             io.start_until(id, deadline)
         });
         self.boundary.stop();
-        self.boundary
-            .take_cleanup_error()
-            .map_or(result, |error| Err(ClientError::UnknownAfterSend(error)))
+        let request_committed = self.boundary.request_committed();
+        match self.boundary.take_cleanup_error() {
+            None => result,
+            Some(error) if request_committed => Err(ClientError::UnknownAfterSend(error)),
+            Some(error) => match result {
+                Err(ClientError::Cancelled) => Err(ClientError::Cancelled),
+                _ => Err(ClientError::BeforeSend(error)),
+            },
+        }
     }
 }
 

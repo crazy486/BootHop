@@ -42,10 +42,35 @@
 - Passed the single precomputed launch/authentication deadline through the
   shared client seam, preventing a callback-time `now + 120s` extension.
 
+## Fix round 2 evidence
+
+- Replaced the atomic watchdog with a synchronized Armed/Disarmed/Expired
+  state machine, worker-start handshake, equality-expired race handling,
+  bounded worker finish/join, poison fail-closed behavior, and injectable abort
+  hook; production uses process abort.
+- Every issued overlapped connect/read/write timeout, unexpected wait result,
+  cancellation failure, and completion-barrier failure now proves terminal
+  completion or aborts before native state can be released. A completed write
+  is explicitly committed before later cleanup and is therefore always mapped
+  to UnknownAfterSend.
+- The send boundary verifies retained process liveness, token/path/session and
+  fixed-file identity immediately before writing. Terminal reads drain a
+  bounded buffered response before accepting the retained helper's exit code.
+- Cleanup is phase-aware: pre-request UAC/launch/hello errors remain
+  Cancelled/BeforeSend, while committed-send cleanup/continuity errors remain
+  UnknownAfterSend. Native handles are retained for Drop retry or fail-closed
+  abort on close failure; pipe creation captures LastError before descriptor
+  cleanup and closes a valid pipe if descriptor release fails.
+- Fix round 2 additionally applies the Task 7 completion-barrier rule to every
+  native overlapped path: cancellation must observe a signalled event and a
+  terminal `GetOverlappedResult`, otherwise the process aborts before native
+  state can leave scope. A completed write is preserved as committed even when
+  observed at the deadline, and cleanup classification follows that state.
+
 ## Verification
 
 - `cargo test -p boothop-gui --test windows_client` — PASS (9 tests).
-- `cargo test -p boothop-gui --test client --test windows_client --test controller` — PASS (15 + 7 + 43 tests).
+- `cargo test -p boothop-gui --test client --test windows_client --test controller` — PASS (15 + 9 + 43 tests).
 - `cargo fmt --all -- --check` — PASS.
 - `cargo clippy -p boothop-gui --lib --tests -- -D warnings` — PASS.
 - `cargo check -p boothop-gui --target x86_64-pc-windows-msvc` — PASS.
