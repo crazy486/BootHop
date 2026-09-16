@@ -1,7 +1,8 @@
 use boothop_core::Request;
 use boothop_gui::helper_client::windows::{
-    GUI_EXECUTION_LEVEL, GUI_IMAGE_PATH, HELPER_IMAGE_PATH, HELPER_RUNAS_VERB, PeerIdentity,
-    WindowsBoundary, WindowsClient, WindowsLaunchSpec, WindowsPipeSpec, authenticate_helper,
+    FileIdentity, GUI_EXECUTION_LEVEL, GUI_IMAGE_PATH, HELPER_IMAGE_PATH, HELPER_RUNAS_VERB,
+    PeerIdentity, WindowsBoundary, WindowsClient, WindowsLaunchSpec, WindowsPipeSpec,
+    authenticate_helper, authenticate_helper_continuity,
 };
 use boothop_gui::helper_client::{ClientError, Event, TransportError};
 use boothop_protocol::{RequestId, decode_request_envelope, encode_hello, encode_response};
@@ -16,6 +17,8 @@ struct Fake {
     now: Duration,
     start_error: Option<TransportError>,
     mismatch_response: bool,
+    start_deadlines: Vec<Duration>,
+    expire_start: bool,
 }
 
 impl Fake {
@@ -29,6 +32,8 @@ impl Fake {
             now: Duration::ZERO,
             start_error: None,
             mismatch_response: false,
+            start_deadlines: vec![],
+            expire_start: false,
         }
     }
 }
@@ -88,6 +93,16 @@ impl WindowsBoundary for Fake {
             .push(WindowsLaunchSpec::for_request(id.clone(), 42));
         Ok(())
     }
+    fn start_until(&mut self, id: &RequestId, deadline: Duration) -> Result<(), TransportError> {
+        self.start_deadlines.push(deadline);
+        if self.expire_start {
+            self.now = deadline;
+        }
+        if deadline <= self.now {
+            return Err(TransportError::Timeout);
+        }
+        self.start(id)
+    }
 }
 
 #[test]
@@ -129,11 +144,11 @@ fn fixed_windows_launch_and_pipe_specs_bind_request_id_without_generic_paths() {
         WindowsPipeSpec::for_request(id.clone(), "S-1-5-21-1-2-3-1001").name(),
         format!("\\\\.\\pipe\\BootHop.{}", id.as_str())
     );
-    assert!(
-        WindowsPipeSpec::for_request(id, "S-1-5-21-1-2-3-1001")
-            .dacl()
-            .contains("S-1-5-21-1-2-3-1001")
-    );
+    let pipe = WindowsPipeSpec::for_request(id, "S-1-5-21-1-2-3-1001");
+    assert!(pipe.first_instance());
+    assert!(pipe.reject_remote());
+    assert!(pipe.is_secure());
+    assert!(pipe.dacl().contains("S-1-5-21-1-2-3-1001"));
 }
 
 #[test]
@@ -152,6 +167,55 @@ fn windows_client_reports_cancel_and_launch_failure_before_send() {
         let fake = client.into_boundary();
         assert!(fake.writes.is_empty());
     }
+}
+
+#[test]
+fn windows_client_honors_expired_launch_deadline_without_starting() {
+    let mut fake = Fake::new(vec![]);
+    fake.expire_start = true;
+    let mut client = WindowsClient::new(fake);
+    assert_eq!(
+        client.run(Request::Inspect),
+        Err(ClientError::BeforeSend(TransportError::Timeout))
+    );
+    let fake = client.into_boundary();
+    assert!(fake.launches.is_empty());
+    assert!(fake.pipes.is_empty());
+    assert!(fake.writes.is_empty());
+    assert_eq!(fake.start_deadlines, [Duration::from_secs(120)]);
+}
+
+#[test]
+fn windows_client_generates_fresh_nonzero_request_ids_per_invocation() {
+    let response = encode_response(Err(boothop_core::Error::Busy)).unwrap();
+    let mut first = WindowsClient::new(Fake::new(vec![
+        Ok(Event::Stdout(encode_hello())),
+        Ok(Event::Stdout(response.clone())),
+        Ok(Event::Exit(0)),
+    ]));
+    assert!(matches!(
+        first.run(Request::Inspect),
+        Err(ClientError::Domain(boothop_core::Error::Busy))
+    ));
+    let first_id = decode_request_envelope(&first.into_boundary().writes[0])
+        .unwrap()
+        .request_id;
+
+    let mut second = WindowsClient::new(Fake::new(vec![
+        Ok(Event::Stdout(encode_hello())),
+        Ok(Event::Stdout(response)),
+        Ok(Event::Exit(0)),
+    ]));
+    assert!(matches!(
+        second.run(Request::Inspect),
+        Err(ClientError::Domain(boothop_core::Error::Busy))
+    ));
+    let second_id = decode_request_envelope(&second.into_boundary().writes[0])
+        .unwrap()
+        .request_id;
+    assert_ne!(first_id.as_str(), "00000000000000000000000000000000");
+    assert_ne!(second_id.as_str(), "00000000000000000000000000000000");
+    assert_ne!(first_id, second_id);
 }
 
 #[test]
@@ -179,6 +243,7 @@ fn windows_client_authenticates_before_send_and_maps_post_send_failures_unknown(
             Duration::from_secs(30)
         ]
     );
+    assert_eq!(fake.start_deadlines, [Duration::from_secs(120)]);
 }
 
 #[test]
@@ -207,6 +272,13 @@ fn helper_identity_requires_pid_image_elevation_integrity_and_session_but_not_eq
         high_integrity: true,
         image: HELPER_IMAGE_PATH.to_owned(),
         session_id: 7,
+        file: FileIdentity {
+            volume_serial: 10,
+            file_id: 20,
+            regular_file: true,
+            reparse: false,
+        },
+        process_alive: true,
     };
     assert!(authenticate_helper(&valid, 99, 7).is_ok());
     for mutate in [
@@ -230,10 +302,58 @@ fn helper_identity_requires_pid_image_elevation_integrity_and_session_but_not_eq
             session_id: 8,
             ..valid.clone()
         },
+        PeerIdentity {
+            file: FileIdentity {
+                reparse: true,
+                ..valid.file.clone()
+            },
+            ..valid.clone()
+        },
+        PeerIdentity {
+            file: FileIdentity {
+                regular_file: false,
+                ..valid.file.clone()
+            },
+            ..valid.clone()
+        },
+        PeerIdentity {
+            process_alive: false,
+            ..valid.clone()
+        },
     ] {
         assert_eq!(
             authenticate_helper(&mutate, 99, 7),
             Err(TransportError::Authentication)
         );
     }
+}
+
+#[test]
+fn helper_identity_continuity_requires_same_opened_file_and_live_process() {
+    let initial = PeerIdentity {
+        pid: 99,
+        elevated: true,
+        high_integrity: true,
+        image: HELPER_IMAGE_PATH.to_owned(),
+        session_id: 7,
+        file: FileIdentity {
+            volume_serial: 10,
+            file_id: 20,
+            regular_file: true,
+            reparse: false,
+        },
+        process_alive: true,
+    };
+    assert!(authenticate_helper_continuity(&initial, &initial).is_ok());
+    let replacement = PeerIdentity {
+        file: FileIdentity {
+            file_id: 21,
+            ..initial.file.clone()
+        },
+        ..initial.clone()
+    };
+    assert_eq!(
+        authenticate_helper_continuity(&initial, &replacement),
+        Err(TransportError::Authentication)
+    );
 }

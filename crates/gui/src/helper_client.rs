@@ -51,6 +51,9 @@ pub trait ClientIo {
     fn next(&mut self, deadline: Duration) -> Result<Event, TransportError>;
     fn send(&mut self, bytes: &[u8], deadline: Duration) -> Result<(), TransportError>;
     fn stop(&mut self);
+    fn operation_deadline(&self) -> Option<Duration> {
+        None
+    }
 }
 pub trait Boundary {
     fn now(&self) -> Duration;
@@ -97,7 +100,7 @@ impl<B: Boundary> HelperClient<B> {
             ],
             environment: vec![("LC_ALL", "C")],
         };
-        run_exchange(&mut self.boundary, request, |boundary, _| {
+        run_exchange(&mut self.boundary, request, |boundary, _, _| {
             boundary.spawn(&spec).map_err(|error| {
                 // Linux keeps its historical classification: only the
                 // Windows launch boundary has an OS-level UAC cancellation.
@@ -118,14 +121,14 @@ pub(crate) fn run_exchange<B, F>(
 ) -> Result<Report, ClientError>
 where
     B: ClientIo,
-    F: FnOnce(&mut B, &protocol::RequestId) -> Result<(), TransportError>,
+    F: FnOnce(&mut B, &protocol::RequestId, Duration) -> Result<(), TransportError>,
 {
     let request_id = protocol::RequestId::generate()
         .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
     let request = protocol::encode_request_with_id(&request_id, request)
         .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
     let hello_deadline = boundary.now() + Duration::from_secs(120);
-    start(boundary, &request_id).map_err(|error| {
+    start(boundary, &request_id, hello_deadline).map_err(|error| {
         if error == TransportError::Cancelled {
             ClientError::Cancelled
         } else {
@@ -155,7 +158,9 @@ where
             break;
         }
     }
-    let deadline = boundary.now() + Duration::from_secs(30);
+    let deadline = boundary
+        .operation_deadline()
+        .unwrap_or_else(|| boundary.now() + Duration::from_secs(30));
     // send acknowledges complete delivery; its error contract guarantees an
     // incomplete frame, which the one-shot helper cannot execute.
     boundary

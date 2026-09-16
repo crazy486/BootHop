@@ -96,6 +96,12 @@ impl WindowsPipeSpec {
     pub fn dacl(&self) -> &str {
         &self.dacl
     }
+    pub fn first_instance(&self) -> bool {
+        self.first_instance
+    }
+    pub fn reject_remote(&self) -> bool {
+        self.reject_remote
+    }
     pub fn is_secure(&self) -> bool {
         self.first_instance
             && self.reject_remote
@@ -124,6 +130,16 @@ pub struct PeerIdentity {
     pub high_integrity: bool,
     pub image: String,
     pub session_id: u32,
+    pub file: FileIdentity,
+    pub process_alive: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileIdentity {
+    pub volume_serial: u64,
+    pub file_id: u128,
+    pub regular_file: bool,
+    pub reparse: bool,
 }
 
 pub fn authenticate_helper(
@@ -136,8 +152,24 @@ pub fn authenticate_helper(
         && peer.high_integrity
         && peer.image == HELPER_IMAGE_PATH
         && peer.session_id == expected_session
+        && peer.process_alive
+        && peer.file.regular_file
+        && !peer.file.reparse
+        && peer.file.volume_serial != 0
+        && peer.file.file_id != 0
     {
         Ok(())
+    } else {
+        Err(TransportError::Authentication)
+    }
+}
+
+pub fn authenticate_helper_continuity(
+    initial: &PeerIdentity,
+    current: &PeerIdentity,
+) -> Result<(), TransportError> {
+    if current.process_alive && current.pid == initial.pid && current.file == initial.file {
+        authenticate_helper(current, initial.pid, initial.session_id)
     } else {
         Err(TransportError::Authentication)
     }
@@ -148,6 +180,9 @@ pub trait WindowsBoundary {
     fn next(&mut self, deadline: std::time::Duration) -> Result<super::Event, TransportError>;
     fn send(&mut self, bytes: &[u8], deadline: std::time::Duration) -> Result<(), TransportError>;
     fn stop(&mut self);
+    fn take_cleanup_error(&mut self) -> Option<TransportError> {
+        None
+    }
     /// Create the explicit-DACL pipe, launch the fixed helper, and complete
     /// OS-backed peer authentication before hello/request bytes are read.
     fn start(&mut self, request_id: &RequestId) -> Result<(), TransportError>;
@@ -162,31 +197,41 @@ pub trait WindowsBoundary {
     }
 }
 
-struct IoAdapter<'a, B: WindowsBoundary>(&'a mut B);
+struct IoAdapter<'a, B: WindowsBoundary> {
+    boundary: &'a mut B,
+    operation_deadline: Option<std::time::Duration>,
+}
 impl<B: WindowsBoundary> IoAdapter<'_, B> {
     fn start_until(
         &mut self,
         id: &RequestId,
         deadline: std::time::Duration,
     ) -> Result<(), TransportError> {
-        self.0.start_until(id, deadline)
+        let result = self.boundary.start_until(id, deadline);
+        if result.is_ok() {
+            self.operation_deadline = Some(self.now() + std::time::Duration::from_secs(30));
+        }
+        result
     }
     fn now(&self) -> std::time::Duration {
-        self.0.now()
+        self.boundary.now()
     }
 }
 impl<B: WindowsBoundary> super::ClientIo for IoAdapter<'_, B> {
     fn now(&self) -> std::time::Duration {
-        self.0.now()
+        self.boundary.now()
     }
     fn next(&mut self, deadline: std::time::Duration) -> Result<super::Event, TransportError> {
-        self.0.next(deadline)
+        self.boundary.next(deadline)
     }
     fn send(&mut self, bytes: &[u8], deadline: std::time::Duration) -> Result<(), TransportError> {
-        self.0.send(bytes, deadline)
+        self.boundary.send(bytes, deadline)
     }
     fn stop(&mut self) {
-        self.0.stop()
+        self.boundary.stop()
+    }
+    fn operation_deadline(&self) -> Option<std::time::Duration> {
+        self.operation_deadline
     }
 }
 
@@ -202,12 +247,17 @@ impl<B: WindowsBoundary> WindowsClient<B> {
         self.boundary
     }
     pub fn run(&mut self, request: Request) -> Result<Report, ClientError> {
-        let mut io = IoAdapter(&mut self.boundary);
-        let result = run_exchange(&mut io, request, |io, id| {
-            io.start_until(id, io.now() + std::time::Duration::from_secs(120))
+        let mut io = IoAdapter {
+            boundary: &mut self.boundary,
+            operation_deadline: None,
+        };
+        let result = run_exchange(&mut io, request, |io, id, deadline| {
+            io.start_until(id, deadline)
         });
         self.boundary.stop();
-        result
+        self.boundary
+            .take_cleanup_error()
+            .map_or(result, |error| Err(ClientError::UnknownAfterSend(error)))
     }
 }
 
