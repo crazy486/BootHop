@@ -1,12 +1,12 @@
 # 支持与验收矩阵（研究阶段）
 
-首次核对日期2026-09-08；私有样本/用户语义证据更新2026-09-09。所有“支持”均为拟发布范围。已完成一次经授权的Arch普通权限只读采集，取得用户确认的Arch Linux/Windows11启动项各1项；双向重启、Windows API与GUI验收尚未执行，Task1仍BLOCKED。不得将样本或主机包版本记录当固件兼容认证。
+首次核对日期2026-09-08；私有样本/用户语义证据更新2026-09-09。所有“支持”均为拟发布范围。已完成一次经授权的Arch普通权限只读采集，取得用户确认的Arch Linux/Windows11启动项各1项；双向重启、Windows生产API与GUI验收尚未执行，Windows1W研究证据另有 `PASS_WITH_LIMITATION` 记录，Task1仍BLOCKED。不得将样本或主机包版本记录当固件兼容认证。
 
-2026-09-10 Linux-first独立审查Approved，用户条件授权生效。[共享/Linux前置契约](shared-linux-prerequisites.md) 随后完成独立审查：1S.parse/1S APPROVED（66eaf9f），1L APPROVED（600aa4d），替代原待审状态。1W实证缺失仅阻Windows分支/最终跨平台声明；Linux可按自身前置推进。实施进度以manifest及controller ledger为准，不能从契约批准推断Windows可用或双向验收完成。
+2026-09-10 Linux-first独立审查Approved，用户条件授权生效。[共享/Linux前置契约](shared-linux-prerequisites.md) 随后完成独立审查：1S.parse/1S APPROVED（66eaf9f），1L APPROVED（600aa4d），替代原待审状态。Windows1W仅以受限只读研究证据放行；它不证明Windows生产W1--W5，也不关闭Linux Stage 5。实施进度以manifest及controller ledger为准，不能从契约批准推断Windows可用或双向验收完成。
 
 | 环境 | 地位与架构 | 已知实际版本 / 缺口 | 验收范围 |
 |---|---|---|---|
-| Windows 11 | 主要实机，x86-64 / x86_64-pc-windows-msvc | 用户确认其真实启动项语义；原始项由Arch读取。具体版本、build、固件未知；未在Windows运行API | UAC 双账户情形、MSI 安装/卸载/ACL、应用阻止重启、中文/Unicode/高 DPI、实际进 Arch |
+| Windows 11 | 主要实机，x86-64 / x86_64-pc-windows-msvc | 用户确认其真实启动项语义；原始项由Arch读取。Windows production software now has compile/static/fake package gates only; concrete version, build, firmware, signer, installer, and native runtime evidence remain missing | W1--W5 separately authorized: UAC 双账户情形、MSI 安装/卸载/ACL、应用阻止重启、中文/Unicode/高 DPI、实际进 Arch |
 | 当前 Arch Linux KDE Plasma Wayland | 主要实机，x86-64 / x86_64-unknown-linux-gnu | 当前执行环境只读查询：kernel 7.2.3-zen1-3-zen；systemd 261.2-1；glibc 2.44+r24+g16be1518495f-1；polkit 127-3；plasma-desktop 6.7.4-1；plasma-workspace 6.7.4-3；kwin 6.7.4-7。Wayland 是用户指定，未自行读取活动会话验证。已观察到 KDE 认证对话框取消可呈现 pre-hello exit 127；该码保持中性，不能反推取消/认证失败/缺代理 | 原生 Arch 包、图形认证代理、root inhibitor 行为、Unicode/缩放、实际进 Windows |
 | Ubuntu 24.04 LTS | 稳定参考和 UEFI VM，x86-64，Wayland/X11 | 官方 noble 包基线 systemd 255、glibc 2.39；实际 VM 的 kernel、包修订、桌面、固件版本缺失 | .deb、systemd255 inhibitor、Wayland/X11、OVMF/UEFI VM 图形、双向切换；虚拟机不替代实机 |
 
@@ -46,13 +46,13 @@ WiX7 官方文档要求显式 EULA 接受并有维护费条款，发布者需按
 | 1S共享前置 | 私有真实项；结构字段/支持范围/独立验证/序列化和正反依据 | APPROVED（66eaf9f）：三节点GPT单绝对路径、全部结构含LBA/size精确比较、attributes独立allowlist、Known空表 |
 | 1S.parse纯解析前置 | 头/description/路径长度与节点/终止/OptionalData边界验证表 | APPROVED（66eaf9f）：共享契约§1；Task2实现/测试状态独立记录 |
 | 1L Linux前置 | efivarfs/存储锁/pkexec/IPC/logind契约及fake验证清单 | APPROVED（600aa4d）：共享契约§3；6字节BootNext、errno、64KiB预算明确；真实写入/重启/系统集成验收PENDING |
-| 1W Windows前置 | 原生只读API实际读取/权限/out attributes/payload/错误语义 | BLOCKED：无原生实证；仅阻6W/8/9W/10W/11W及最终跨平台声明，fake/Arch不替代；安全不可观察错误明确限制 |
+| 1W Windows前置 | 原生只读API实际读取/权限/out attributes/payload/错误语义 | PASS_WITH_LIMITATION：Windows1W research read evidence only; raw Win32 203 is retained, not mapped to absent BootNext; it does not prove production W1--W5 or Linux Stage 5 |
 | 未来放宽研究（非MVP硬gate） | 正常更新配对、OptionalData语义及允许变化/归一化的依据 | 配对各0、内部仍opaque；不阻MVP strict exact，不以本修订批准任何宽松变换 |
 | 可选公开夹具（非MVP硬gate） | 匿名化及逐字段隐私审查 | 公开fixture为0；私有真实样本可支持研究，普通CI用synthetic，不提交原文 |
 | 纯测试 | parser边界、opaque含空SHA-256/完整摘要往返/逐字节变化拒绝、未知非UTF-16可登记、未知设备路径仍拒绝、未知记录/组件/算法禁止覆盖、主动重新确认、helper篡改参数、阶段Unknown、超限/断连、ABA恢复拒绝 | 各任务独立验证，最新进度见manifest/ledger；禁止访问宿主固件或将synthetic当自然更新，parser通过不代表全部测试通过 |
 | 包与 GUI | 两端目录保护；普通用户不能改记录/helper；中文/其他 Unicode、缩放、高 DPI；Arch Wayland、Ubuntu Wayland/X11、Windows | 未开始 |
 | 11L Linux开发交付 | Linux构建/开发包、隔离CI和明确未验收标签 | PENDING；自身前置通过可推进，非最终发布，不以未实施Windows成功stub占位 |
-| 11W / 最终跨平台交付 | Windows包/CI；两分支与全部子门槛通过；另行授权的双向BootNext/重启、BootOrder及GUI/安装实测 | PENDING；Windows证据缺失及真实验收未执行，不能从Linux成功推出完成 |
+| 11W / 最终跨平台交付 | Windows package stage/CI; both branches and all sub-gates; separately authorized bidirectional BootNext/reboot, BootOrder, GUI/install evidence | PENDING；仅软件/CI/package static gates存在；signing, installer, Windows W1--W5 and final cross-platform acceptance remain incomplete |
 | inhibitor/应用阻止 | systemd255 root+block/delay、261 root+block/weak/delay，Windows 未保存应用和 UAC 不同账户 | 未执行，需独立显式授权 |
 | UEFI VM 和实机 | 双向 switch；BootNext 冲突/存在/丢失；比较每次 BootOrder 前后；分别记录 API、读回、重启接受、人工 OS 观察 | 未执行，需独立显式授权；BootOrder 变化即失败 |
 

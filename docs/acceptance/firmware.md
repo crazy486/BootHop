@@ -5,6 +5,32 @@ changed. The Linux development package and fake tests do not fill any result
 below. Windows 11 evidence is blocked by the outstanding 1W real-machine gate;
 the Linux package does not provide a Windows implementation.
 
+## Windows production authorization boundary
+
+Windows production acceptance is **NOT STARTED**. The software branch may
+compile, stage, and statically audit a package, but those checks never invoke a
+firmware API, UAC/helper, ACL change, BCD operation, shutdown, or reboot.
+Windows1W is the separate read-only native-API research record and remains
+`PASS_WITH_LIMITATION`; it is not W1 and does not close Linux Stage 5. Linux
+Stage 5 is the separate post-boot closure and remains pending.
+
+W1--W5 require separate, fresh authorization and private evidence:
+
+1. **W1 read-only:** native reads and privilege restoration only.
+2. **W2 configure:** elevated helper and protected ProgramData record/ACL
+   validation only; no firmware write or reboot.
+3. **W3 pre-switch:** target identity and BootNext conflict observation only.
+4. **W4 mutation:** blocked until an approved mapping distinguishes confirmed
+   BootNext absence from unavailable state; then one write/readback with reboot
+   interlocked off.
+5. **W5 switch:** blocked by the same mapping gate; then one authorized
+   Windows-to-Linux switch and reboot with post-boot evidence.
+
+The observed Win32 203 (`ERROR_ENVVAR_NOT_FOUND`) result is retained as a raw
+error by the production policy; it is not evidence of absent `BootNext`.
+Code-signing, an atomic installer, interrupted-upgrade recovery, and downgrade
+prevention are also release requirements and are not supplied by staging.
+
 Run this checklist only after explicit authorization. Record the exact host,
 kernel/OS, firmware vendor and version, boot mode, systemd/polkit versions (if
 Linux), package checksum, and operator. Do not replace a missing value with

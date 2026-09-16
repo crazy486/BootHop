@@ -12,7 +12,8 @@ real firmware evidence.
 | Rust toolchain | Exact repository pin `1.98.1` (`rust-toolchain.toml`); CI action ref `dtolnay/rust-toolchain@1.98.1`; dependencies locked by `Cargo.lock` |
 | Slint / slint-build | 1.17.1 / 1.17.1; attribution review **not completed** |
 | Linux package | tarball build recipe exists; release artifact **not measured** |
-| Windows MSI | **Not implemented in 11L; not built** |
+| Windows package stage | deterministic non-installing stage and static package/PE gates exist; MSI/installer **not implemented or built** |
+| Windows signing | **Unsigned placeholder only; no certificate or release signature** |
 | Source/release commit | Record the commit and SHA-256 for each candidate |
 
 The Linux package recipe uses a private staging directory, fixed helper path
@@ -20,6 +21,15 @@ The Linux package recipe uses a private staging directory, fixed helper path
 non-privileged desktop entry. It never auto-configures a target. Uninstall
 removes known package files but retains the protected record and
 `operation.lock`; an unknown record is never overwritten.
+
+The Windows stage uses fixed `Program Files\\BootHop` GUI/helper paths and
+`ProgramData\\BootHop` policy metadata, records SHA-256 hashes, architecture,
+execution levels, and protocol v2, and writes an explicit `NON-PRODUCTION`
+marker. It does not install, mutate ACLs/registry/services/autostart/BCD,
+launch either binary, or request firmware/shutdown/reboot. Distribution stays
+blocked until an atomic installer, interrupted-upgrade recovery, downgrade
+prevention, code signing, and signed-release process are implemented and
+verified.
 
 ## Release checklist
 
@@ -41,8 +51,9 @@ removes known package files but retains the protected record and
 - [ ] Authorized package install/upgrade/uninstall tests: verify root:root
   0700 state directory, root:root 0600 regular persistent lock, preserved lock
   inode on upgrade, no prewritten `targets.json`, and retention on uninstall.
-- [ ] Windows signing certificate, Windows runner, Windows MSI/ACL evidence,
-  and Windows 11 firmware/GUI runs are **not available** for this task.
+- [ ] Windows signing certificate, Windows MSI/ACL evidence, and Windows 11
+  firmware/GUI runs are **not available** for this task. CI runner execution
+  and fake/static package checks are not installation or acceptance evidence.
 - [ ] Linux real efivarfs, polkit, logind inhibitor and reboot evidence is
   **not available** for this task; fake tests do not satisfy it.
 

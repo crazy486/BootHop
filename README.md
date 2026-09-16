@@ -1,8 +1,9 @@
 # BootHop
 
 BootHop is a deliberately conservative boot-target switcher. The repository
-currently contains a Linux development build and mock-only tests. It is not a
-cross-platform release and does not claim that a machine has booted another OS.
+currently contains a Linux development build, Windows compile-only production
+sources, and mock/fake tests. It is not a cross-platform release and does not
+claim that a machine has booted another OS.
 
 ## Current status
 
@@ -15,9 +16,13 @@ cross-platform release and does not claim that a machine has booted another OS.
 - Install/upgrade never configure a target or overwrite an unknown record;
   uninstall retains the record and lock. The desktop entry is not privileged;
   policy authentication is restricted to the fixed helper.
-- Windows implementation/package and Windows 11 evidence remain outside 11L
-  and blocked by the 1W real-machine gate. Linux fake/build success is not
-  firmware, renderer, GUI-session, or cross-platform acceptance.
+- Windows production source now has a deterministic, non-installing package
+  stage under `packaging/windows`. It records fixed Program Files/ProgramData
+  layout metadata, protocol-v2 binary hashes, execution-level manifests, and
+  an explicit `NON-PRODUCTION` marker. It never installs, changes ACLs,
+  registry/services/autostart/BCD, launches a binary, touches firmware, or
+  requests shutdown/reboot. Windows1W research remains separate from W1--W5;
+  Linux Stage 5 and Windows real-system acceptance remain pending.
 
 ## Ordinary checks
 
@@ -29,6 +34,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 packaging/linux/check-isolation.sh
 packaging/linux/tests/installer_fake.sh
+pwsh -NoProfile -File packaging/windows/tests/package_fake.ps1
 ```
 
 These commands must remain fake-only: they do not install a package, write
@@ -43,3 +49,10 @@ Read [firmware acceptance](docs/acceptance/firmware.md), [GUI acceptance](docs/a
 and [release readiness](docs/acceptance/release.md) before any separately
 authorized real-system run. Missing evidence stays **NOT ACCEPTED**; fake tests
 and package builds must never be recorded as real firmware or Windows success.
+
+On Windows CI, the ordered gate is format, clippy, workspace tests, release
+build, fake package tests, non-installing stage, package check, and source/PE
+capability audit. `dumpbin.exe` is resolved through `vswhere.exe`; missing
+`dumpbin` or either produced PE fails the job. The job never executes BootHop
+binaries or performs UAC, ACL, firmware, BCD, service, shutdown, or reboot
+actions.

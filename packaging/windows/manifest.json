@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "product": "BootHop",
+  "production_status": "NON-PRODUCTION",
+  "architecture": "x86_64-pc-windows-msvc",
+  "protocol_version": 2,
+  "publisher": "UNSIGNED-DEVELOPMENT-PLACEHOLDER",
+  "signing": {
+    "status": "UNSIGNED-PLACEHOLDER",
+    "certificate_thumbprint": null
+  },
+  "layout": {
+    "program_files": "Program Files\\BootHop",
+    "program_data": "ProgramData\\BootHop",
+    "gui": "Program Files\\BootHop\\boothop-gui.exe",
+    "helper": "Program Files\\BootHop\\boothop-helper.exe",
+    "record": "ProgramData\\BootHop\\targets.json"
+  },
+  "binaries": {
+    "gui": {
+      "path": "Program Files\\BootHop\\boothop-gui.exe",
+      "protocol_version": 2,
+      "sha256": null,
+      "size": null,
+      "execution_level": "asInvoker"
+    },
+    "helper": {
+      "path": "Program Files\\BootHop\\boothop-helper.exe",
+      "protocol_version": 2,
+      "sha256": null,
+      "size": null,
+      "execution_level": "requireAdministrator"
+    }
+  },
+  "program_data_policy": {
+    "directory": "ProgramData\\BootHop",
+    "owner": "SYSTEM-or-BUILTIN-Administrators",
+    "ordinary_user_access": "none",
+    "acl_enforcement": "installer-required; staging-does-not-mutate-ACL"
+  },
+  "forbidden_artifacts": [
+    "service", "scheduled-task", "run-key", "startup-shortcut", "driver", "bcdedit", "shell-command-handler"
+  ]
+}

@@ -31,3 +31,48 @@ jobs:
         run: packaging/linux/tests/installer_fake.sh
       - name: Development package archive smoke test
         run: packaging/linux/package-smoke.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+      - name: Release build
+        run: cargo build --workspace --release --locked
+      - name: Fake Windows package tests
+        shell: pwsh
+        run: ./packaging/windows/tests/package_fake.ps1
+      - name: Stage Windows package (non-installing)
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'boothop-windows-stage'
+          if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          & ./packaging/windows/stage.ps1 `
+            -GuiPath (Join-Path $env:GITHUB_WORKSPACE 'target\release\boothop-gui.exe') `
+            -HelperPath (Join-Path $env:GITHUB_WORKSPACE 'target\release\boothop-helper.exe') `
+            -OutputPath $stage
+          "BOOTHOP_STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check Windows package
+        shell: pwsh
+        run: ./packaging/windows/check-package.ps1 -StagePath $env:BOOTHOP_STAGE
+      - name: Audit Windows source and PE capabilities
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere.exe is missing' }
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($dumpbin) -or -not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw 'dumpbin.exe is missing' }
+          $gui = Join-Path $env:BOOTHOP_STAGE 'Program Files\BootHop\boothop-gui.exe'
+          $helper = Join-Path $env:BOOTHOP_STAGE 'Program Files\BootHop\boothop-helper.exe'
+          if (-not (Test-Path -LiteralPath $gui -PathType Leaf) -or -not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'staged PE is missing' }
+          ./packaging/windows/check-capabilities.ps1 `
+            -RootPath $env:GITHUB_WORKSPACE -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin

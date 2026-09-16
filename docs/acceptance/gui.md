@@ -6,6 +6,13 @@ renderer quality, desktop-session compatibility, or Windows support. Every
 cell below requires an attached screenshot and a run log; “build succeeded” is
 not a GUI result.
 
+The Windows GUI executable is now a compile-time and fake-test artifact only.
+Its staged manifest requests `asInvoker`; only the fixed helper requests
+`requireAdministrator`. No UAC prompt, helper launch, firmware operation,
+shutdown, reboot, installation, or real Windows desktop session was exercised.
+Windows1W read-only research and Linux Stage 5 post-boot closure remain
+separate evidence streams and do not establish Windows GUI acceptance.
+
 | Environment | Scale | Unicode target descriptions | Result / evidence |
 |---|---:|---|---|
 | Windows 11, normal desktop session | 100% | Chinese and another non-ASCII description | **Not run** |
