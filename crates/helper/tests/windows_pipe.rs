@@ -1,9 +1,10 @@
 use boothop_core::{Error, PlatformOperation};
 use boothop_helper::windows::pipe::{
     AuthEvidence, DEFAULT_AUTH_DEADLINE, DEFAULT_OPERATION_DEADLINE, HelperArgs, ImageEvidence,
-    PeerVerifier, PipePolicy, SelfEvidence, TokenEvidence, TokenLabelLayout, authenticate_peer,
-    authenticate_peer_on_connection, build_pipe_name, parse_args, pipe_dacl_for_user_sid,
-    validate_pipe_policy, validate_sid_bytes, validate_token_label_layout,
+    OverlappedEvent, PeerVerifier, PipePolicy, SelfEvidence, TokenEvidence, TokenLabelLayout,
+    authenticate_peer, authenticate_peer_on_connection, build_pipe_name, parse_args,
+    pipe_dacl_for_user_sid, validate_overlapped_trace, validate_pipe_policy, validate_sid_bytes,
+    validate_token_label_layout,
 };
 use boothop_helper::windows::{
     GUI_IMAGE_PATH, HELPER_IMAGE_PATH, PIPE_DACL, PIPE_MAX_BYTES, PIPE_NAME_PREFIX,
@@ -589,6 +590,29 @@ fn token_label_layout_requires_aligned_bounded_complete_storage() {
     }
     assert!(validate_token_label_layout(1024, 8, valid).is_err());
     assert!(validate_token_label_layout(24, 32, valid).is_err());
+    assert!(
+        validate_token_label_layout(
+            1024,
+            32,
+            TokenLabelLayout {
+                sid_offset: usize::MAX,
+                ..valid
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        validate_token_label_layout(
+            1024,
+            1024,
+            TokenLabelLayout {
+                subauthority_count: u8::MAX,
+                sid_length: 1024,
+                ..valid
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -639,6 +663,26 @@ fn token_label_layout_rejects_null_and_malformed_sid_bounds() {
     sid[0] = 2;
     assert!(validate_sid_bytes(&sid, 2).is_err());
     assert!(validate_sid_bytes(&sid[..8], 2).is_err());
+    assert!(validate_sid_bytes(&[1, 255, 0, 0, 0, 0, 0, 0], 255).is_err());
+}
+
+#[test]
+fn overlapped_completion_barrier_requires_cancel_sync_and_exact_close() {
+    use OverlappedEvent::*;
+    assert!(validate_overlapped_trace(&[Pending, TimedOut, CancelIssued, Aborted, Closed]).is_ok());
+    assert!(
+        validate_overlapped_trace(&[Pending, TimedOut, CancelFailed, AlreadyComplete, Closed])
+            .is_ok()
+    );
+    assert!(validate_overlapped_trace(&[Pending, Completed, Closed]).is_ok());
+    for invalid in [
+        vec![Pending, TimedOut, Closed],
+        vec![Pending, TimedOut, CancelIssued, Closed],
+        vec![Pending, Completed, Closed, Closed],
+        vec![Pending, TimedOut, CancelIssued, Aborted],
+    ] {
+        assert!(validate_overlapped_trace(&invalid).is_err());
+    }
 }
 
 #[test]
@@ -684,6 +728,16 @@ fn operation_deadline_is_single_absolute_budget_and_expires_without_reset() {
 }
 
 #[test]
+fn authentication_deadline_is_carried_and_expiry_prevents_next_inspection() {
+    use boothop_helper::windows::pipe::authenticate_peer_until;
+    let args = HelperArgs::new(valid_id(), 42).unwrap();
+    let mut fake = FakeVerifier::default();
+    let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    assert!(authenticate_peer_until(&mut fake, &args, expired).is_err());
+    assert!(fake.calls.is_empty());
+}
+
+#[test]
 fn typed_pipe_server_policy_binds_exact_request_id_and_user_sid() {
     use boothop_helper::windows::pipe::PipeServerSpec;
     let spec = PipeServerSpec::new(
@@ -698,6 +752,29 @@ fn typed_pipe_server_policy_binds_exact_request_id_and_user_sid() {
             boothop_protocol::RequestId::parse(valid_id()).unwrap(),
             "S-1-5-x"
         )
+        .is_err()
+    );
+    assert!(
+        PipeServerSpec::new(
+            boothop_protocol::RequestId::from_bytes([0; 16]),
+            "S-1-5-21-1-2-3-1001"
+        )
+        .is_err()
+    );
+    assert!(
+        validate_pipe_policy(PipePolicy {
+            first_instance: true,
+            reject_remote: true,
+            dacl: "D:P(A;;GRGW;;;S-1-5-21-1-2-3-1001)(A;;GRGW;;;SY)(A;;GRGW;;;BA)",
+        })
+        .is_ok()
+    );
+    assert!(
+        validate_pipe_policy(PipePolicy {
+            first_instance: true,
+            reject_remote: true,
+            dacl: "D:P(A;;GRGW;;;S-1-5-21-1-2-3-1001)(A;;GRGW;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;WD)",
+        })
         .is_err()
     );
 }

@@ -87,6 +87,62 @@ pub fn validate_sid_bytes(bytes: &[u8], subauthority_count: u8) -> Result<(), Cl
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverlappedEvent {
+    Pending,
+    TimedOut,
+    CancelIssued,
+    CancelFailed,
+    Completed,
+    Aborted,
+    AlreadyComplete,
+    Closed,
+}
+
+/// Pure audit model for the native completion barrier. Closing is valid only
+/// after a terminal completion observation, including cancellation races.
+pub fn validate_overlapped_trace(trace: &[OverlappedEvent]) -> Result<(), CliError> {
+    if trace.is_empty() || !matches!(trace[0], OverlappedEvent::Pending) {
+        return Err(CliError::Invalid);
+    }
+    let close_count = trace
+        .iter()
+        .filter(|event| **event == OverlappedEvent::Closed)
+        .count();
+    if close_count != 1 || trace.last() != Some(&OverlappedEvent::Closed) {
+        return Err(CliError::Invalid);
+    }
+    let close_at = trace.len() - 1;
+    let terminal_at = trace[..close_at].iter().position(|event| {
+        matches!(
+            event,
+            OverlappedEvent::Completed
+                | OverlappedEvent::Aborted
+                | OverlappedEvent::AlreadyComplete
+        )
+    });
+    let Some(terminal_at) = terminal_at else {
+        return Err(CliError::Invalid);
+    };
+    if trace[terminal_at + 1..close_at]
+        .iter()
+        .any(|event| *event != OverlappedEvent::Completed && *event != OverlappedEvent::Aborted)
+    {
+        return Err(CliError::Invalid);
+    }
+    if trace.contains(&OverlappedEvent::TimedOut)
+        && !trace[..terminal_at].iter().any(|event| {
+            matches!(
+                event,
+                OverlappedEvent::CancelIssued | OverlappedEvent::CancelFailed
+            )
+        })
+    {
+        return Err(CliError::Invalid);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HelperArgs {
     pub request_id: RequestId,
@@ -177,9 +233,16 @@ pub fn validate_pipe_policy(policy: PipePolicy<'_>) -> Result<(), Error> {
 }
 
 fn valid_pipe_dacl(dacl: &str) -> bool {
-    dacl == PIPE_DACL
-        || (dacl.starts_with("D:P(A;;GRGW;;;S-1-")
-            && dacl.ends_with(")(A;;GRGW;;;SY)(A;;GRGW;;;BA)"))
+    if dacl == PIPE_DACL {
+        return true;
+    }
+    let Some(user) = dacl
+        .strip_prefix("D:P(A;;GRGW;;;")
+        .and_then(|value| value.strip_suffix(")(A;;GRGW;;;SY)(A;;GRGW;;;BA)"))
+    else {
+        return false;
+    };
+    pipe_dacl_for_user_sid(user).is_ok_and(|expected| expected == dacl)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,6 +253,7 @@ pub struct PipeServerSpec {
 
 impl PipeServerSpec {
     pub fn new(request_id: RequestId, user_sid: &str) -> Result<Self, CliError> {
+        RequestId::parse(request_id.as_str()).map_err(|_| CliError::Invalid)?;
         let dacl = pipe_dacl_for_user_sid(user_sid)?;
         if !valid_pipe_dacl(&dacl) {
             return Err(CliError::Invalid);
@@ -246,7 +310,35 @@ pub trait PeerVerifier {
     fn inspect_self(&mut self) -> Result<SelfEvidence, Error>;
     fn inspect_peer(&mut self, pid: u32) -> Result<AuthEvidence, Error>;
     fn verify_peer_continuity(&mut self, pid: u32, evidence: &AuthEvidence) -> Result<(), Error>;
+    fn inspect_self_until(&mut self, deadline: Instant) -> Result<SelfEvidence, Error> {
+        auth_deadline_check(deadline)?;
+        let result = self.inspect_self()?;
+        auth_deadline_check(deadline)?;
+        Ok(result)
+    }
+    fn inspect_peer_until(&mut self, pid: u32, deadline: Instant) -> Result<AuthEvidence, Error> {
+        auth_deadline_check(deadline)?;
+        let result = self.inspect_peer(pid)?;
+        auth_deadline_check(deadline)?;
+        Ok(result)
+    }
+    fn verify_peer_continuity_until(
+        &mut self,
+        pid: u32,
+        evidence: &AuthEvidence,
+        deadline: Instant,
+    ) -> Result<(), Error> {
+        auth_deadline_check(deadline)?;
+        self.verify_peer_continuity(pid, evidence)?;
+        auth_deadline_check(deadline)
+    }
     fn release_peer_lease(&mut self) {}
+}
+
+fn auth_deadline_check(deadline: Instant) -> Result<(), Error> {
+    deadline_remaining(deadline, Instant::now())
+        .map(|_| ())
+        .map_err(|_| auth_error())
 }
 
 fn valid_image(image: &ImageEvidence, expected: &str) -> bool {
@@ -269,7 +361,17 @@ pub fn authenticate_peer<V: PeerVerifier>(
     verifier: &mut V,
     args: &HelperArgs,
 ) -> Result<AuthEvidence, Error> {
-    let self_evidence = verifier.inspect_self().map_err(|_| auth_error())?;
+    authenticate_peer_until(verifier, args, Instant::now() + DEFAULT_AUTH_DEADLINE)
+}
+
+pub fn authenticate_peer_until<V: PeerVerifier>(
+    verifier: &mut V,
+    args: &HelperArgs,
+    deadline: Instant,
+) -> Result<AuthEvidence, Error> {
+    let self_evidence = verifier
+        .inspect_self_until(deadline)
+        .map_err(|_| auth_error())?;
     if !self_evidence.token.elevated
         || !self_evidence.token.high_integrity
         || pipe_dacl_for_user_sid(&self_evidence.token.user_sid).is_err()
@@ -281,7 +383,7 @@ pub fn authenticate_peer<V: PeerVerifier>(
     }
 
     let peer = verifier
-        .inspect_peer(args.gui_pid)
+        .inspect_peer_until(args.gui_pid, deadline)
         .map_err(|_| auth_error())?;
     if peer.pid != args.gui_pid
         || peer.session_id != self_evidence.session_id
@@ -292,7 +394,7 @@ pub fn authenticate_peer<V: PeerVerifier>(
         return Err(auth_error());
     }
     verifier
-        .verify_peer_continuity(args.gui_pid, &peer)
+        .verify_peer_continuity_until(args.gui_pid, &peer, deadline)
         .map_err(|_| auth_error())?;
     Ok(peer)
 }
@@ -304,10 +406,25 @@ pub fn authenticate_peer_on_connection<V: PeerVerifier>(
     args: &HelperArgs,
     server_pid: u32,
 ) -> Result<(), Error> {
+    authenticate_peer_on_connection_until(
+        verifier,
+        args,
+        server_pid,
+        Instant::now() + DEFAULT_AUTH_DEADLINE,
+    )
+}
+
+pub fn authenticate_peer_on_connection_until<V: PeerVerifier>(
+    verifier: &mut V,
+    args: &HelperArgs,
+    server_pid: u32,
+    deadline: Instant,
+) -> Result<(), Error> {
+    auth_deadline_check(deadline)?;
     if server_pid != args.gui_pid {
         return Err(auth_error());
     }
-    authenticate_peer(verifier, args).map(|_| ())
+    authenticate_peer_until(verifier, args, deadline).map(|_| ())
 }
 
 pub fn validate_request_id(expected: &RequestId, actual: &RequestId) -> Result<(), Error> {
@@ -371,7 +488,31 @@ where
     C: crate::windows::OperationMutex,
     P: boothop_core::Platform,
 {
-    let result = match authenticate_peer(verifier, args) {
+    serve_authenticated_session_until(
+        io,
+        args,
+        verifier,
+        Instant::now() + DEFAULT_AUTH_DEADLINE,
+        acquire,
+        construct,
+    )
+}
+
+pub fn serve_authenticated_session_until<I, V, C, P>(
+    io: &mut I,
+    args: &HelperArgs,
+    verifier: &mut V,
+    auth_deadline: Instant,
+    acquire: impl FnOnce() -> Result<crate::windows::WindowsOperationGuard<C>, Error>,
+    construct: impl FnOnce(&crate::windows::WindowsOperationGuard<C>) -> Result<P, Error>,
+) -> Result<(), Error>
+where
+    I: PipeIo,
+    V: PeerVerifier,
+    C: crate::windows::OperationMutex,
+    P: boothop_core::Platform,
+{
+    let result = match authenticate_peer_until(verifier, args, auth_deadline) {
         Err(error) => Err(error),
         Ok(evidence) => {
             let mut before_send = || {
@@ -417,7 +558,8 @@ mod native {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_IO_PENDING, ERROR_TIMEOUT, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_TIMEOUT,
+        GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -438,7 +580,9 @@ mod native {
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ,
         FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
     };
-    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED};
+    use windows_sys::Win32::System::IO::{
+        CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED,
+    };
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
         PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
@@ -448,8 +592,8 @@ mod native {
     use windows_sys::Win32::System::SystemServices::SECURITY_MANDATORY_HIGH_RID;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, GetCurrentProcess, GetExitCodeProcess, GetProcessId, OpenProcess,
-        OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        CreateEventW, GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
 
     const ERROR_BROKEN_PIPE: i32 = 109;
@@ -465,6 +609,10 @@ mod native {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    fn auth_step(deadline: Instant) -> Result<(), Error> {
+        auth_deadline_check(deadline)
+    }
+
     /// The helper is a pipe client. The GUI owns the first-instance server and
     /// supplies the explicit ACL; this side still rejects a non-pipe handle
     /// and asks the server PID through the authenticated pipe boundary.
@@ -475,8 +623,16 @@ mod native {
 
     impl SystemPipe {
         pub fn connect(args: &HelperArgs, timeout_ms: u32) -> Result<Self, Error> {
+            let deadline = Instant::now()
+                + Duration::from_millis(u64::from(
+                    timeout_ms.min(DEFAULT_AUTH_DEADLINE.as_millis() as u32),
+                ));
+            Self::connect_until(args, deadline)
+        }
+
+        pub fn connect_until(args: &HelperArgs, deadline: Instant) -> Result<Self, Error> {
             let name = wide(&build_pipe_name(&args.request_id));
-            let timeout_ms = timeout_ms.min(DEFAULT_AUTH_DEADLINE.as_millis() as u32);
+            let timeout_ms = remaining_ms(deadline).map_err(|_| auth_error())?;
             if unsafe { WaitNamedPipeW(name.as_ptr(), timeout_ms) } == 0 {
                 return Err(native_error(PlatformOperation::Ipc, unsafe {
                     GetLastError() as i32
@@ -498,12 +654,20 @@ mod native {
                     GetLastError() as i32
                 }));
             }
+            if let Err(error) = auth_deadline_check(deadline) {
+                unsafe { CloseHandle(handle) };
+                return Err(error);
+            }
             let mode = PIPE_READMODE_BYTE | PIPE_WAIT;
             let ok = unsafe { SetNamedPipeHandleState(handle, &mode, null_mut(), null_mut()) };
             if ok == 0 {
                 let code = unsafe { GetLastError() as i32 };
                 unsafe { CloseHandle(handle) };
                 return Err(native_error(PlatformOperation::Ipc, code));
+            }
+            if let Err(error) = auth_deadline_check(deadline) {
+                unsafe { CloseHandle(handle) };
+                return Err(error);
             }
             Ok(Self {
                 handle,
@@ -579,17 +743,18 @@ mod native {
             let wait_ms = match remaining_ms(deadline) {
                 Ok(value) => value,
                 Err(error) => {
-                    let _ = unsafe { CancelIoEx(handle, &overlapped) };
+                    let barrier = cancel_and_join(handle, &overlapped);
                     unsafe { CloseHandle(event) };
-                    return Err(error);
+                    return Err(barrier.err().unwrap_or(error));
                 }
             };
             if unsafe { GetOverlappedResultEx(handle, &overlapped, &mut transferred, wait_ms, 0) }
                 == 0
             {
                 let code = unsafe { GetLastError() };
-                let _ = unsafe { CancelIoEx(handle, &overlapped) };
+                let barrier = cancel_and_join(handle, &overlapped);
                 unsafe { CloseHandle(event) };
+                barrier?;
                 return Err(native_error(
                     PlatformOperation::Ipc,
                     if code == ERROR_TIMEOUT {
@@ -602,6 +767,40 @@ mod native {
         }
         let _ = unsafe { CloseHandle(event) };
         Ok(transferred as usize)
+    }
+
+    /// Cancel and synchronously observe completion before the event,
+    /// OVERLAPPED, or caller-owned buffer can leave scope.  NOT_FOUND is the
+    /// documented already-complete race; an aborted completion is also a
+    /// successful barrier, while unrelated completion errors remain visible.
+    fn cancel_and_join(handle: HANDLE, overlapped: &OVERLAPPED) -> Result<(), Error> {
+        let cancel_ok = unsafe { CancelIoEx(handle, overlapped) };
+        let cancel_error = if cancel_ok == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        let mut transferred = 0;
+        let completed = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 1) };
+        let completion_error = if completed == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        if completed == 0
+            && completion_error != ERROR_OPERATION_ABORTED
+            && completion_error != ERROR_NOT_FOUND
+        {
+            return Err(native_error(
+                PlatformOperation::Ipc,
+                if cancel_error != 0 {
+                    cancel_error as i32
+                } else {
+                    completion_error as i32
+                },
+            ));
+        }
+        Ok(())
     }
 
     impl SessionIo for SystemPipe {
@@ -777,11 +976,11 @@ mod native {
                     let wait_ms = match remaining_ms(deadline) {
                         Ok(value) => value,
                         Err(error) => {
-                            let _ = unsafe { CancelIoEx(self.handle, &overlapped) };
+                            let barrier = cancel_and_join(self.handle, &overlapped);
                             unsafe {
                                 CloseHandle(event);
                             }
-                            return Err(error);
+                            return Err(barrier.err().unwrap_or(error));
                         }
                     };
                     if unsafe {
@@ -795,10 +994,11 @@ mod native {
                     } == 0
                     {
                         let error = unsafe { GetLastError() };
-                        let _ = unsafe { CancelIoEx(self.handle, &overlapped) };
+                        let barrier = cancel_and_join(self.handle, &overlapped);
                         unsafe {
                             CloseHandle(event);
                         }
+                        barrier?;
                         return Err(native_error(PlatformOperation::Ipc, error as i32));
                     }
                 }
@@ -842,7 +1042,8 @@ mod native {
             Self { peer_handle: None }
         }
 
-        fn token(handle: HANDLE) -> Result<TokenEvidence, Error> {
+        fn token(handle: HANDLE, deadline: Instant) -> Result<TokenEvidence, Error> {
+            auth_step(deadline)?;
             let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
             let mut returned = 0;
             if unsafe {
@@ -857,6 +1058,7 @@ mod native {
             {
                 return Err(auth_error());
             }
+            auth_step(deadline)?;
             // Vec<u64> gives TOKEN_MANDATORY_LABEL its native alignment. The
             // returned length is authoritative; no pointer is dereferenced
             // until the complete structure and SID are proven in-bounds.
@@ -875,6 +1077,7 @@ mod native {
             {
                 return Err(auth_error());
             }
+            auth_step(deadline)?;
             let label_size = std::mem::size_of::<TOKEN_MANDATORY_LABEL>();
             if (returned as usize) > integrity_bytes
                 || (returned as usize) < label_size
@@ -894,6 +1097,9 @@ mod native {
             if !sid_offset.is_multiple_of(std::mem::align_of::<u32>())
                 || sid_offset >= returned as usize
                 || sid_offset >= integrity_bytes
+                || sid_offset.checked_add(8).is_none()
+                || sid_offset + 8 > returned as usize
+                || sid_offset + 8 > integrity_bytes
             {
                 return Err(auth_error());
             }
@@ -940,6 +1146,7 @@ mod native {
             let high = unsafe { *last } >= SECURITY_MANDATORY_HIGH_RID as u32;
             let mut user_len = 0;
             let mut user = vec![0u64; 128];
+            auth_step(deadline)?;
             if unsafe {
                 GetTokenInformation(
                     handle,
@@ -954,6 +1161,7 @@ mod native {
             {
                 return Err(auth_error());
             }
+            auth_step(deadline)?;
             let user_info = unsafe { &*(user.as_ptr().cast::<TOKEN_USER>()) };
             let user_sid_ptr = user_info.User.Sid;
             let user_base = user.as_ptr() as usize;
@@ -965,6 +1173,8 @@ mod native {
                 || user_sid_offset >= user_len as usize
                 || user_sid_offset < std::mem::size_of::<TOKEN_USER>()
                 || user_sid_offset % std::mem::align_of::<u32>() != 0
+                || user_sid_offset.checked_add(8).is_none()
+                || user_sid_offset + 8 > user_len as usize
             {
                 return Err(auth_error());
             } else {
@@ -973,12 +1183,23 @@ mod native {
                 }
                 unsafe { GetLengthSid(user_sid_ptr) as usize }
             };
+            let user_count_ptr = unsafe { GetSidSubAuthorityCount(user_sid_ptr) };
             if user_sid_len < 8
+                || user_count_ptr.is_null()
                 || user_sid_offset.checked_add(user_sid_len).is_none()
                 || user_sid_offset + user_sid_len > user_len as usize
+                || unsafe { *user_count_ptr == 0 }
             {
                 return Err(auth_error());
             }
+            let user_count = unsafe { *user_count_ptr };
+            let user_expected_len = 8usize + usize::from(user_count) * 4;
+            if user_sid_len != user_expected_len {
+                return Err(auth_error());
+            }
+            let user_sid_bytes =
+                unsafe { std::slice::from_raw_parts(user_sid_ptr.cast::<u8>(), user_sid_len) };
+            validate_sid_bytes(user_sid_bytes, user_count).map_err(|_| auth_error())?;
             let mut sid_string = std::ptr::null_mut();
             if unsafe { ConvertSidToStringSidW(user_sid_ptr, &mut sid_string) } == 0
                 || sid_string.is_null()
@@ -1004,6 +1225,7 @@ mod native {
             };
             let mut stats = TOKEN_STATISTICS::default();
             let mut stats_len = 0;
+            auth_step(deadline)?;
             if unsafe {
                 GetTokenInformation(
                     handle,
@@ -1016,6 +1238,7 @@ mod native {
             {
                 return Err(auth_error());
             }
+            auth_step(deadline)?;
             let token_id = (u128::from(stats.TokenId.HighPart as u32) << 32)
                 | u128::from(stats.TokenId.LowPart);
             Ok(TokenEvidence {
@@ -1026,36 +1249,49 @@ mod native {
             })
         }
 
-        fn process(pid: u32) -> Result<(Handle, AuthEvidence), Error> {
-            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        fn process(pid: u32, deadline: Instant) -> Result<(Handle, AuthEvidence), Error> {
+            auth_step(deadline)?;
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    0,
+                    pid,
+                )
+            };
             if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 return Err(auth_error());
             }
             let handle = Handle(handle);
+            auth_step(deadline)?;
             let mut token = HANDLE::default();
+            auth_step(deadline)?;
             if unsafe { OpenProcessToken(handle.0, TOKEN_QUERY, &mut token) } == 0 {
                 return Err(auth_error());
             }
             let token = Handle(token);
+            auth_step(deadline)?;
             let evidence = AuthEvidence {
                 pid,
-                token: Self::token(token.0)?,
-                image: image(handle.0)?,
-                session_id: session(pid)?,
+                token: Self::token(token.0, deadline)?,
+                image: image(handle.0, GUI_IMAGE_PATH, deadline)?,
+                session_id: session(pid, deadline)?,
             };
             Ok((handle, evidence))
         }
     }
 
-    fn session(pid: u32) -> Result<u32, Error> {
+    fn session(pid: u32, deadline: Instant) -> Result<u32, Error> {
+        auth_step(deadline)?;
         let mut value = 0;
         if unsafe { ProcessIdToSessionId(pid, &mut value) } == 0 || value == 0 {
             return Err(auth_error());
         }
+        auth_step(deadline)?;
         Ok(value)
     }
 
-    fn image(process: HANDLE) -> Result<ImageEvidence, Error> {
+    fn image(process: HANDLE, expected: &str, deadline: Instant) -> Result<ImageEvidence, Error> {
+        auth_step(deadline)?;
         let mut raw = vec![0u16; 32_768];
         let mut length = raw.len() as u32;
         if unsafe {
@@ -1069,8 +1305,14 @@ mod native {
         {
             return Err(auth_error());
         }
+        auth_step(deadline)?;
         raw.truncate(length as usize);
-        let path = raw;
+        let reported = String::from_utf16(&raw).map_err(|_| auth_error())?;
+        let reported = reported.strip_prefix(r"\\?\").unwrap_or(&reported);
+        if reported != expected || reported.contains("..") {
+            return Err(auth_error());
+        }
+        let path = wide(expected);
         let file = unsafe {
             CreateFileW(
                 path.as_ptr(),
@@ -1086,6 +1328,7 @@ mod native {
             return Err(auth_error());
         }
         let file = Handle(file);
+        auth_step(deadline)?;
         let mut normalized = vec![0u16; 32_768];
         let count = unsafe {
             GetFinalPathNameByHandleW(
@@ -1098,6 +1341,7 @@ mod native {
         if count == 0 || count as usize >= normalized.len() {
             return Err(auth_error());
         }
+        auth_step(deadline)?;
         normalized.truncate(count as usize);
         let mut info = BY_HANDLE_FILE_INFORMATION {
             dwFileAttributes: 0,
@@ -1114,6 +1358,7 @@ mod native {
         if unsafe { GetFileInformationByHandle(file.0, &mut info) } == 0 {
             return Err(auth_error());
         }
+        auth_step(deadline)?;
         let canonical = String::from_utf16(&normalized).map_err(|_| auth_error())?;
         let canonical = canonical
             .strip_prefix(r"\\?\")
@@ -1130,21 +1375,35 @@ mod native {
 
     impl PeerVerifier for SystemPeerVerifier {
         fn inspect_self(&mut self) -> Result<SelfEvidence, Error> {
+            self.inspect_self_until(Instant::now() + DEFAULT_AUTH_DEADLINE)
+        }
+
+        fn inspect_self_until(&mut self, deadline: Instant) -> Result<SelfEvidence, Error> {
             let process = unsafe { GetCurrentProcess() };
             let mut token = HANDLE::default();
+            auth_step(deadline)?;
             if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
                 return Err(auth_error());
             }
             let token_handle = Handle(token);
+            auth_step(deadline)?;
             Ok(SelfEvidence {
-                token: Self::token(token_handle.0)?,
-                image: image(process)?,
-                session_id: session(unsafe { GetCurrentProcessId() })?,
+                token: Self::token(token_handle.0, deadline)?,
+                image: image(process, HELPER_IMAGE_PATH, deadline)?,
+                session_id: session(unsafe { GetCurrentProcessId() }, deadline)?,
             })
         }
 
         fn inspect_peer(&mut self, pid: u32) -> Result<AuthEvidence, Error> {
-            let (handle, evidence) = Self::process(pid)?;
+            self.inspect_peer_until(pid, Instant::now() + DEFAULT_AUTH_DEADLINE)
+        }
+
+        fn inspect_peer_until(
+            &mut self,
+            pid: u32,
+            deadline: Instant,
+        ) -> Result<AuthEvidence, Error> {
+            let (handle, evidence) = Self::process(pid, deadline)?;
             self.peer_handle = Some(handle);
             Ok(evidence)
         }
@@ -1154,18 +1413,35 @@ mod native {
             pid: u32,
             evidence: &AuthEvidence,
         ) -> Result<(), Error> {
+            self.verify_peer_continuity_until(pid, evidence, Instant::now() + DEFAULT_AUTH_DEADLINE)
+        }
+
+        fn verify_peer_continuity_until(
+            &mut self,
+            pid: u32,
+            evidence: &AuthEvidence,
+            deadline: Instant,
+        ) -> Result<(), Error> {
             if self.peer_handle.is_none() {
                 return Err(auth_error());
             }
             let retained = self.peer_handle.as_ref().ok_or_else(auth_error)?;
-            let mut exit_code = 0;
-            if unsafe { GetProcessId(retained.0) } != pid
-                || unsafe { GetExitCodeProcess(retained.0, &mut exit_code) } == 0
-                || exit_code != 259
-            {
+            auth_step(deadline)?;
+            if unsafe { GetProcessId(retained.0) } != pid {
                 return Err(auth_error());
             }
-            let (_, current) = Self::process(pid)?;
+            let liveness = unsafe { WaitForSingleObject(retained.0, 0) };
+            if liveness == WAIT_FAILED {
+                return Err(native_error(PlatformOperation::Process, unsafe {
+                    GetLastError() as i32
+                }));
+            }
+            if liveness != WAIT_TIMEOUT {
+                return Err(auth_error());
+            }
+            auth_step(deadline)?;
+            let (_, current) = Self::process(pid, deadline)?;
+            auth_step(deadline)?;
             if current == *evidence {
                 Ok(())
             } else {
@@ -1179,15 +1455,19 @@ mod native {
     }
 
     pub fn run(args: HelperArgs) -> Result<(), Error> {
-        let mut io = SystemPipe::connect(&args, DEFAULT_AUTH_DEADLINE.as_millis() as u32)?;
+        let auth_deadline = Instant::now() + DEFAULT_AUTH_DEADLINE;
+        let mut io = SystemPipe::connect_until(&args, auth_deadline)?;
+        auth_step(auth_deadline)?;
         if io.server_pid()? != args.gui_pid {
             return Err(auth_error());
         }
+        auth_step(auth_deadline)?;
         let mut verifier = SystemPeerVerifier::new();
-        serve_authenticated_session(
+        serve_authenticated_session_until(
             &mut io,
             &args,
             &mut verifier,
+            auth_deadline,
             || {
                 crate::windows::WindowsOperationGuard::acquire(
                     crate::windows::lock::native::SystemOperationMutex::default(),
