@@ -35,7 +35,16 @@ pub fn safe_description(units: &[u16]) -> String {
     display
 }
 
+/// Canonicalize untrusted UTF-16 before it is persisted as UI state. The
+/// resulting value contains only bounded, display-safe Unicode scalar values.
+pub(crate) fn sanitized_description(units: &[u16]) -> Vec<u16> {
+    safe_description(units).encode_utf16().collect()
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{LinuxCache, resolve_cache_path};
+
+mod windows;
+pub use windows::{WindowsCache, resolve_windows_cache_path};

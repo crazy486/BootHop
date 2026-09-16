@@ -59,3 +59,34 @@ fn linux_entry_point_wires_explicit_callbacks_and_event_loop_completions() {
         assert!(main.contains(boundary), "missing {boundary}");
     }
 }
+
+#[test]
+fn windows_entry_point_wires_helper_client_and_untrusted_local_cache_only() {
+    let main =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    for boundary in [
+        "#[cfg(windows)]",
+        "WindowsClient::system()",
+        "WindowsCache::from_local_app_data()",
+        "on_inspect",
+        "on_switch_target",
+        "on_configure",
+    ] {
+        assert!(main.contains(boundary), "missing {boundary}");
+    }
+    for forbidden in [
+        "GetFirmwareEnvironmentVariable",
+        "SetFirmwareEnvironmentVariable",
+        "AdjustTokenPrivileges",
+        "InitiateSystemShutdown",
+        "bcdedit",
+        "CreateProcess",
+        "ShellExecute",
+        "std::process::",
+    ] {
+        assert!(
+            !main.contains(forbidden),
+            "forbidden GUI capability {forbidden}"
+        );
+    }
+}

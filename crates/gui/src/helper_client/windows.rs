@@ -409,6 +409,13 @@ mod native;
 pub use native::SystemWindowsBoundary;
 
 #[cfg(windows)]
+impl WindowsClient<SystemWindowsBoundary> {
+    pub fn system() -> Self {
+        Self::new(SystemWindowsBoundary::system())
+    }
+}
+
+#[cfg(windows)]
 pub fn system() -> WindowsClient<SystemWindowsBoundary> {
-    WindowsClient::new(SystemWindowsBoundary::system())
+    WindowsClient::system()
 }

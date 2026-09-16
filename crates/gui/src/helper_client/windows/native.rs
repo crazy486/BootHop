@@ -51,6 +51,10 @@ const STILL_ACTIVE: u32 = 259;
 const WAIT_TIMEOUT: u32 = 258;
 
 struct Handle(HANDLE);
+// A boundary is moved into the controller's single worker and never shared;
+// Windows kernel handles are process-wide synchronization objects whose
+// ownership can safely transfer between threads.
+unsafe impl Send for Handle {}
 impl Drop for Handle {
     fn drop(&mut self) {
         if !self.0.is_null()

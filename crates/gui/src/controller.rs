@@ -18,6 +18,14 @@ impl<B: Boundary + Send + 'static> Helper for HelperClient<B> {
         HelperClient::run(self, request)
     }
 }
+#[cfg(windows)]
+impl<B: crate::helper_client::windows::WindowsBoundary + Send + 'static> Helper
+    for crate::helper_client::windows::WindowsClient<B>
+{
+    fn run(&mut self, request: Request) -> Result<Report, ClientError> {
+        crate::helper_client::windows::WindowsClient::run(self, request)
+    }
+}
 #[derive(Debug)]
 pub struct ScheduleError;
 /// An error guarantees the job did not run and will not run later.
