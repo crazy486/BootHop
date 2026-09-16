@@ -1,6 +1,7 @@
 //! One-shot trusted dispatch. Transport input is intent only.
 use boothop_core::{Error, Os, Platform, PlatformOperation, Report, Request};
 use boothop_protocol as protocol;
+use boothop_protocol::RequestId;
 
 pub type SendResult<'a> = dyn FnMut(Result<Report, Error>) -> Result<(), Error> + 'a;
 /// Implementations enforce a single 30s deadline across receive and send.
@@ -78,11 +79,42 @@ where
     C: crate::windows::OperationMutex,
     P: Platform,
 {
+    serve_windows_inner(io, authenticate, acquire, construct, None)
+}
+
+pub fn serve_windows_with_id<C, P>(
+    io: &mut impl SessionIo,
+    expected_id: &RequestId,
+    authenticate: impl FnOnce() -> Result<(), Error>,
+    acquire: impl FnOnce() -> Result<crate::windows::WindowsOperationGuard<C>, Error>,
+    construct: impl FnOnce(&crate::windows::WindowsOperationGuard<C>) -> Result<P, Error>,
+) -> Result<(), Error>
+where
+    C: crate::windows::OperationMutex,
+    P: Platform,
+{
+    serve_windows_inner(io, authenticate, acquire, construct, Some(expected_id))
+}
+
+fn serve_windows_inner<C, P>(
+    io: &mut impl SessionIo,
+    authenticate: impl FnOnce() -> Result<(), Error>,
+    acquire: impl FnOnce() -> Result<crate::windows::WindowsOperationGuard<C>, Error>,
+    construct: impl FnOnce(&crate::windows::WindowsOperationGuard<C>) -> Result<P, Error>,
+    expected_id: Option<&RequestId>,
+) -> Result<(), Error>
+where
+    C: crate::windows::OperationMutex,
+    P: Platform,
+{
     authenticate()?;
     let hello = protocol::encode_hello();
     io.send(&hello)?;
     let envelope =
         protocol::decode_request_envelope(&io.receive()?).map_err(|_| Error::UnsupportedFormat)?;
+    if let Some(expected_id) = expected_id {
+        crate::windows::pipe::validate_request_id(expected_id, &envelope.request_id)?;
+    }
     let request_id = envelope.request_id;
     let mut sent = false;
     let mut send = |result| {

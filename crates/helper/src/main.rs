@@ -26,8 +26,8 @@ fn main() {
 }
 #[cfg(windows)]
 fn main() {
-    let argv = std::env::args().skip(1).collect::<Vec<_>>();
-    let Ok(args) = boothop_helper::windows::pipe::parse_args(&argv) else {
+    let argv = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let Ok(args) = boothop_helper::windows::pipe::parse_args_os(&argv) else {
         std::process::exit(1);
     };
     // Keep native endpoint failures generic at the process boundary; the
