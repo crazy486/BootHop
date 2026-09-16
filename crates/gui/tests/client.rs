@@ -45,24 +45,53 @@ impl Boundary for Fake {
         // encoder. Malformed/fragmented fixtures remain untouched.
         if let Ok(request) = boothop_protocol::decode_request_envelope(bytes) {
             let mut rewritten = VecDeque::new();
+            let mut fragments: Vec<Vec<u8>> = Vec::new();
+            let flush = |fragments: &mut Vec<Vec<u8>>, rewritten: &mut VecDeque<_>| {
+                if fragments.is_empty() {
+                    return;
+                }
+                let sizes: Vec<_> = fragments.iter().map(Vec::len).collect();
+                let mut joined = Vec::new();
+                for fragment in fragments.drain(..) {
+                    joined.extend_from_slice(&fragment);
+                }
+                if let Ok(response) = boothop_protocol::decode_response_envelope(&joined) {
+                    let frame = boothop_protocol::encode_response_with_id(
+                        &request.request_id,
+                        response.result,
+                    )
+                    .unwrap();
+                    let mut offset = 0;
+                    for size in sizes {
+                        let end = (offset + size).min(frame.len());
+                        rewritten.push_back(Ok(Event::Stdout(frame[offset..end].to_vec())));
+                        offset = end;
+                    }
+                    if offset < frame.len() {
+                        rewritten.push_back(Ok(Event::Stdout(frame[offset..].to_vec())));
+                    }
+                } else {
+                    rewritten.extend(
+                        fragments
+                            .drain(..)
+                            .map(|fragment| Ok(Event::Stdout(fragment))),
+                    );
+                }
+            };
             while let Some(event) = self.events.pop_front() {
                 let event = match event {
                     Ok(Event::Stdout(frame)) => {
-                        if let Ok(response) = boothop_protocol::decode_response_envelope(&frame) {
-                            let frame = boothop_protocol::encode_response_with_id(
-                                &request.request_id,
-                                response.result,
-                            )
-                            .unwrap();
-                            Ok(Event::Stdout(frame))
-                        } else {
-                            Ok(Event::Stdout(frame))
-                        }
+                        fragments.push(frame);
+                        continue;
                     }
-                    other => other,
+                    other => {
+                        flush(&mut fragments, &mut rewritten);
+                        other
+                    }
                 };
                 rewritten.push_back(event);
             }
+            flush(&mut fragments, &mut rewritten);
             self.events = rewritten;
         }
         Ok(())
