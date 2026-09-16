@@ -2,9 +2,9 @@ use boothop_core::{Error, PlatformOperation};
 use boothop_helper::windows::pipe::{
     AuthEvidence, DEFAULT_AUTH_DEADLINE, DEFAULT_OPERATION_DEADLINE, HelperArgs, ImageEvidence,
     OverlappedEvent, PeerVerifier, PipePolicy, SelfEvidence, TokenEvidence, TokenLabelLayout,
-    authenticate_peer, authenticate_peer_on_connection, build_pipe_name, parse_args,
-    pipe_dacl_for_user_sid, validate_overlapped_trace, validate_pipe_policy, validate_sid_bytes,
-    validate_token_label_layout,
+    WatchdogDecision, authenticate_peer, authenticate_peer_on_connection, build_pipe_name,
+    parse_args, pipe_dacl_for_user_sid, validate_overlapped_trace, validate_pipe_policy,
+    validate_sid_bytes, validate_sid_header, validate_token_label_layout, watchdog_decision,
 };
 use boothop_helper::windows::{
     GUI_IMAGE_PATH, HELPER_IMAGE_PATH, PIPE_DACL, PIPE_MAX_BYTES, PIPE_NAME_PREFIX,
@@ -173,6 +173,7 @@ struct FakeVerifier {
     self_evidence: Option<SelfEvidence>,
     peer: Option<AuthEvidence>,
     continuity_evidence: Option<AuthEvidence>,
+    continuity_deadlines: Option<std::rc::Rc<std::cell::RefCell<Vec<std::time::Instant>>>>,
     calls: Vec<&'static str>,
 }
 
@@ -195,6 +196,17 @@ impl PeerVerifier for FakeVerifier {
             return Err(Error::UnsupportedFormat);
         }
         Ok(())
+    }
+    fn verify_peer_continuity_until(
+        &mut self,
+        pid: u32,
+        evidence: &AuthEvidence,
+        deadline: std::time::Instant,
+    ) -> Result<(), Error> {
+        if let Some(deadlines) = &self.continuity_deadlines {
+            deadlines.borrow_mut().push(deadline);
+        }
+        self.verify_peer_continuity(pid, evidence)
     }
 }
 
@@ -462,6 +474,7 @@ fn authenticated_session_authenticates_before_receive_and_closes_once() {
     }
     let events = Rc::new(RefCell::new(Vec::new()));
     let deadlines = Rc::new(RefCell::new(Vec::new()));
+    let continuity_deadlines = Rc::new(RefCell::new(Vec::new()));
     let mut io = Io {
         events: events.clone(),
         deadlines: deadlines.clone(),
@@ -479,6 +492,7 @@ fn authenticated_session_authenticates_before_receive_and_closes_once() {
             image: image(GUI_IMAGE_PATH, false),
             session_id: 9,
         }),
+        continuity_deadlines: Some(continuity_deadlines.clone()),
         ..FakeVerifier::default()
     };
     let result = serve_authenticated_session::<
@@ -497,6 +511,11 @@ fn authenticated_session_authenticates_before_receive_and_closes_once() {
     assert_eq!(&events.borrow()[..], ["send", "receive", "send", "close"]);
     assert_eq!(deadlines.borrow().len(), 3);
     assert!(deadlines.borrow().windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(continuity_deadlines.borrow().len(), 3);
+    assert_eq!(
+        continuity_deadlines.borrow()[1],
+        continuity_deadlines.borrow()[2]
+    );
 }
 
 struct FakeStore;
@@ -664,6 +683,12 @@ fn token_label_layout_rejects_null_and_malformed_sid_bounds() {
     assert!(validate_sid_bytes(&sid, 2).is_err());
     assert!(validate_sid_bytes(&sid[..8], 2).is_err());
     assert!(validate_sid_bytes(&[1, 255, 0, 0, 0, 0, 0, 0], 255).is_err());
+    assert_eq!(
+        validate_sid_header(&[1, 2, 0, 0, 0, 0, 0, 0], 16).unwrap(),
+        16
+    );
+    assert!(validate_sid_header(&[1, 2, 0, 0], 16).is_err());
+    assert!(validate_sid_header(&[1, 4, 0, 0, 0, 0, 0, 0], 16).is_err());
 }
 
 #[test]
@@ -678,11 +703,27 @@ fn overlapped_completion_barrier_requires_cancel_sync_and_exact_close() {
     for invalid in [
         vec![Pending, TimedOut, Closed],
         vec![Pending, TimedOut, CancelIssued, Closed],
+        vec![Pending, Completed, Completed, Closed],
         vec![Pending, Completed, Closed, Closed],
         vec![Pending, TimedOut, CancelIssued, Aborted],
     ] {
         assert!(validate_overlapped_trace(&invalid).is_err());
     }
+}
+
+#[test]
+fn auth_watchdog_aborts_only_when_armed_deadline_expires() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    assert_eq!(
+        watchdog_decision(now + Duration::from_secs(1), now, true),
+        WatchdogDecision::Wait
+    );
+    assert_eq!(watchdog_decision(now, now, true), WatchdogDecision::Abort);
+    assert_eq!(
+        watchdog_decision(now, now, false),
+        WatchdogDecision::Disarmed
+    );
 }
 
 #[test]
@@ -745,7 +786,7 @@ fn typed_pipe_server_policy_binds_exact_request_id_and_user_sid() {
         "S-1-5-21-1-2-3-1001",
     )
     .unwrap();
-    assert_eq!(spec.name(), build_pipe_name(&spec.request_id));
+    assert_eq!(spec.name(), build_pipe_name(spec.request_id()));
     assert!(spec.dacl().unwrap().contains("S-1-5-21-1-2-3-1001"));
     assert!(
         PipeServerSpec::new(
