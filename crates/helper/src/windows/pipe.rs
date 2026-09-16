@@ -462,11 +462,20 @@ pub fn authenticate_peer_on_connection_until<V: PeerVerifier>(
     server_pid: u32,
     deadline: Instant,
 ) -> Result<(), Error> {
+    authenticate_peer_on_connection_evidence_until(verifier, args, server_pid, deadline).map(|_| ())
+}
+
+pub fn authenticate_peer_on_connection_evidence_until<V: PeerVerifier>(
+    verifier: &mut V,
+    args: &HelperArgs,
+    server_pid: u32,
+    deadline: Instant,
+) -> Result<AuthEvidence, Error> {
     auth_deadline_check(deadline)?;
     if server_pid != args.gui_pid {
         return Err(auth_error());
     }
-    authenticate_peer_until(verifier, args, deadline).map(|_| ())
+    authenticate_peer_until(verifier, args, deadline)
 }
 
 pub fn validate_request_id(expected: &RequestId, actual: &RequestId) -> Result<(), Error> {
@@ -478,12 +487,13 @@ pub fn validate_request_id(expected: &RequestId, actual: &RequestId) -> Result<(
 }
 
 pub fn deadline_remaining(deadline: Instant, now: Instant) -> Result<Duration, Error> {
-    deadline
-        .checked_duration_since(now)
-        .ok_or(Error::PlatformIo {
+    if now >= deadline {
+        return Err(Error::PlatformIo {
             operation: PlatformOperation::Ipc,
             raw_code: 1460,
-        })
+        });
+    }
+    Ok(deadline.duration_since(now))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -493,13 +503,221 @@ pub enum WatchdogDecision {
     Disarmed,
 }
 
-pub fn watchdog_decision(deadline: Instant, now: Instant, armed: bool) -> WatchdogDecision {
-    if !armed {
-        WatchdogDecision::Disarmed
-    } else if deadline <= now {
-        WatchdogDecision::Abort
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchdogState {
+    Armed,
+    Disarmed,
+    Expired,
+}
+
+/// Pure worker transition. Equality with the deadline is expired, so callers
+/// cannot turn a completed deadline into a successful disarm by observing it
+/// one tick late.
+pub fn watchdog_worker_state(
+    state: WatchdogState,
+    deadline: Instant,
+    now: Instant,
+) -> WatchdogState {
+    if state == WatchdogState::Armed && now >= deadline {
+        WatchdogState::Expired
     } else {
-        WatchdogDecision::Wait
+        state
+    }
+}
+
+/// Pure disarm transition. It is intentionally the same boundary as the
+/// worker transition, which makes the lock race fail closed whichever side
+/// acquires the state lock first.
+pub fn watchdog_disarm_state(
+    state: WatchdogState,
+    deadline: Instant,
+    now: Instant,
+) -> WatchdogState {
+    if state == WatchdogState::Armed && now < deadline {
+        WatchdogState::Disarmed
+    } else if state == WatchdogState::Armed || state == WatchdogState::Expired {
+        WatchdogState::Expired
+    } else {
+        WatchdogState::Disarmed
+    }
+}
+
+pub fn watchdog_decision(deadline: Instant, now: Instant, armed: bool) -> WatchdogDecision {
+    match watchdog_worker_state(
+        if armed {
+            WatchdogState::Armed
+        } else {
+            WatchdogState::Disarmed
+        },
+        deadline,
+        now,
+    ) {
+        WatchdogState::Armed => WatchdogDecision::Wait,
+        WatchdogState::Disarmed => WatchdogDecision::Disarmed,
+        WatchdogState::Expired => WatchdogDecision::Abort,
+    }
+}
+
+struct WatchdogShared {
+    state: WatchdogState,
+    worker_started: bool,
+    worker_finished: bool,
+    abort_issued: bool,
+}
+
+/// A one-shot deadline watchdog. The worker-start handshake completes before
+/// `arm_with_abort` returns. Both worker expiry and disarm inspect the same
+/// synchronized state; an elapsed deadline invokes the injected fail-closed
+/// hook exactly once. Production supplies a hook that aborts the process.
+pub struct Watchdog {
+    shared: std::sync::Arc<(std::sync::Mutex<WatchdogShared>, std::sync::Condvar)>,
+    deadline: Instant,
+    abort: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    pub fn arm_with_abort(
+        deadline: Instant,
+        abort: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Self {
+        let shared = std::sync::Arc::new((
+            std::sync::Mutex::new(WatchdogShared {
+                state: WatchdogState::Armed,
+                worker_started: false,
+                worker_finished: false,
+                abort_issued: false,
+            }),
+            std::sync::Condvar::new(),
+        ));
+        let thread_shared = shared.clone();
+        let thread_abort = abort.clone();
+        let worker = std::thread::Builder::new()
+            .name("boothop-deadline-watchdog".to_owned())
+            .spawn(move || {
+                let (lock, wake) = &*thread_shared;
+                let mut guard = match lock.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => std::process::abort(),
+                };
+                guard.worker_started = true;
+                wake.notify_all();
+                loop {
+                    if guard.state != WatchdogState::Armed {
+                        guard.worker_finished = true;
+                        wake.notify_all();
+                        return;
+                    }
+                    let now = Instant::now();
+                    if watchdog_worker_state(guard.state, deadline, now) == WatchdogState::Expired {
+                        guard.state = WatchdogState::Expired;
+                        guard.abort_issued = true;
+                        wake.notify_all();
+                        drop(guard);
+                        thread_abort();
+                        let mut guard = match lock.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => std::process::abort(),
+                        };
+                        guard.worker_finished = true;
+                        wake.notify_all();
+                        return;
+                    }
+                    let remaining = deadline.duration_since(now);
+                    let (next, _) = match wake.wait_timeout(guard, remaining) {
+                        Ok(value) => value,
+                        Err(_) => std::process::abort(),
+                    };
+                    guard = next;
+                }
+            })
+            .unwrap_or_else(|_| std::process::abort());
+
+        // Do not return until the worker has observed the Armed state. This
+        // removes the construction race with synchronous connect/auth work.
+        let (lock, wake) = &*shared;
+        let mut guard = match lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => std::process::abort(),
+        };
+        while !guard.worker_started {
+            guard = match wake.wait(guard) {
+                Ok(guard) => guard,
+                Err(_) => std::process::abort(),
+            };
+        }
+        drop(guard);
+        Self {
+            shared,
+            deadline,
+            abort,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn worker_started(&self) -> bool {
+        let (lock, _) = &*self.shared;
+        match lock.lock() {
+            Ok(guard) => guard.worker_started,
+            Err(_) => std::process::abort(),
+        }
+    }
+
+    pub fn state(&self) -> WatchdogState {
+        let (lock, _) = &*self.shared;
+        match lock.lock() {
+            Ok(guard) => guard.state,
+            Err(_) => std::process::abort(),
+        }
+    }
+
+    pub fn disarm(&mut self) {
+        let should_abort = {
+            let (lock, wake) = &*self.shared;
+            let mut guard = match lock.lock() {
+                Ok(guard) => guard,
+                Err(_) => std::process::abort(),
+            };
+            let next = watchdog_disarm_state(guard.state, self.deadline, Instant::now());
+            guard.state = next;
+            let should_abort = next == WatchdogState::Expired && !guard.abort_issued;
+            if should_abort {
+                guard.abort_issued = true;
+            }
+            wake.notify_all();
+            should_abort
+        };
+        if self.worker.is_some() {
+            let (lock, wake) = &*self.shared;
+            let guard = match lock.lock() {
+                Ok(guard) => guard,
+                Err(_) => std::process::abort(),
+            };
+            let (guard, timeout) =
+                match wake.wait_timeout_while(guard, Duration::from_millis(100), |state| {
+                    !state.worker_finished
+                }) {
+                    Ok(value) => value,
+                    Err(_) => std::process::abort(),
+                };
+            if timeout.timed_out() && !guard.worker_finished {
+                std::process::abort();
+            }
+        }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            std::process::abort();
+        }
+        if should_abort {
+            (self.abort)();
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.disarm();
     }
 }
 
@@ -520,10 +738,12 @@ struct SessionAdapter<'a, I: PipeIo> {
 
 impl<I: PipeIo> crate::dispatch::SessionIo for SessionAdapter<'_, I> {
     fn receive(&mut self) -> Result<Vec<u8>, Error> {
+        deadline_remaining(self.deadline, Instant::now())?;
         self.io.receive_frame(self.deadline)
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        deadline_remaining(self.deadline, Instant::now())?;
         if let Some(before_send) = self.before_send.as_mut() {
             before_send(self.deadline)?;
         }
@@ -571,28 +791,63 @@ where
     C: crate::windows::OperationMutex,
     P: boothop_core::Platform,
 {
-    let result = match authenticate_peer_until(verifier, args, auth_deadline) {
-        Err(error) => Err(error),
-        Ok(evidence) => {
-            let mut before_send = |deadline| {
-                verifier
-                    .verify_peer_continuity_until(args.gui_pid, &evidence, deadline)
-                    .map_err(|_| auth_error())
-            };
-            let mut session = SessionAdapter {
-                io,
-                deadline: Instant::now() + DEFAULT_OPERATION_DEADLINE,
-                before_send: Some(&mut before_send),
-            };
-            crate::dispatch::serve_windows_with_id(
-                &mut session,
-                &args.request_id,
-                || Ok(()),
-                acquire,
-                construct,
-            )
+    let mut acquire = Some(acquire);
+    match authenticate_peer_until(verifier, args, auth_deadline) {
+        Err(error) => {
+            verifier.release_peer_lease();
+            let closed = io.close();
+            Err::<(), _>(error).and(closed)
         }
+        Ok(evidence) => serve_authenticated_operation_until(
+            io,
+            args,
+            verifier,
+            evidence,
+            Instant::now() + DEFAULT_OPERATION_DEADLINE,
+            move |_| acquire.take().ok_or(Error::UnsupportedFormat)?(),
+            construct,
+        ),
+    }
+}
+
+/// Continue a session after peer authentication has completed. The caller
+/// must disarm the authentication watchdog before invoking this function and
+/// supply the one absolute operation deadline. Cleanup (peer lease release and
+/// pipe close) remains inside this function so the operation watchdog covers
+/// it as well as dispatch and guard release.
+pub fn serve_authenticated_operation_until<I, V, C, P>(
+    io: &mut I,
+    args: &HelperArgs,
+    verifier: &mut V,
+    evidence: AuthEvidence,
+    operation_deadline: Instant,
+    acquire: impl FnOnce(Instant) -> Result<crate::windows::WindowsOperationGuard<C>, Error>,
+    construct: impl FnOnce(&crate::windows::WindowsOperationGuard<C>) -> Result<P, Error>,
+) -> Result<(), Error>
+where
+    I: PipeIo,
+    V: PeerVerifier,
+    C: crate::windows::OperationMutex,
+    P: boothop_core::Platform,
+{
+    let mut before_send = |deadline| {
+        verifier
+            .verify_peer_continuity_until(args.gui_pid, &evidence, deadline)
+            .map_err(|_| auth_error())
     };
+    let mut session = SessionAdapter {
+        io,
+        deadline: operation_deadline,
+        before_send: Some(&mut before_send),
+    };
+    let mut acquire = Some(acquire);
+    let result = crate::dispatch::serve_windows_with_id(
+        &mut session,
+        &args.request_id,
+        || Ok(()),
+        move || acquire.take().ok_or(Error::UnsupportedFormat)?(operation_deadline),
+        construct,
+    );
     verifier.release_peer_lease();
     let closed = io.close();
     result.and(closed)
@@ -613,7 +868,6 @@ pub fn validate_frame(bytes: &[u8]) -> Result<(), Error> {
 #[allow(dead_code)]
 mod native {
     use super::*;
-    use crate::dispatch::SessionIo;
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Foundation::{
@@ -671,62 +925,6 @@ mod native {
 
     fn auth_step(deadline: Instant) -> Result<(), Error> {
         auth_deadline_check(deadline)
-    }
-
-    struct AuthWatchdog {
-        state: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-        worker: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl AuthWatchdog {
-        fn arm(deadline: Instant) -> Self {
-            let state =
-                std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-            let thread_state = state.clone();
-            let worker = std::thread::spawn(move || {
-                loop {
-                    let (lock, wake) = &*thread_state;
-                    let guard = match lock.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => std::process::abort(),
-                    };
-                    if *guard {
-                        return;
-                    }
-                    let remaining = match deadline.checked_duration_since(Instant::now()) {
-                        Some(remaining) => remaining,
-                        None => std::process::abort(),
-                    };
-                    let (guard, result) = match wake.wait_timeout(guard, remaining) {
-                        Ok(result) => result,
-                        Err(_) => std::process::abort(),
-                    };
-                    if !*guard && result.timed_out() {
-                        std::process::abort();
-                    }
-                }
-            });
-            Self {
-                state,
-                worker: Some(worker),
-            }
-        }
-
-        fn disarm(&mut self) {
-            if let Ok(mut armed) = self.state.0.lock() {
-                *armed = true;
-                self.state.1.notify_one();
-            }
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
-        }
-    }
-
-    impl Drop for AuthWatchdog {
-        fn drop(&mut self) {
-            self.disarm();
-        }
     }
 
     /// The helper is a pipe client. The GUI owns the first-instance server and
@@ -807,7 +1005,9 @@ mod native {
 
     fn remaining_ms(deadline: Instant) -> Result<u32, Error> {
         let remaining = deadline_remaining(deadline, Instant::now())?;
-        Ok(remaining.as_millis().clamp(1, u32::MAX as u128) as u32)
+        // A sub-millisecond remainder becomes an immediate OS poll. There is
+        // no synthetic 1 ms grace period at the absolute deadline.
+        Ok(remaining.as_millis().min(u128::from(u32::MAX)) as u32)
     }
 
     fn transfer(
@@ -923,15 +1123,6 @@ mod native {
         }
         let _ = cancel_error;
         std::process::abort()
-    }
-
-    impl SessionIo for SystemPipe {
-        fn receive(&mut self) -> Result<Vec<u8>, Error> {
-            self.receive_frame(Instant::now() + DEFAULT_OPERATION_DEADLINE)
-        }
-        fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
-            self.send_frame(bytes, Instant::now() + DEFAULT_OPERATION_DEADLINE)
-        }
     }
 
     impl PipeIo for SystemPipe {
@@ -1586,22 +1777,33 @@ mod native {
 
     pub fn run(args: HelperArgs) -> Result<(), Error> {
         let auth_deadline = Instant::now() + DEFAULT_AUTH_DEADLINE;
-        let mut watchdog = AuthWatchdog::arm(auth_deadline);
+        let abort = std::sync::Arc::new(|| std::process::abort());
+        let mut auth_watchdog = Watchdog::arm_with_abort(auth_deadline, abort.clone());
         let mut io = SystemPipe::connect_until(&args, auth_deadline)?;
         auth_step(auth_deadline)?;
-        if io.server_pid()? != args.gui_pid {
-            return Err(auth_error());
-        }
-        auth_step(auth_deadline)?;
         let mut verifier = SystemPeerVerifier::new();
-        let result = serve_authenticated_session_until(
+        let evidence = authenticate_peer_on_connection_evidence_until(
+            &mut verifier,
+            &args,
+            io.server_pid()?,
+            auth_deadline,
+        )?;
+        // The authentication lease is now established. This is the phase
+        // boundary: the 120-second watchdog must be stopped before hello,
+        // request decoding, mutex acquisition, or platform construction.
+        auth_watchdog.disarm();
+        let operation_deadline = Instant::now() + DEFAULT_OPERATION_DEADLINE;
+        let mut operation_watchdog = Watchdog::arm_with_abort(operation_deadline, abort);
+        let result = serve_authenticated_operation_until(
             &mut io,
             &args,
             &mut verifier,
-            auth_deadline,
-            || {
-                crate::windows::WindowsOperationGuard::acquire(
+            evidence,
+            operation_deadline,
+            |deadline| {
+                crate::windows::WindowsOperationGuard::acquire_until(
                     crate::windows::lock::native::SystemOperationMutex::default(),
+                    deadline,
                 )
             },
             |_| {
@@ -1611,7 +1813,10 @@ mod native {
                 unsafe { boothop_platform::windows::production_after_operation_guard() }
             },
         );
-        watchdog.disarm();
+        // The operation watchdog remains armed while dispatch finishes the
+        // guard release, peer-lease cleanup, and pipe close. Its disarm is the
+        // final deadline decision for the complete one-shot operation.
+        operation_watchdog.disarm();
         result
     }
 }

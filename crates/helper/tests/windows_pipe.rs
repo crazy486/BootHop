@@ -2,9 +2,10 @@ use boothop_core::{Error, PlatformOperation};
 use boothop_helper::windows::pipe::{
     AuthEvidence, DEFAULT_AUTH_DEADLINE, DEFAULT_OPERATION_DEADLINE, HelperArgs, ImageEvidence,
     OverlappedEvent, PeerVerifier, PipePolicy, SelfEvidence, TokenEvidence, TokenLabelLayout,
-    WatchdogDecision, authenticate_peer, authenticate_peer_on_connection, build_pipe_name,
-    parse_args, pipe_dacl_for_user_sid, validate_overlapped_trace, validate_pipe_policy,
-    validate_sid_bytes, validate_sid_header, validate_token_label_layout, watchdog_decision,
+    Watchdog, WatchdogDecision, WatchdogState, authenticate_peer, authenticate_peer_on_connection,
+    build_pipe_name, parse_args, pipe_dacl_for_user_sid, validate_overlapped_trace,
+    validate_pipe_policy, validate_sid_bytes, validate_sid_header, validate_token_label_layout,
+    watchdog_decision, watchdog_disarm_state, watchdog_worker_state,
 };
 use boothop_helper::windows::{
     GUI_IMAGE_PATH, HELPER_IMAGE_PATH, PIPE_DACL, PIPE_MAX_BYTES, PIPE_NAME_PREFIX,
@@ -766,6 +767,163 @@ fn operation_deadline_is_single_absolute_budget_and_expires_without_reset() {
         Duration::from_secs(19)
     );
     assert!(deadline_remaining(deadline, start + Duration::from_secs(31)).is_err());
+}
+
+#[test]
+fn watchdog_worker_is_started_before_arm_returns_and_disarm_wins_before_deadline() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::{Duration, Instant};
+
+    let aborts = Arc::new(AtomicUsize::new(0));
+    let hook = {
+        let aborts = aborts.clone();
+        Arc::new(move || {
+            aborts.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut watchdog = Watchdog::arm_with_abort(deadline, hook);
+    assert!(watchdog.worker_started());
+    assert_eq!(watchdog.state(), WatchdogState::Armed);
+    watchdog.disarm();
+    assert_eq!(watchdog.state(), WatchdogState::Disarmed);
+    assert_eq!(aborts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn watchdog_expiry_is_atomic_at_equality_and_disarm_cannot_suppress_it() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::{Duration, Instant};
+
+    let now = Instant::now();
+    assert_eq!(
+        watchdog_worker_state(WatchdogState::Armed, now, now),
+        WatchdogState::Expired
+    );
+    assert_eq!(
+        watchdog_disarm_state(WatchdogState::Armed, now, now),
+        WatchdogState::Expired
+    );
+    assert_eq!(
+        watchdog_disarm_state(WatchdogState::Expired, now + Duration::from_secs(1), now),
+        WatchdogState::Expired
+    );
+
+    let aborts = Arc::new(AtomicUsize::new(0));
+    let hook = {
+        let aborts = aborts.clone();
+        Arc::new(move || {
+            aborts.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let mut watchdog = Watchdog::arm_with_abort(Instant::now(), hook);
+    for _ in 0..100 {
+        if watchdog.state() == WatchdogState::Expired {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(watchdog.state(), WatchdogState::Expired);
+    watchdog.disarm();
+    assert_eq!(aborts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn operation_deadline_is_carried_through_io_and_mutex_without_reset() {
+    use boothop_helper::windows::pipe::{PipeIo, serve_authenticated_operation_until};
+    use boothop_helper::windows::{OperationMutex, WaitOutcome, WindowsOperationGuard};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    struct Io {
+        deadlines: Rc<RefCell<Vec<Instant>>>,
+    }
+    impl PipeIo for Io {
+        fn receive_frame(&mut self, deadline: Instant) -> Result<Vec<u8>, Error> {
+            self.deadlines.borrow_mut().push(deadline);
+            Ok(boothop_helper::protocol::encode_request_with_id(
+                &boothop_protocol::RequestId::parse(valid_id()).unwrap(),
+                boothop_core::Request::Inspect,
+            )
+            .unwrap())
+        }
+        fn send_frame(&mut self, _: &[u8], deadline: Instant) -> Result<(), Error> {
+            self.deadlines.borrow_mut().push(deadline);
+            Ok(())
+        }
+        fn close(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    struct MutexFake {
+        deadline: Rc<RefCell<Option<Instant>>>,
+    }
+    impl OperationMutex for MutexFake {
+        fn create(&mut self, _: &str, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+        fn wait(&mut self, _: u32) -> Result<WaitOutcome, Error> {
+            Ok(WaitOutcome::Acquired)
+        }
+        fn wait_until(&mut self, deadline: Instant) -> Result<WaitOutcome, Error> {
+            *self.deadline.borrow_mut() = Some(deadline);
+            Ok(WaitOutcome::Acquired)
+        }
+        fn release(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    let deadlines = Rc::new(RefCell::new(Vec::new()));
+    let mutex_deadline = Rc::new(RefCell::new(None));
+    let mut io = Io {
+        deadlines: deadlines.clone(),
+    };
+    let args = HelperArgs::new(valid_id(), 42).unwrap();
+    let evidence = AuthEvidence {
+        pid: 42,
+        token: token(false, false),
+        image: image(GUI_IMAGE_PATH, false),
+        session_id: 9,
+    };
+    let mut verifier = FakeVerifier::default();
+    let operation_deadline = Instant::now() + Duration::from_secs(30);
+    let result = serve_authenticated_operation_until::<_, _, MutexFake, _>(
+        &mut io,
+        &args,
+        &mut verifier,
+        evidence,
+        operation_deadline,
+        {
+            let mutex_deadline = mutex_deadline.clone();
+            move |deadline| {
+                WindowsOperationGuard::acquire_until(
+                    MutexFake {
+                        deadline: mutex_deadline,
+                    },
+                    deadline,
+                )
+            }
+        },
+        |_| -> Result<
+            boothop_platform::windows::WindowsPlatform<FakeStore, FakeFirmware, FakeReboot>,
+            Error,
+        > { Err(Error::Busy) },
+    );
+    assert_eq!(result, Ok(()));
+    assert!(
+        deadlines
+            .borrow()
+            .iter()
+            .all(|deadline| *deadline == operation_deadline)
+    );
+    assert_eq!(*mutex_deadline.borrow(), Some(operation_deadline));
 }
 
 #[test]
