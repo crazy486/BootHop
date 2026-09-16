@@ -65,6 +65,21 @@ pub enum UiIntent {
 enum FailureNotice {
     PreHelloAuthorizationOrLaunch { raw_code: i32 },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestAction {
+    Inspect,
+    Configure,
+    Switch,
+}
+impl RequestAction {
+    fn from_intent(intent: UiIntent) -> Self {
+        match intent {
+            UiIntent::Inspect => Self::Inspect,
+            UiIntent::Configure(..) => Self::Configure,
+            UiIntent::Switch => Self::Switch,
+        }
+    }
+}
 impl FailureNotice {
     fn status(&self) -> &'static str {
         match self {
@@ -92,6 +107,9 @@ pub struct Controller<H, E, C> {
     cache_warning: Option<CacheError>,
     inspected: bool,
     recovery_state: Option<UiState>,
+    pending_action: Option<RequestAction>,
+    unknown_action: Option<RequestAction>,
+    reboot_rejected: bool,
 }
 impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
     pub fn new(helper: H, executor: E, cache: C, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
@@ -118,6 +136,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             cache_warning: warning,
             inspected: false,
             recovery_state: None,
+            pending_action: None,
+            unknown_action: None,
+            reboot_rejected: false,
         }
     }
     pub fn state(&self) -> &UiState {
@@ -208,11 +229,22 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             UiState::Failed if self.cache_warning.is_some() => {
                 "本地展示缓存不可用；尚未检查受保护配置。"
             }
+            UiState::Failed if self.reboot_rejected => {
+                "重启请求被拒绝；已展示回滚与残留结果；不会自动重试。"
+            }
             UiState::Failed => "操作失败。请查看诊断；不会自动重试或回滚。",
             UiState::RebootRequested => "重启请求已被系统接受",
-            UiState::UnknownResult => {
-                "请求结果未知，BootNext 或重启请求可能已生效。请先检查，勿重复操作；不会自动重试或回滚。"
-            }
+            UiState::UnknownResult => match self.unknown_action {
+                Some(RequestAction::Inspect) => {
+                    "检查结果未知；本次未请求 BootNext 或重启。请先检查，勿重复操作。"
+                }
+                Some(RequestAction::Configure) => {
+                    "配置结果未知；本次未请求 BootNext 或重启。请先检查，勿重复操作。"
+                }
+                Some(RequestAction::Switch) | None => {
+                    "请求结果未知，BootNext 或重启请求可能已生效。请先检查，勿重复操作；不会自动重试或回滚。"
+                }
+            },
             UiState::UnsupportedRecord => {
                 "当前 BootHop 版本无法读取该配置，请使用兼容版本或升级；如需恢复，应使用未来明确的管理员恢复流程"
             }
@@ -241,6 +273,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             UiIntent::Configure(_, _) => return,
         };
         self.failure_notice = None;
+        self.pending_action = Some(RequestAction::from_intent(intent));
+        self.unknown_action = None;
+        self.reboot_rejected = false;
         // Keep unresolved evidence across failed inspection or attempted reconfiguration.
         if (intent == UiIntent::Inspect && self.inspect_only())
             || self.state == UiState::TargetChanged
@@ -292,6 +327,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             self.fail(ClientError::UnknownAfterSend(TransportError::Protocol));
             return;
         };
+        self.pending_action = None;
+        self.unknown_action = None;
+        self.reboot_rejected = false;
         self.target = display_target(&report);
         let previous_diagnostic = std::mem::take(&mut self.diagnostic);
         self.diagnostic = stages_text(&report.stages);
@@ -335,6 +373,12 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
     }
     fn fail(&mut self, error: ClientError) {
+        let action = self.pending_action.take();
+        self.unknown_action = None;
+        self.reboot_rejected = matches!(
+            &error,
+            ClientError::Domain(error) if matches!(root_cause(error), Error::RebootRejected)
+        );
         self.failure_notice = match &error {
             ClientError::AuthorizationOrLaunchFailed { raw_code } => {
                 Some(FailureNotice::PreHelloAuthorizationOrLaunch {
@@ -353,6 +397,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         self.diagnostic.clear();
         self.state = match &error {
             ClientError::UnknownAfterSend(kind) => {
+                self.unknown_action = action;
                 self.diagnostic = format!("UnknownAfterSend: {kind:?}");
                 UiState::UnknownResult
             }
@@ -484,6 +529,9 @@ fn root_cause(mut error: &Error) -> &Error {
     error
 }
 fn domain_state(error: &Error) -> UiState {
+    if matches!(root_cause(error), Error::RebootRejected) {
+        return UiState::Failed;
+    }
     if let Error::FlowFailure { stages, .. } = error {
         // A malformed/oversize terminal response can still carry trusted
         // mutation evidence. Never expose it as an ordinary retryable

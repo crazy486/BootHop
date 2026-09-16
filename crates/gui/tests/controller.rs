@@ -397,6 +397,97 @@ fn accepted_and_unknown_reports_have_distinct_claims_and_stages() {
         assert!(cache.writes.lock().unwrap().is_empty());
     }
 }
+
+#[test]
+fn unknown_after_send_message_names_the_requested_action() {
+    let (mut inspect_controller, inspect_helper, inspect_executor, _) = setup(FakeCache::default());
+    inspect_controller.handle(UiIntent::Inspect);
+    finish(
+        &mut inspect_controller,
+        &inspect_helper,
+        &inspect_executor,
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+    );
+    assert!(inspect_controller.status().contains("检查结果未知"));
+    assert!(
+        inspect_controller
+            .status()
+            .contains("未请求 BootNext 或重启")
+    );
+
+    let (mut configure_controller, configure_helper, configure_executor, _) =
+        setup(FakeCache::default());
+    inspect(
+        &mut configure_controller,
+        &configure_helper,
+        &configure_executor,
+        report(),
+    );
+    select(&mut configure_controller);
+    configure_controller.handle(UiIntent::Configure(BootId(7), Os::Windows));
+    finish(
+        &mut configure_controller,
+        &configure_helper,
+        &configure_executor,
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+    );
+    assert!(configure_controller.status().contains("配置结果未知"));
+    assert!(
+        configure_controller
+            .status()
+            .contains("未请求 BootNext 或重启")
+    );
+
+    let (mut switch_controller, switch_helper, switch_executor, _) = setup(FakeCache::default());
+    switch_controller.handle(UiIntent::Switch);
+    finish(
+        &mut switch_controller,
+        &switch_helper,
+        &switch_executor,
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+    );
+    assert!(
+        switch_controller
+            .status()
+            .contains("BootNext 或重启请求可能已生效")
+    );
+}
+
+#[test]
+fn rejected_reboot_flow_renders_rollback_assessment_without_unknown_claim() {
+    for (rollback, expected) in [
+        (RollbackAssessment::NotNeeded, "回滚无需执行"),
+        (RollbackAssessment::Restored, "回滚已恢复"),
+        (RollbackAssessment::Unsafe, "回滚不安全"),
+        (
+            RollbackAssessment::Failed(Box::new(Error::ReadbackFailed)),
+            "回滚失败",
+        ),
+    ] {
+        let (mut c, h, e, _) = setup(FakeCache::default());
+        c.handle(UiIntent::Switch);
+        finish(
+            &mut c,
+            &h,
+            &e,
+            Err(ClientError::Domain(Error::FlowFailure {
+                cause: Box::new(Error::RebootRejected),
+                stages: vec![
+                    Stage::TargetValidated,
+                    Stage::BootNextVerified,
+                    Stage::RebootRejected,
+                ],
+                residual_assessment: ResidualAssessment::Observed(None),
+                rollback_assessment: rollback,
+                diagnostics: vec![],
+            })),
+        );
+        assert!(c.status().contains("重启请求被拒绝"));
+        assert!(c.diagnostic().contains(expected));
+        assert!(!c.status().contains("结果未知"));
+        assert!(!c.status().contains("可能已生效"));
+    }
+}
 #[test]
 fn rejected_report_or_flow_failure_never_claims_reboot_accepted() {
     for result in [

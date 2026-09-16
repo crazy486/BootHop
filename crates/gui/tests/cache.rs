@@ -240,9 +240,9 @@ mod windows_tests {
     fn windows_cache_rejects_malformed_oversize_and_unexpected_objects() {
         for json in [
             "not json",
-            r#"{\"version\":2,\"boot_id\":7,\"os\":\"Windows\"}"#,
-            r#"{\"version\":1,\"boot_id\":7,\"os\":\"Windows\",\"identity\":\"fake\"}"#,
-            r#"{\"version\":1,\"boot_id\":65536,\"os\":\"Windows\"}"#,
+            r#"{"version":2,"boot_id":7,"os":"Windows"}"#,
+            r#"{"version":1,"boot_id":7,"os":"Windows","identity":"fake"}"#,
+            r#"{"version":1,"boot_id":65536,"os":"Windows"}"#,
         ] {
             let temp = Temp::new();
             temp.write(json.as_bytes());

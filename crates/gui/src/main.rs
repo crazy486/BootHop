@@ -359,6 +359,6 @@ fn main() -> Result<(), slint::PlatformError> {
 }
 
 #[cfg(all(not(target_os = "linux"), not(windows)))]
-fn main() {
-    eprintln!("BootHop desktop wiring is currently available on Linux only.");
+fn main() -> Result<(), &'static str> {
+    Err("BootHop desktop wiring is currently available on Linux and Windows only")
 }

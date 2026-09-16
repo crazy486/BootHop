@@ -90,3 +90,45 @@ fn windows_entry_point_wires_helper_client_and_untrusted_local_cache_only() {
         );
     }
 }
+
+#[test]
+fn gui_source_has_no_native_mutation_capability_or_platform_dependency() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+    let forbidden = [
+        "getfirmwareenvironmentvariable",
+        "setfirmwareenvironmentvariable",
+        "adjusttokenprivileges",
+        "initiatesystemshutdown",
+        "exitwindows",
+        "bcd",
+        "loadlibrary",
+        "getprocaddress",
+        "createprocess",
+    ];
+    fn visit(path: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, &mut files);
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap().to_ascii_lowercase();
+        for needle in forbidden {
+            assert!(!source.contains(needle), "{needle} in {}", path.display());
+        }
+        if source.contains("shellexecute") {
+            assert!(path.ends_with("helper_client/windows/native.rs"));
+        }
+    }
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(!manifest.contains("boothop-platform"));
+}
