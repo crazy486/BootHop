@@ -1,9 +1,10 @@
 use boothop_core::Request;
 use boothop_gui::helper_client::windows::{
-    FileIdentity, GUI_EXECUTION_LEVEL, GUI_IMAGE_PATH, HELPER_IMAGE_PATH, HELPER_RUNAS_VERB,
-    OverlappedCancel, OverlappedDecision, OverlappedResult, PeerIdentity, WatchdogDecision,
-    WatchdogState, WindowsBoundary, WindowsClient, WindowsLaunchSpec, WindowsPipeSpec,
-    authenticate_helper, authenticate_helper_continuity, overlapped_cancel_decision,
+    BufferedFrame, FileIdentity, GUI_EXECUTION_LEVEL, GUI_IMAGE_PATH, HELPER_IMAGE_PATH,
+    HELPER_RUNAS_VERB, OverlappedCancel, OverlappedDecision, OverlappedOperation, OverlappedResult,
+    PeerIdentity, PipeClosedDecision, WatchdogDecision, WatchdogState, WindowsBoundary,
+    WindowsClient, WindowsLaunchSpec, WindowsPipeSpec, authenticate_helper,
+    authenticate_helper_continuity, overlapped_cancel_decision, pipe_closed_decision,
     watchdog_decision, watchdog_disarm_state, watchdog_worker_state,
 };
 use boothop_gui::helper_client::{ClientError, Event, TransportError};
@@ -68,6 +69,7 @@ fn assert_watchdog_decisions_fail_closed_at_deadline_and_survive_disarm_race() {
     );
     assert_eq!(
         overlapped_cancel_decision(
+            OverlappedOperation::Read,
             OverlappedCancel::Succeeded,
             true,
             OverlappedResult::Completed,
@@ -76,26 +78,65 @@ fn assert_watchdog_decisions_fail_closed_at_deadline_and_survive_disarm_race() {
     );
     assert_eq!(
         overlapped_cancel_decision(
+            OverlappedOperation::Read,
             OverlappedCancel::AlreadyComplete,
             true,
             OverlappedResult::OperationAborted,
         ),
         OverlappedDecision::Aborted
     );
-    for (cancel, signalled, result) in [
-        (OverlappedCancel::Failed, true, OverlappedResult::Completed),
+    for (operation, cancel, signalled, result) in [
         (
+            OverlappedOperation::Read,
+            OverlappedCancel::Failed,
+            true,
+            OverlappedResult::Completed,
+        ),
+        (
+            OverlappedOperation::Read,
             OverlappedCancel::AlreadyComplete,
             false,
             OverlappedResult::Completed,
         ),
-        (OverlappedCancel::Succeeded, true, OverlappedResult::Other),
+        (
+            OverlappedOperation::Read,
+            OverlappedCancel::Succeeded,
+            true,
+            OverlappedResult::Other,
+        ),
+        (
+            OverlappedOperation::Write,
+            OverlappedCancel::Succeeded,
+            true,
+            OverlappedResult::PipeClosed,
+        ),
     ] {
         assert_eq!(
-            overlapped_cancel_decision(cancel, signalled, result),
+            overlapped_cancel_decision(operation, cancel, signalled, result),
             OverlappedDecision::AbortProcess
         );
     }
+    assert_eq!(
+        overlapped_cancel_decision(
+            OverlappedOperation::Read,
+            OverlappedCancel::Succeeded,
+            true,
+            OverlappedResult::PipeClosed,
+        ),
+        OverlappedDecision::PipeClosed
+    );
+    assert_eq!(
+        pipe_closed_decision(BufferedFrame::Complete),
+        PipeClosedDecision::ObserveExit
+    );
+    assert_eq!(
+        pipe_closed_decision(BufferedFrame::Empty),
+        PipeClosedDecision::RejectIncomplete
+    );
+    assert_eq!(
+        pipe_closed_decision(BufferedFrame::Partial),
+        PipeClosedDecision::RejectIncomplete
+    );
 }
 
 impl Fake {

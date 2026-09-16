@@ -45,6 +45,8 @@ use windows_sys::Win32::{
 
 const ERROR_CANCELLED: u32 = 1223;
 const ERROR_NOT_FOUND: u32 = 1168;
+const ERROR_NO_DATA: u32 = 232;
+const ERROR_PIPE_NOT_CONNECTED: u32 = 233;
 const STILL_ACTIVE: u32 = 259;
 const WAIT_TIMEOUT: u32 = 258;
 
@@ -106,6 +108,21 @@ struct Watchdog {
 enum IoCompletion {
     Completed(u32),
     Aborted,
+    PipeClosed,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum IoKind {
+    Connect,
+    Read,
+    Write,
+}
+
+fn is_pipe_closed(error: u32) -> bool {
+    matches!(
+        error,
+        ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED
+    )
 }
 impl Watchdog {
     fn arm(deadline: Instant) -> Self {
@@ -399,37 +416,38 @@ impl SystemWindowsBoundary {
         handle: HANDLE,
         overlapped: &mut OVERLAPPED,
         deadline: Duration,
-    ) -> Result<u32, TransportError> {
+        kind: IoKind,
+    ) -> Result<IoCompletion, TransportError> {
         let end = self.io_deadline(deadline);
         let remaining = match end.checked_duration_since(Instant::now()) {
             Some(remaining) => remaining,
             None => {
-                return match Self::cancel_and_join(handle, overlapped)? {
-                    IoCompletion::Completed(bytes) => Ok(bytes),
+                return match Self::cancel_and_join(handle, overlapped, kind)? {
                     IoCompletion::Aborted => Err(TransportError::Timeout),
+                    completion => Ok(completion),
                 };
             }
         };
         let timeout = remaining.as_millis().min(u128::from(u32::MAX)) as u32;
         let mut transferred = 0;
         if unsafe { GetOverlappedResultEx(handle, overlapped, &mut transferred, timeout, 1) } != 0 {
-            return Ok(transferred);
+            return Ok(IoCompletion::Completed(transferred));
         }
         let error = unsafe { GetLastError() };
         // Cancellation is followed by a completion barrier before the event,
         // OVERLAPPED, and its backing buffer can be released.
         if error == 1460 || error == 258 {
-            return match Self::cancel_and_join(handle, overlapped)? {
-                IoCompletion::Completed(bytes) => Ok(bytes),
+            return match Self::cancel_and_join(handle, overlapped, kind)? {
                 IoCompletion::Aborted => Err(TransportError::Timeout),
+                completion => Ok(completion),
             };
         }
         // WAIT_FAILED and every unexpected result are still subject to an
         // outstanding operation race. Prove completion before returning an
         // ordinary error; an unprovable state aborts fail-closed.
-        match Self::cancel_and_join(handle, overlapped)? {
-            IoCompletion::Completed(bytes) => Ok(bytes),
+        match Self::cancel_and_join(handle, overlapped, kind)? {
             IoCompletion::Aborted => Err(TransportError::Io),
+            completion => Ok(completion),
         }
     }
 
@@ -439,6 +457,7 @@ impl SystemWindowsBoundary {
     fn cancel_and_join(
         handle: HANDLE,
         overlapped: &OVERLAPPED,
+        kind: IoKind,
     ) -> Result<IoCompletion, TransportError> {
         let event = overlapped.hEvent;
         let cancel_ok = unsafe { CancelIoEx(handle, overlapped) } != 0;
@@ -466,14 +485,48 @@ impl SystemWindowsBoundary {
         } else {
             0
         };
-        if completed == 0 && completion_error != ERROR_OPERATION_ABORTED {
+        if completed == 0
+            && completion_error != ERROR_OPERATION_ABORTED
+            && !(kind == IoKind::Read && is_pipe_closed(completion_error))
+        {
             std::process::abort();
         }
         if completed != 0 {
             Ok(IoCompletion::Completed(transferred))
+        } else if kind == IoKind::Read && is_pipe_closed(completion_error) {
+            Ok(IoCompletion::PipeClosed)
         } else {
             Ok(IoCompletion::Aborted)
         }
+    }
+
+    fn helper_exit_event(
+        &self,
+        helper: HANDLE,
+        deadline: Duration,
+    ) -> Result<Event, TransportError> {
+        let remaining = self
+            .io_deadline(deadline)
+            .checked_duration_since(Instant::now())
+            .ok_or(TransportError::Timeout)?;
+        let wait_ms = remaining.as_millis().min(u128::from(u32::MAX)) as u32;
+        let wait = unsafe { WaitForSingleObject(helper, wait_ms) };
+        if wait == WAIT_FAILED {
+            let _error = unsafe { GetLastError() };
+            return Err(TransportError::Io);
+        }
+        if wait == WAIT_TIMEOUT {
+            return Err(TransportError::Timeout);
+        }
+        let mut code = 0;
+        if unsafe { GetExitCodeProcess(helper, &mut code) } == 0 {
+            let _error = unsafe { GetLastError() };
+            return Err(TransportError::Io);
+        }
+        if code == STILL_ACTIVE {
+            return Err(TransportError::Authentication);
+        }
+        Ok(Event::Exit(code as i32))
     }
 
     fn sid() -> Result<String, TransportError> {
@@ -731,21 +784,17 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
         };
         if ok == 0 {
             let error = unsafe { GetLastError() };
-            if error == ERROR_BROKEN_PIPE {
-                let mut code = 0;
-                if unsafe { GetExitCodeProcess(helper, &mut code) } == 0 {
-                    let _error = unsafe { GetLastError() };
-                    return Err(TransportError::Io);
-                }
-                if code == STILL_ACTIVE {
-                    return Err(TransportError::Authentication);
-                }
-                return Ok(Event::Exit(code as i32));
+            if is_pipe_closed(error) {
+                return self.helper_exit_event(helper, deadline);
             }
             if error != ERROR_IO_PENDING {
                 return Err(TransportError::Io);
             }
-            read = self.wait_io(pipe, &mut overlapped, deadline)?;
+            match self.wait_io(pipe, &mut overlapped, deadline, IoKind::Read)? {
+                IoCompletion::Completed(bytes) => read = bytes,
+                IoCompletion::PipeClosed => return self.helper_exit_event(helper, deadline),
+                IoCompletion::Aborted => unreachable!(),
+            }
         }
         bytes.truncate(read as usize);
         event.close_checked()?;
@@ -800,7 +849,10 @@ impl super::WindowsBoundary for SystemWindowsBoundary {
             if error != ERROR_IO_PENDING {
                 return Err(TransportError::Io);
             }
-            written = self.wait_io(pipe, &mut overlapped, deadline)?;
+            written = match self.wait_io(pipe, &mut overlapped, deadline, IoKind::Write)? {
+                IoCompletion::Completed(bytes) => bytes,
+                IoCompletion::Aborted | IoCompletion::PipeClosed => return Err(TransportError::Io),
+            };
         }
         if written != bytes.len() as u32 {
             return Err(TransportError::Io);
@@ -951,7 +1003,12 @@ impl SystemWindowsBoundary {
             if error == 535 {
                 // The client won the connect race and the instance is ready.
             } else if error == ERROR_IO_PENDING {
-                self.wait_io(pipe_handle, &mut overlapped, deadline)?;
+                match self.wait_io(pipe_handle, &mut overlapped, deadline, IoKind::Connect)? {
+                    IoCompletion::Completed(_) => {}
+                    IoCompletion::Aborted | IoCompletion::PipeClosed => {
+                        return Err(TransportError::Authentication);
+                    }
+                }
             } else {
                 return Err(TransportError::Authentication);
             }

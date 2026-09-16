@@ -67,6 +67,22 @@
   state can leave scope. A completed write is preserved as committed even when
   observed at the deadline, and cleanup classification follows that state.
 
+## Fix round 3 evidence
+
+- Made completion barriers operation-aware. A signalled, terminal read result
+  carrying `ERROR_BROKEN_PIPE` (or the documented `ERROR_NO_DATA`/
+  `ERROR_PIPE_NOT_CONNECTED` closure) becomes `PipeClosed`; connect/write
+  barriers retain strict abort-on-closure behavior.
+- Pipe closure waits, within the existing operation deadline, for the retained
+  helper handle's real exit code. The shared bounded-frame state then accepts
+  only a complete terminal response and maps empty/partial header/body closure
+  to the existing before/unknown phase errors without retry.
+- Added pure decision coverage for pending read closure, complete/empty/
+  partial buffered frames, and rejection of write-side broken-pipe closure.
+- The latest aggregate host test execution was blocked by the local application
+  control policy (OS error 4551) before the test binary started; the focused
+  Windows fake suite and all compile/lint/no-run checks remain green.
+
 ## Verification
 
 - `cargo test -p boothop-gui --test windows_client` — PASS (9 tests).

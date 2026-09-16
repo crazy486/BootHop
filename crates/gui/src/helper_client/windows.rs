@@ -241,9 +241,17 @@ pub enum OverlappedCancel {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverlappedOperation {
+    Connect,
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverlappedResult {
     Completed,
     OperationAborted,
+    PipeClosed,
     Other,
 }
 
@@ -251,6 +259,7 @@ pub enum OverlappedResult {
 pub enum OverlappedDecision {
     Completed,
     Aborted,
+    PipeClosed,
     AbortProcess,
 }
 
@@ -258,6 +267,7 @@ pub enum OverlappedDecision {
 /// `AlreadyComplete` models `ERROR_NOT_FOUND`; it is safe only when the event
 /// was already signalled and the result is terminal.
 pub fn overlapped_cancel_decision(
+    operation: OverlappedOperation,
     cancel: OverlappedCancel,
     event_signalled: bool,
     result: OverlappedResult,
@@ -265,13 +275,36 @@ pub fn overlapped_cancel_decision(
     if matches!(cancel, OverlappedCancel::Failed)
         || !event_signalled
         || matches!(result, OverlappedResult::Other)
+        || (matches!(result, OverlappedResult::PipeClosed)
+            && !matches!(operation, OverlappedOperation::Read))
     {
         return OverlappedDecision::AbortProcess;
     }
     match result {
         OverlappedResult::Completed => OverlappedDecision::Completed,
         OverlappedResult::OperationAborted => OverlappedDecision::Aborted,
+        OverlappedResult::PipeClosed => OverlappedDecision::PipeClosed,
         OverlappedResult::Other => unreachable!(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferedFrame {
+    Empty,
+    Partial,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipeClosedDecision {
+    ObserveExit,
+    RejectIncomplete,
+}
+
+pub fn pipe_closed_decision(frame: BufferedFrame) -> PipeClosedDecision {
+    match frame {
+        BufferedFrame::Complete => PipeClosedDecision::ObserveExit,
+        BufferedFrame::Empty | BufferedFrame::Partial => PipeClosedDecision::RejectIncomplete,
     }
 }
 
