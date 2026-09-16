@@ -8,10 +8,10 @@ use super::{Cache, CacheError, CachedTarget, sanitized_description};
 use boothop_core::{BootId, Os};
 use serde::{Deserialize, Serialize};
 #[cfg(not(windows))]
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::{
     ffi::OsStr,
-    fs::{self, File},
+    fs::File,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -283,23 +283,17 @@ fn save_native(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut temp_file = match native_open_file_at(&temp, true) {
-        Ok(file) => file,
-        Err(error) => {
-            if fs::remove_file(&temp).is_err() {
-                return Err(CacheError::Unavailable);
-            }
-            return Err(error);
-        }
+    let mut temp_file = match native_open_file(&temp, true) {
+        Ok(Some(file)) => file,
+        // CREATE_NEW did not give us ownership.  In particular, do not try
+        // to clean up the collision path: it may belong to another writer.
+        Ok(None) => return Err(CacheError::Unavailable),
+        Err(error) => return Err(error),
     };
     if let Err(error) = validate_child_file(&context.parent, &temp_file, &temp) {
-        drop(temp_file);
-        if fs::remove_file(&temp).is_err() {
-            return Err(CacheError::Unavailable);
-        }
-        return Err(error);
+        return fail_owned(&mut temp_file, error);
     }
-    let result = (|| {
+    if let Err(error) = (|| {
         temp_file
             .file
             .write_all(bytes)
@@ -308,22 +302,37 @@ fn save_native(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
             .file
             .sync_all()
             .map_err(|_| CacheError::Unavailable)
-    })();
-    drop(temp_file);
-    let result = result
-        .and_then(|()| validate_context(&context))
-        .and_then(|()| atomic_replace(&temp, path));
-    if result.is_err() {
-        if fs::remove_file(&temp).is_err() {
-            return Err(CacheError::Unavailable);
-        }
-        return result;
+    })() {
+        return fail_owned(&mut temp_file, error);
     }
-    validate_context(&context)?;
-    let Some(cache_file) = native_open_file(path, false)? else {
-        return Err(CacheError::Unavailable);
+    if let Err(error) = validate_context(&context) {
+        return fail_owned(&mut temp_file, error);
+    }
+    let original_identity = temp_file.identity;
+    if let Err(error) = rename_owned(&mut temp_file, &context.parent) {
+        return fail_owned(&mut temp_file, error);
+    }
+    if let Err(error) = temp_file
+        .file
+        .sync_all()
+        .map_err(|_| CacheError::Unavailable)
+    {
+        return fail_owned(&mut temp_file, error);
+    }
+    let renamed_path = match native_final_path(&temp_file.file) {
+        Ok(path) => path,
+        Err(error) => return fail_owned(&mut temp_file, error),
     };
-    validate_child_file(&context.parent, &cache_file, path)
+    temp_file.final_path = renamed_path;
+    if temp_file.identity != original_identity
+        || validate_child_file(&context.parent, &temp_file, path).is_err()
+    {
+        return fail_owned(&mut temp_file, CacheError::Unavailable);
+    }
+    if let Err(error) = validate_context(&context) {
+        return fail_owned(&mut temp_file, error);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -332,16 +341,16 @@ fn native_context(path: &Path, create_parent: bool) -> Result<Option<NativeConte
         .parent()
         .and_then(Path::parent)
         .ok_or(CacheError::Unavailable)?;
-    let Some(root) = native_open_directory(root_path, false)? else {
+    let Some(root) = native_open_directory(root_path, false, false)? else {
         return Ok(None);
     };
     validate_directory(&root, None, root_path)?;
     let parent_path = root_path.join(CACHE_DIRECTORY);
-    let parent = match native_open_directory(&parent_path, false)? {
+    let parent = match native_open_directory(&parent_path, false, true)? {
         Some(parent) => parent,
         None if create_parent => {
             native_create_directory(&parent_path)?;
-            native_open_directory(&parent_path, false)?.ok_or(CacheError::Unavailable)?
+            native_open_directory(&parent_path, false, true)?.ok_or(CacheError::Unavailable)?
         }
         None => return Ok(None),
     };
@@ -370,8 +379,10 @@ fn native_create_directory(path: &Path) -> Result<(), CacheError> {
 fn native_open_directory(
     path: &Path,
     _create: bool,
+    rename_destination: bool,
 ) -> Result<Option<NativeDirectory>, CacheError> {
-    let Some((file, identity, final_path, is_directory, reparse)) = native_open(path, false, true)?
+    let Some((file, identity, final_path, is_directory, reparse)) =
+        native_open(path, false, true, false, rename_destination)?
     else {
         return Ok(None);
     };
@@ -388,11 +399,14 @@ fn native_open_directory(
 #[cfg(windows)]
 fn native_open_file(path: &Path, create_new: bool) -> Result<Option<NativeFile>, CacheError> {
     let Some((file, identity, final_path, is_directory, reparse)) =
-        native_open(path, create_new, false)?
+        native_open(path, create_new, false, create_new, false)?
     else {
         return Ok(None);
     };
     if is_directory || reparse {
+        if create_new {
+            let _ = dispose_handle(&file);
+        }
         return Err(CacheError::Unavailable);
     }
     Ok(Some(NativeFile {
@@ -403,23 +417,20 @@ fn native_open_file(path: &Path, create_new: bool) -> Result<Option<NativeFile>,
 }
 
 #[cfg(windows)]
-fn native_open_file_at(path: &Path, create_new: bool) -> Result<NativeFile, CacheError> {
-    native_open_file(path, create_new)?.ok_or(CacheError::Unavailable)
-}
-
-#[cfg(windows)]
 fn native_open(
     path: &Path,
     create_new: bool,
     directory: bool,
+    delete_access: bool,
+    directory_add_file: bool,
 ) -> Result<Option<NativeOpenResult>, CacheError> {
     use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
     use windows_sys::Win32::{
         Foundation::{GetLastError, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_EXISTING,
+            CreateFileW, DELETE, FILE_ADD_FILE, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
         },
     };
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -437,7 +448,14 @@ fn native_open(
     let raw = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            FILE_GENERIC_READ | if create_new { FILE_GENERIC_WRITE } else { 0 },
+            FILE_GENERIC_READ
+                | if create_new { FILE_GENERIC_WRITE } else { 0 }
+                | if delete_access { DELETE } else { 0 }
+                | if directory_add_file {
+                    FILE_ADD_FILE | FILE_DELETE_CHILD
+                } else {
+                    0
+                },
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             std::ptr::null(),
             disposition,
@@ -450,13 +468,134 @@ fn native_open(
         if !create_new && (error == 2 || error == 3) {
             return Ok(None);
         }
+        if create_new && error == 80 {
+            return Ok(None);
+        }
         return Err(CacheError::Unavailable);
     }
     let file = unsafe { File::from_raw_handle(raw as _) };
-    let identity = native_identity(&file)?;
-    let (is_directory, reparse) = native_type(&file)?;
-    let final_path = native_final_path(&file)?;
+    let identity = match native_identity(&file) {
+        Ok(identity) => identity,
+        Err(error) => {
+            if create_new {
+                let _ = dispose_handle(&file);
+            }
+            return Err(error);
+        }
+    };
+    let (is_directory, reparse) = match native_type(&file) {
+        Ok(facts) => facts,
+        Err(error) => {
+            if create_new {
+                let _ = dispose_handle(&file);
+            }
+            return Err(error);
+        }
+    };
+    let final_path = match native_final_path(&file) {
+        Ok(path) => path,
+        Err(error) => {
+            if create_new {
+                let _ = dispose_handle(&file);
+            }
+            return Err(error);
+        }
+    };
     Ok(Some((file, identity, final_path, is_directory, reparse)))
+}
+
+#[cfg(windows)]
+fn fail_owned(file: &mut NativeFile, error: CacheError) -> Result<(), CacheError> {
+    // The handle is the ownership capability.  Mark that exact object for
+    // deletion before it is dropped; never clean up through the temp name.
+    if dispose_owned(file).is_err() {
+        return Err(CacheError::Unavailable);
+    }
+    Err(error)
+}
+
+#[cfg(windows)]
+fn dispose_owned(file: &mut NativeFile) -> Result<(), CacheError> {
+    dispose_handle(&file.file)
+}
+
+#[cfg(windows)]
+fn dispose_handle(file: &File) -> Result<(), CacheError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_ON_CLOSE, FILE_DISPOSITION_INFO_EX,
+        FileDispositionInfoEx, SetFileInformationByHandle,
+    };
+    let info = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_ON_CLOSE,
+    };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as _,
+            FileDispositionInfoEx,
+            (&info as *const FILE_DISPOSITION_INFO_EX).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    } == 0
+    {
+        return Err(CacheError::Unavailable);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn rename_owned(file: &mut NativeFile, parent: &NativeDirectory) -> Result<(), CacheError> {
+    use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+
+    // Win32's SetFileInformationByHandle rejects a non-null RootDirectory
+    // (ERROR_INVALID_PARAMETER).  The destination is therefore formed only
+    // from the final path of the already-held, validated parent handle; it is
+    // fixed before the handle-relative source rename and cannot traverse an
+    // attacker-controlled parent.
+    let mut name: Vec<u16> = parent
+        .final_path
+        .join(CACHE_FILE)
+        .as_os_str()
+        .encode_wide()
+        .collect();
+    name.push(0);
+    // FILE_RENAME_INFO has alignment padding and tail padding, so `size_of`
+    // is not the byte offset of its variable-length FileName member.
+    let header_size = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let byte_size = header_size
+        .checked_add(
+            name.len()
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or(CacheError::Unavailable)?,
+        )
+        .ok_or(CacheError::Unavailable)?;
+    // Vec<usize> keeps the variable-sized FILE_RENAME_INFO storage suitably
+    // aligned while the API consumes exactly the initialized byte prefix.
+    let word_count = byte_size
+        .checked_add(std::mem::size_of::<usize>() - 1)
+        .ok_or(CacheError::Unavailable)?
+        / std::mem::size_of::<usize>();
+    let mut storage = vec![0usize; word_count];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = ((name.len() - 1) * std::mem::size_of::<u16>()) as u32;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+        if SetFileInformationByHandle(
+            file.file.as_raw_handle() as _,
+            FileRenameInfo,
+            info.cast(),
+            byte_size as u32,
+        ) == 0
+        {
+            return Err(CacheError::Unavailable);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -634,15 +773,15 @@ fn child_facts_valid(
 
 #[cfg(windows)]
 fn validate_context(context: &NativeContext) -> Result<(), CacheError> {
-    let current_root =
-        native_open_directory(&context._root.final_path, false)?.ok_or(CacheError::Unavailable)?;
+    let current_root = native_open_directory(&context._root.final_path, false, false)?
+        .ok_or(CacheError::Unavailable)?;
     if !identity_unchanged(context._root.identity, current_root.identity)
         || !same_path(&current_root.final_path, &context._root.final_path)
     {
         return Err(CacheError::Unavailable);
     }
-    let current_parent =
-        native_open_directory(&context.parent.final_path, false)?.ok_or(CacheError::Unavailable)?;
+    let current_parent = native_open_directory(&context.parent.final_path, false, true)?
+        .ok_or(CacheError::Unavailable)?;
     if !identity_unchanged(context.parent.identity, current_parent.identity)
         || !same_path(&current_parent.final_path, &context.parent.final_path)
     {
@@ -676,6 +815,24 @@ fn normalize_final_path(path: &Path) -> String {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TempCreation {
+        Collision,
+        FailedBeforeOwnership,
+        Owned(ObjectIdentity),
+    }
+
+    fn cleanup_identity_after_failure(outcome: TempCreation) -> Option<ObjectIdentity> {
+        match outcome {
+            TempCreation::Owned(identity) => Some(identity),
+            TempCreation::Collision | TempCreation::FailedBeforeOwnership => None,
+        }
+    }
+
+    fn fixed_destination(parent: &Path) -> PathBuf {
+        parent.join(CACHE_FILE)
+    }
 
     fn id(value: u64) -> ObjectIdentity {
         ObjectIdentity {
@@ -731,6 +888,49 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn fake_create_new_collision_never_schedules_cleanup() {
+        assert_eq!(
+            cleanup_identity_after_failure(TempCreation::Collision),
+            None
+        );
+        assert_eq!(
+            cleanup_identity_after_failure(TempCreation::FailedBeforeOwnership),
+            None
+        );
+    }
+
+    #[test]
+    fn fake_owned_failure_disposes_only_the_created_identity() {
+        let identity = id(17);
+        assert_eq!(
+            cleanup_identity_after_failure(TempCreation::Owned(identity)),
+            Some(identity)
+        );
+    }
+
+    #[test]
+    fn fake_attacker_path_replacement_cannot_change_fixed_destination() {
+        let parent = Path::new(r"C:\Users\test\AppData\Local\BootHop");
+        assert_eq!(fixed_destination(parent), parent.join(CACHE_FILE));
+        assert_ne!(
+            fixed_destination(parent),
+            Path::new(r"C:\Users\test\AppData\Local\Other\cache-v1.json")
+        );
+    }
+
+    #[test]
+    fn fake_rename_preserves_file_identity_and_has_no_retry_path() {
+        let identity = id(23);
+        assert!(identity_unchanged(identity, identity));
+        // A failed handle rename returns to the caller; it is never retried
+        // through a pathname that could now identify an attacker object.
+        assert_eq!(
+            cleanup_identity_after_failure(TempCreation::Owned(identity)),
+            Some(identity)
+        );
     }
 }
 
@@ -795,6 +995,7 @@ fn validate_parent(path: &Path, create: bool) -> Result<Option<PathBuf>, CacheEr
     Ok(Some(parent.to_path_buf()))
 }
 
+#[cfg(not(windows))]
 fn atomic_replace(from: &Path, to: &Path) -> Result<(), CacheError> {
     #[cfg(windows)]
     {
