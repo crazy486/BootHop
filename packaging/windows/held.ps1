@@ -64,17 +64,21 @@ function Open-HeldRead([string] $path, [string] $label, [string] $expectedCanoni
     }
     try {
         $identity = [WindowsFileHandle]::Identity($stream.SafeFileHandle); $final = Normalize-HeldPath (($identity -split '\|')[0])
-        if ([WindowsFileHandle]::IsReparsePoint($stream.SafeFileHandle)) { throw "Held $label is a reparse point" }
+        if ([WindowsFileHandle]::IsReparsePoint($stream.SafeFileHandle)) { throw "$label contains a reparse point" }
         if ([WindowsFileHandle]::IsDirectory($stream.SafeFileHandle)) { throw "$label is missing or not a regular file" }
         if ($null -ne $expectedCanonical -and -not [string]::Equals($final, $expectedCanonical, [StringComparison]::Ordinal)) { throw "Held $label final path differs from canonical path" }
         return [pscustomobject]@{ Stream=$stream; Identity=$identity; Canonical=$final; Path=$path }
     } catch { $stream.Dispose(); throw }
 }
 function Open-HeldDirectory([string] $path, [string] $label, [string] $expectedCanonical = $null) {
-    try { $stream = [WindowsFileHandle]::OpenDirectory($path) } catch { throw "Held $label directory open failed: $($_.Exception.Message)" }
+    try { $stream = [WindowsFileHandle]::OpenDirectory($path) } catch {
+        if ($_.Exception.Message -match 'CreateFileW directory failed:\s*(2|3)(?:\D|$)') { throw "$label is missing or not a directory" }
+        throw "Held $label directory open failed: $($_.Exception.Message)"
+    }
     try {
         $identity = [WindowsFileHandle]::Identity($stream.SafeFileHandle); $final = Normalize-HeldPath (($identity -split '\|')[0])
-        if ([WindowsFileHandle]::IsReparsePoint($stream.SafeFileHandle)) { throw "Held $label is a reparse point" }
+        if ([WindowsFileHandle]::IsReparsePoint($stream.SafeFileHandle)) { throw "$label contains a reparse point" }
+        if (-not [WindowsFileHandle]::IsDirectory($stream.SafeFileHandle)) { throw "$label is missing or not a directory" }
         if ($null -ne $expectedCanonical -and -not [string]::Equals($final, $expectedCanonical, [StringComparison]::Ordinal)) { throw "Held $label final path differs from canonical path" }
         return [pscustomobject]@{ Stream=$stream; Identity=$identity; Canonical=$final; Path=$path }
     } catch { $stream.Dispose(); throw }
@@ -93,15 +97,14 @@ function Open-HeldDirectoryPins([string] $path, [string] $label, [string] $expec
     $pins = [Collections.Generic.List[object]]::new()
     try {
         $expected = if ($null -eq $expectedCanonical) { $null } else { [IO.Path]::GetFullPath($expectedCanonical) }
+        $target = [IO.Path]::GetFullPath($path)
         foreach ($ancestor in (Get-HeldAncestorPaths $path)) {
-            $item = Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop
-            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$label contains a reparse point: $ancestor" }
-            $pin = Open-HeldDirectory $ancestor "$label ancestor $ancestor" $ancestor
+            $pinLabel = if ([string]::Equals($ancestor, $target, [StringComparison]::Ordinal)) { $label } else { "$label ancestor $ancestor" }
+            $pin = Open-HeldDirectory $ancestor $pinLabel $ancestor
             $pins.Add($pin)
         }
-        $target = [IO.Path]::GetFullPath($path)
         if ($null -ne $expected -and -not [string]::Equals($target, $expected, [StringComparison]::Ordinal)) { throw "$label canonical path differs" }
-        return [pscustomobject]@{ Kind='PinSet'; Path=$target; Pins=@($pins) }
+        return [pscustomobject]@{ Kind='PinSet'; Path=$target; Canonical=$target; Pins=@($pins) }
     } catch {
         foreach ($pin in $pins) { Close-Held $pin }
         throw

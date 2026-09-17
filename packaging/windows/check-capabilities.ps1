@@ -23,25 +23,9 @@ function Get-Absolute([string] $path, [string] $label) {
     try { return [IO.Path]::GetFullPath($path) } catch { Fail "$label is not a valid path" }
 }
 
-function Assert-NoReparseAncestors([string] $path, [string] $label) {
-    $currentPath = [IO.Path]::GetFullPath($path)
-    while ($true) {
-        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
-        if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        $parent = Split-Path -Path $currentPath -Parent
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
-        $currentPath = $parent
-    }
-}
-
-function Get-CanonicalDirectory([string] $path, [string] $label) {
+function Get-AbsoluteDirectory([string] $path, [string] $label) {
     $absolute = Get-Absolute $path $label
-    $item = Get-Item -LiteralPath $absolute -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or -not $item.PSIsContainer) { Fail "$label is missing or not a directory" }
-    Assert-NoReparseAncestors $absolute $label
-    $resolved = (Resolve-Path -LiteralPath $absolute -ErrorAction Stop).Path
-    if ($resolved -cne $item.FullName) { Fail "$label canonical path changed during resolution" }
-    return $item.FullName
+    return $absolute
 }
 
 function Assert-Contained([string] $root, [string] $path, [string] $label) {
@@ -51,7 +35,7 @@ function Assert-Contained([string] $root, [string] $path, [string] $label) {
 
 $resources = New-HeldResourceSet
 try {
-$root = Get-CanonicalDirectory $RootPath 'source root'
+$root = Get-AbsoluteDirectory $RootPath 'source root'
 $dumpbin = Get-Absolute $DumpbinPath 'dumpbin'
 if ($TestOnlyFixtureMode) {
     if ([IO.Path]::GetExtension($dumpbin) -cne '.ps1') { Fail 'test-only dumpbin must be a .ps1 fixture' }
@@ -61,6 +45,7 @@ if ($TestOnlyFixtureMode) {
 $guiPath = Get-Absolute $GuiPath 'GUI PE'
 $helperPath = Get-Absolute $HelperPath 'helper PE'
 $rootPin = Open-HeldDirectoryPins $root 'source root' $root; [void](Add-HeldResource $resources $rootPin)
+$root = $rootPin.Canonical
 $dumpbinResource = Open-HeldFileResource $dumpbin 'dumpbin' $dumpbin; [void](Add-HeldResource $resources $dumpbinResource); $dumpbinHeld = $dumpbinResource.Held
 $guiResource = Open-HeldFileResource $guiPath 'GUI PE' $guiPath; [void](Add-HeldResource $resources $guiResource); $guiHeld = $guiResource.Held
 $helperResource = Open-HeldFileResource $helperPath 'helper PE' $helperPath; [void](Add-HeldResource $resources $helperResource); $helperHeld = $helperResource.Held
@@ -120,7 +105,7 @@ $sourcePins = [Collections.Generic.List[object]]::new()
 foreach ($spec in $sourceSpecs) {
     $candidate = Join-Path $root $spec.Relative
     if ($spec.Directory) {
-        $dir = Get-CanonicalDirectory $candidate "source root $($spec.Relative)"; Assert-Contained $root $dir "source root $($spec.Relative)"
+        $dir = Get-AbsoluteDirectory $candidate "source root $($spec.Relative)"; Assert-Contained $root $dir "source root $($spec.Relative)"
         $sourcePin = Open-HeldDirectoryPins $dir "source root $($spec.Relative)" $dir; [void](Add-HeldResource $resources $sourcePin); $sourcePins.Add($sourcePin)
         $entries = @(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction Stop)
         if (@($entries | Where-Object { -not $_.PSIsContainer }).Count -eq 0) { Fail "source root is empty: $($spec.Relative)" }
@@ -130,8 +115,7 @@ foreach ($spec in $sourceSpecs) {
         }
     } else {
         $file = Get-Absolute $candidate "source input $($spec.Relative)"; Assert-Contained $root $file "source input $($spec.Relative)"
-        if ((Get-Item -LiteralPath $file).Length -eq 0) { Fail "source input is empty: $($spec.Relative)" }
-        $sourceFiles.Add((Get-Item -LiteralPath $file -Force))
+        $sourceFiles.Add([pscustomobject]@{ FullName=$file })
     }
 }
 

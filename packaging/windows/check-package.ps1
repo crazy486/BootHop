@@ -12,21 +12,9 @@ function Close-PackageHandles {
 }
 function Fail([string] $message) { Close-PackageHandles; throw "Windows package check failed: $message" }
 
-function Get-CanonicalDirectory([string] $path, [string] $label) {
+function Get-AbsoluteDirectory([string] $path, [string] $label) {
     if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { Fail "$label must be absolute" }
-    $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($path)) -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or -not $item.PSIsContainer) { Fail "$label is missing or not a directory" }
-    $currentPath = $item.FullName
-    while ($true) {
-        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
-        if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        $parent = Split-Path -Path $currentPath -Parent
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
-        $currentPath = $parent
-    }
-    $resolved = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).Path
-    if ($resolved -cne $item.FullName) { Fail "$label canonical path changed during resolution" }
-    return $item.FullName
+    return [IO.Path]::GetFullPath($path)
 }
 
 function Contains-Exact([object[]] $values, [string] $expected) {
@@ -124,9 +112,10 @@ function Assert-ExecutionManifest($held, [string] $label, [string] $expectedLeve
 
 $resources = New-HeldResourceSet
 try {
-$stage = Get-CanonicalDirectory $StagePath 'stage root'
+$stage = Get-AbsoluteDirectory $StagePath 'stage root'
 $stageParent = Split-Path -Path $stage -Parent
 $stagePin = Open-HeldDirectoryPins $stage 'stage root' $stage; [void](Add-HeldResource $resources $stagePin)
+$stage = $stagePin.Canonical
 $stageParentPin = Open-HeldDirectoryPins $stageParent 'stage parent' $stageParent; [void](Add-HeldResource $resources $stageParentPin)
 $required = @('manifest.json','NON-PRODUCTION.txt','Program Files\BootHop\boothop-gui.exe','Program Files\BootHop\boothop-helper.exe','Program Files\BootHop\boothop-gui.manifest','Program Files\BootHop\boothop-helper.manifest','ProgramData\BootHop\.directory-policy.json')
 $requiredDirs = @('Program Files','Program Files\BootHop','ProgramData','ProgramData\BootHop')

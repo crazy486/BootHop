@@ -12,36 +12,11 @@ function Get-Absolute([string] $path, [string] $label) {
     if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { Fail "$label must be an absolute path" }
     try { return [IO.Path]::GetFullPath($path) } catch { Fail "$label is not a valid path" }
 }
-function Assert-NoReparseAncestors([string] $path, [string] $label) {
-    $currentPath = [IO.Path]::GetFullPath($path)
-    while ($true) {
-        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
-        if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        $parent = Split-Path -Path $currentPath -Parent
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
-        $currentPath = $parent
-    }
-}
 function Get-ExistingOrNewOutput([string] $path) {
     $absolute = Get-Absolute $path 'output'
-    $probe = $absolute
-    while ($true) {
-        if (Test-Path -LiteralPath $probe) {
-            Assert-NoReparseAncestors $probe 'output'
-            break
-        }
-        $parent = Split-Path -Path $probe -Parent
-        if ($parent -eq $probe -or [string]::IsNullOrWhiteSpace($parent)) { break }
-        $probe = $parent
-    }
     if ($absolute -eq [IO.Path]::GetPathRoot($absolute)) { Fail 'refusing a filesystem root as output' }
-    if (Test-Path -LiteralPath $absolute) {
-        $item = Get-Item -LiteralPath $absolute -Force -ErrorAction Stop
-        if (-not $item.PSIsContainer) { Fail 'output must be a directory' }
-        if (@(Get-ChildItem -LiteralPath $absolute -Force).Count -gt 0) { Fail 'output directory must be absent or empty' }
-    } else { New-Item -ItemType Directory -Path $absolute -Force | Out-Null }
-    Assert-NoReparseAncestors $absolute 'output'
-    return (Get-Item -LiteralPath $absolute -Force).FullName
+    if (-not (Test-Path -LiteralPath $absolute)) { New-Item -ItemType Directory -Path $absolute -Force | Out-Null }
+    return $absolute
 }
 function Get-SourceSnapshot([string] $path, [string] $label) {
     $pins = Open-HeldDirectoryPins (Split-Path -Path $path -Parent) $label (Split-Path -Path $path -Parent)
@@ -60,7 +35,6 @@ function Copy-Snapshot($snapshot, [string] $destination, [string] $label) {
         $destIdentity = [WindowsFileHandle]::Identity($stream.SafeFileHandle)
         $destFinal = Normalize-HeldPath (($destIdentity -split '\|')[0])
         if ($destFinal -cne $destination) { Fail "$label output canonical path changed while staging" }
-        Assert-NoReparseAncestors $destination "$label output"
         $destLength = $stream.Length
         if ($destLength -ne $snapshot.Length) { Fail "$label changed while staging" }
         $stream.Position = 0; $sha = [Security.Cryptography.SHA256]::Create()
@@ -72,18 +46,19 @@ function Copy-Snapshot($snapshot, [string] $destination, [string] $label) {
 
 $resources = New-HeldResourceSet
 try {
-$scriptRoot = (Resolve-Path $PSScriptRoot).Path
-Assert-NoReparseAncestors $scriptRoot 'packaging script root'
+$scriptRoot = Get-Absolute $PSScriptRoot 'packaging script root'
 $gui = Get-Absolute $GuiPath 'GUI'
 $helper = Get-Absolute $HelperPath 'helper'
-$output = Get-ExistingOrNewOutput $OutputPath
-$programFiles = Join-Path $output 'Program Files\BootHop'; $programData = Join-Path $output 'ProgramData\BootHop'
-New-Item -ItemType Directory -Path $programFiles,$programData -Force | Out-Null
-Assert-NoReparseAncestors $programFiles 'Program Files output'; Assert-NoReparseAncestors $programData 'ProgramData output'
  $outputPin = $null; $outputParentPin = $null; $programFilesPin = $null; $programDataPin = $null; $guiSnapshot = $null; $helperSnapshot = $null
 try {
+    $outputAbsolute = Get-Absolute $OutputPath 'output'
+    $outputParentPath = Split-Path -Path $outputAbsolute -Parent
+    $outputParentPin = Open-HeldDirectoryPins $outputParentPath 'stage output parent' $outputParentPath; [void](Add-HeldResource $resources $outputParentPin)
+    $output = Get-ExistingOrNewOutput $outputAbsolute
     $outputPin = Open-HeldDirectoryPins $output 'stage output' $output; [void](Add-HeldResource $resources $outputPin)
-    $outputParentPin = Open-HeldDirectoryPins (Split-Path -Path $output -Parent) 'stage output parent' (Split-Path -Path $output -Parent); [void](Add-HeldResource $resources $outputParentPin)
+    if (@(Get-ChildItem -LiteralPath $output -Force).Count -gt 0) { Fail 'output directory must be absent or empty' }
+    $programFiles = Join-Path $output 'Program Files\BootHop'; $programData = Join-Path $output 'ProgramData\BootHop'
+    New-Item -ItemType Directory -Path $programFiles,$programData -Force | Out-Null
     $programFilesPin = Open-HeldDirectoryPins $programFiles 'Program Files output' $programFiles; [void](Add-HeldResource $resources $programFilesPin)
     $programDataPin = Open-HeldDirectoryPins $programData 'ProgramData output' $programData; [void](Add-HeldResource $resources $programDataPin)
     $guiSnapshot = Get-SourceSnapshot $gui 'GUI'; $helperSnapshot = Get-SourceSnapshot $helper 'helper'

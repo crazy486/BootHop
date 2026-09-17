@@ -56,7 +56,10 @@ try {
     . (Join-Path $root 'packaging\windows\held.ps1')
     $heldSource = Get-Content -LiteralPath (Join-Path $root 'packaging\windows\held.ps1') -Raw
     Assert ($heldSource -match '0x02200000u') 'directory pins must use no-follow reparse-point semantics'
+    Assert ($heldSource -notmatch '(?s)function Open-HeldDirectoryPins.*?Get-Item') 'directory pin validation must be handle-authoritative'
     Assert ((Normalize-HeldPath '\\?\UNC\server\share\fixture') -ceq '\\server\share\fixture') 'UNC final paths must normalize without dropping the UNC prefix'
+    Assert ((Get-Content -LiteralPath (Join-Path $root 'packaging\windows\stage.ps1') -Raw) -notmatch 'Assert-NoReparseAncestors') 'stage must not trust a path reparse check before pinning'
+    Assert ((Get-Content -LiteralPath (Join-Path $root 'packaging\windows\check-capabilities.ps1') -Raw) -notmatch 'Assert-NoReparseAncestors') 'capability audit must not trust a path reparse check before pinning'
     $swapHeld = Open-HeldRead $gui 'held swap fixture' $gui
     try {
         Assert-Fails { [IO.File]::WriteAllBytes($gui, [byte[]](1,2,3)) } 'being used by another process'
