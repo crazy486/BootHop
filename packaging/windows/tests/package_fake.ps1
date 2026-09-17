@@ -40,6 +40,8 @@ exit $exitCode
 "@ | Set-Content -LiteralPath $path -Encoding UTF8 -NoNewline
 }
 
+$validDumpbin = "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n    KERNEL32.dll`n                       140001000 GetCurrentProcess`n"
+
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('boothop-windows-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
@@ -51,6 +53,14 @@ try {
 
     & $stageScript -GuiPath $gui -HelperPath $helper -OutputPath $out
     & $packageCheck -StagePath $out
+    . (Join-Path $root 'packaging\windows\held.ps1')
+    $swapHeld = Open-HeldRead $gui 'held swap fixture' $gui
+    try {
+        Assert-Fails { [IO.File]::WriteAllBytes($gui, [byte[]](1,2,3)) } 'being used by another process'
+        $savedIdentity = $swapHeld.Identity; $swapHeld.Identity = 'mismatched-held-identity'
+        Assert-Fails { Assert-HeldIdentity $swapHeld 'held swap fixture' } 'identity changed'
+        $swapHeld.Identity = $savedIdentity
+    } finally { Close-Held $swapHeld }
 
     $manifest = Get-Content (Join-Path $out 'manifest.json') -Raw | ConvertFrom-Json
     Assert ($manifest.protocol_version -eq 2) 'protocol version must be 2'
@@ -64,6 +74,15 @@ try {
     Assert ((Get-Content (Join-Path $out 'NON-PRODUCTION.txt') -Raw) -match 'installer|recovery|downgrade') 'non-production marker must explain release blockers'
     Assert ((Get-Content (Join-Path $out 'Program Files\BootHop\boothop-gui.manifest') -Raw) -match 'asInvoker') 'GUI manifest must be asInvoker'
     Assert ((Get-Content (Join-Path $out 'Program Files\BootHop\boothop-helper.manifest') -Raw) -match 'requireAdministrator') 'helper manifest must requireAdministrator'
+    $manifest.program_data_policy.acl_enforcement = 'not-enforced'
+    $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $out 'manifest.json') -NoNewline -Encoding UTF8
+    Assert-Fails { & $packageCheck -StagePath $out } 'ProgramData policy metadata is incorrect'
+    $manifest.program_data_policy.acl_enforcement = 'installer-required; staging-does-not-mutate-ACL'
+    $manifest.forbidden_artifacts = @('service')
+    $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $out 'manifest.json') -NoNewline -Encoding UTF8
+    Assert-Fails { & $packageCheck -StagePath $out } 'forbidden artifact policy is incorrect'
+    $manifest.forbidden_artifacts = @('service','scheduled-task','run-key','startup-shortcut','driver','bcdedit','shell-command-handler')
+    $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $out 'manifest.json') -NoNewline -Encoding UTF8
 
     $stableOut = Join-Path $temp 'stable-stage'
     & $stageScript -GuiPath $gui -HelperPath $helper -OutputPath $stableOut | Out-Null
@@ -97,7 +116,7 @@ try {
     Assert (($before -eq ((Get-ChildItem -LiteralPath $temp -Recurse -File | Where-Object { $_.FullName -notlike "$out\*" } | ForEach-Object FullName | Sort-Object) -join "`n")) -and -not (Test-Path (Join-Path $temp 'outside'))) 'package checks wrote outside stage'
 
     # Capability fixtures are copied into a disposable source tree. The fake
-    # dumpbin emits no imports; no PE is ever executed.
+    # dumpbin is a disposable parser fixture; no PE is ever executed.
     $auditRoot = Join-Path $temp 'audit-source'
     New-Item -ItemType Directory -Path (Join-Path $auditRoot 'crates\platform\src\windows'), (Join-Path $auditRoot 'crates\gui\src\helper_client\windows'), (Join-Path $auditRoot 'crates\gui\ui'), (Join-Path $auditRoot 'crates\core\src'), (Join-Path $auditRoot 'crates\helper\src'), (Join-Path $auditRoot 'crates\protocol\src') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $auditRoot 'crates\gui\build.rs') -Value '// generated source boundary' -Encoding UTF8
@@ -109,10 +128,17 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $auditRoot 'crates\gui\src\helper_client\windows') -Force | Out-Null
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-gui-launcher.rs') (Join-Path $auditRoot 'crates\gui\src\helper_client\windows\native.rs')
     $dumpbin = Join-Path $temp 'dumpbin.ps1'
-    New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n"
+    New-FakeDumpbin $dumpbin $validDumpbin
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin } 'production dumpbin must be canonical dumpbin.exe'
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
+    New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n"
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'imports table has no DLLs'
+    New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n    KERNEL32.dll`n"
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'imports table has no named entries'
+    New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n"
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'unrecognized dumpbin output'
+    New-FakeDumpbin $dumpbin $validDumpbin
     New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n" 7
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'dumpbin failed for GUI PE'
     New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n    KERNEL32.dll`n                       ordinal 17"
@@ -125,6 +151,7 @@ try {
     $missingPe = Join-Path $temp 'missing-pe.exe'; Move-Item -LiteralPath $helper -Destination $missingPe
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'helper PE is missing or not a regular file'
     Move-Item -LiteralPath $missingPe -Destination $helper
+    New-FakeDumpbin $dumpbin $validDumpbin
     $wrongPe = Join-Path $temp 'wrong-arch.exe'; New-FakePe $wrongPe 0x014c
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $wrongPe -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'unsupported PE machine'
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-capabilities.rs') (Join-Path $auditRoot 'crates\gui\src\forbidden.rs')
@@ -133,11 +160,13 @@ try {
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-platform-firmware.rs') (Join-Path $auditRoot 'crates\platform\src\windows\firmware.rs.bak')
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariable'' outside its allowlist'
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\firmware.rs.bak')
-    try {
-        $junction = Join-Path $temp 'gui-link.exe'; New-Item -ItemType SymbolicLink -Path $junction -Target $gui -ErrorAction Stop | Out-Null
-        Assert-Fails { & $stageScript -GuiPath $junction -HelperPath $helper -OutputPath (Join-Path $temp 'reparse-stage') } 'GUI input must not be a reparse point'
-    } catch [System.Management.Automation.ActionPreferenceStopException] { }
-    if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }
+    $junctionTarget = Join-Path $temp 'junction-target'; New-Item -ItemType Directory -Path $junctionTarget -Force | Out-Null
+    Copy-Item -LiteralPath $gui -Destination (Join-Path $junctionTarget 'boothop-gui.exe')
+    $junction = Join-Path $temp 'junction-root'
+    try { New-Item -ItemType Junction -Path $junction -Target $junctionTarget -ErrorAction Stop | Out-Null }
+    catch { throw "FAIL: unable to create required directory junction fixture: $($_.Exception.Message)" }
+    Assert-Fails { & $stageScript -GuiPath (Join-Path $junction 'boothop-gui.exe') -HelperPath $helper -OutputPath (Join-Path $temp 'reparse-stage') } 'GUI contains a reparse point'
+    Remove-Item -LiteralPath $junction -Force
     $emptyRoot = Join-Path $temp 'empty-source'; New-Item -ItemType Directory -Path $emptyRoot -Force | Out-Null
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $emptyRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source root crates\core\src is missing or not a directory'
     New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n"
@@ -151,6 +180,15 @@ try {
     $duplicateXml = $goodXml -replace '</requestedPrivileges>', '<requestedExecutionLevel level="asInvoker" uiAccess="false" /></requestedPrivileges>'
     Set-Content -LiteralPath $guiManifest -Value $duplicateXml -Encoding UTF8 -NoNewline
     Assert-Fails { & $packageCheck -StagePath $out } 'GUI manifest must contain exactly one requestedExecutionLevel'
+    $wrongRootXml = $goodXml.Replace('<assembly ','<wrongRoot ').Replace('</assembly>','</wrongRoot>')
+    Set-Content -LiteralPath $guiManifest -Value $wrongRootXml -Encoding UTF8 -NoNewline
+    Assert-Fails { & $packageCheck -StagePath $out } 'GUI manifest root must be assembly in the asm.v1 namespace'
+    $wrongNamespaceXml = $goodXml.Replace('urn:schemas-microsoft-com:asm.v1','urn:schemas-example:asm.v1')
+    Set-Content -LiteralPath $guiManifest -Value $wrongNamespaceXml -Encoding UTF8 -NoNewline
+    Assert-Fails { & $packageCheck -StagePath $out } 'GUI manifest root must be assembly in the asm.v1 namespace'
+    $relocatedXml = $goodXml.Replace('<requestedPrivileges>','<requestedPrivileges><spoof />')
+    Set-Content -LiteralPath $guiManifest -Value $relocatedXml -Encoding UTF8 -NoNewline
+    Assert-Fails { & $packageCheck -StagePath $out } 'GUI manifest document hierarchy is not exact'
     Set-Content -LiteralPath $guiManifest -Value $goodXml -Encoding UTF8 -NoNewline
     $manifest = Get-Content (Join-Path $out 'manifest.json') -Raw | ConvertFrom-Json
     $manifest.architecture = 'x86_64-pc-windows-gnu'

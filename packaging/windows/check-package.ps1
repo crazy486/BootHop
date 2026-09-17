@@ -6,17 +6,26 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-function Fail([string] $message) { throw "Windows package check failed: $message" }
+. (Join-Path $PSScriptRoot 'held.ps1')
+function Close-PackageHandles {
+    foreach ($name in @('manifestHeld','guiHeld','helperHeld','guiManifestHeld','helperManifestHeld','policyHeld','markerHeld','stagePin','stageParentPin')) {
+        $variable = Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue
+        if ($null -ne $variable) { Close-Held $variable.Value }
+    }
+}
+function Fail([string] $message) { Close-PackageHandles; throw "Windows package check failed: $message" }
 
 function Get-CanonicalDirectory([string] $path, [string] $label) {
     if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { Fail "$label must be absolute" }
     $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($path)) -Force -ErrorAction SilentlyContinue
     if ($null -eq $item -or -not $item.PSIsContainer) { Fail "$label is missing or not a directory" }
-    $current = $item
-    while ($null -ne $current) {
+    $currentPath = $item.FullName
+    while ($true) {
+        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
         if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        if ($null -eq $current.Parent -or $current.FullName -eq [IO.Path]::GetPathRoot($current.FullName)) { break }
-        $current = Get-Item -LiteralPath $current.Parent.FullName -Force -ErrorAction Stop
+        $parent = Split-Path -Path $currentPath -Parent
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
+        $currentPath = $parent
     }
     $resolved = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).Path
     if ($resolved -cne $item.FullName) { Fail "$label canonical path changed during resolution" }
@@ -28,11 +37,13 @@ function Get-CanonicalFile([string] $path, [string] $label) {
     $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($path)) -Force -ErrorAction SilentlyContinue
     if ($null -eq $item -or $item.PSIsContainer) { Fail "$label is missing or not a regular file" }
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label must not be a reparse point" }
-    $current = $item
-    while ($null -ne $current) {
+    $currentPath = [IO.Path]::GetFullPath($path)
+    while ($true) {
+        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
         if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        if ($null -eq $current.Parent -or $current.FullName -eq [IO.Path]::GetPathRoot($current.FullName)) { break }
-        $current = Get-Item -LiteralPath $current.Parent.FullName -Force -ErrorAction Stop
+        $parent = Split-Path -Path $currentPath -Parent
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
+        $currentPath = $parent
     }
     $resolved = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).Path
     if ($resolved -cne $item.FullName) { Fail "$label canonical path changed during resolution" }
@@ -54,10 +65,10 @@ function Read-Exact([IO.Stream] $stream, [int] $count, [string] $label) {
     return $bytes
 }
 
-function Assert-Amd64Pe([string] $path, [string] $label) {
-    $stream = $null
+function Assert-Amd64Pe($held, [string] $label) {
+    Assert-HeldIdentity $held $label
+    $stream = $held.Stream
     try {
-        $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         if ($stream.Length -lt 0x86) { Fail "$label is not an AMD64 PE" }
         $stream.Position = 0; $dos = Read-Exact $stream 64 $label
         if ($dos[0] -ne 0x4d -or $dos[1] -ne 0x5a) { Fail "$label is not an AMD64 PE" }
@@ -68,11 +79,12 @@ function Assert-Amd64Pe([string] $path, [string] $label) {
         $machine = [BitConverter]::ToUInt16($header, 4)
         if ($machine -ne 0x8664) { Fail ("{0} has unsupported PE machine 0x{1:X4}; expected AMD64" -f $label,$machine) }
         if ([BitConverter]::ToUInt16($header, 24) -ne 0x20b) { Fail "$label is not a PE32+ AMD64 image" }
-    } finally { if ($null -ne $stream) { $stream.Dispose() } }
+    } finally { if (-not $stream.SafeFileHandle.IsClosed) { $stream.Position = 0 } }
+    Assert-HeldIdentity $held $label
 }
 
-function Read-ManifestXml([string] $path, [string] $label) {
-    $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+function Read-ManifestXml($held, [string] $label) {
+    $text = Read-HeldText $held $label
     try {
         $settings = New-Object System.Xml.XmlReaderSettings
         $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
@@ -88,8 +100,38 @@ function Read-ManifestXml([string] $path, [string] $label) {
     return $doc
 }
 
-function Assert-ExecutionManifest([string] $path, [string] $label, [string] $expectedLevel) {
-    $doc = Read-ManifestXml $path $label
+function Assert-ExecutionManifest($held, [string] $label, [string] $expectedLevel) {
+    $doc = Read-ManifestXml $held $label
+    $nodes = @($doc.SelectNodes("//*[local-name()='requestedExecutionLevel']"))
+    if ($nodes.Count -ne 1) { Fail "$label must contain exactly one requestedExecutionLevel" }
+    $root = $doc.DocumentElement
+    if ($null -eq $root -or $root.LocalName -cne 'assembly' -or $root.NamespaceURI -cne 'urn:schemas-microsoft-com:asm.v1') { Fail "$label root must be assembly in the asm.v1 namespace" }
+    $rootElements = @($root.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element })
+    if ($rootElements.Count -ne 3) { Fail "$label document hierarchy is not exact" }
+    $identity = @($rootElements | Where-Object { $_.LocalName -ceq 'assemblyIdentity' -and $_.NamespaceURI -ceq 'urn:schemas-microsoft-com:asm.v1' })
+    $description = @($rootElements | Where-Object { $_.LocalName -ceq 'description' -and $_.NamespaceURI -ceq 'urn:schemas-microsoft-com:asm.v1' })
+    $trustInfo = @($rootElements | Where-Object { $_.LocalName -ceq 'trustInfo' -and $_.NamespaceURI -ceq 'urn:schemas-microsoft-com:asm.v3' })
+    if ($identity.Count -ne 1 -or $description.Count -ne 1 -or $trustInfo.Count -ne 1) { Fail "$label document hierarchy or namespace is not exact" }
+    $trustNode = $trustInfo | Select-Object -First 1
+    $security = if ($null -ne $trustNode) { [object[]]@($trustNode.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element }) } else { [object[]]@() }
+    $security = [object[]]$security
+    $securityNode = $security | Select-Object -First 1
+    $privileges = if ($security.Count -eq 1) { [object[]]@($securityNode.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element }) } else { [object[]]@() }
+    $privileges = [object[]]$privileges
+    $privilegesNode = $privileges | Select-Object -First 1
+    $execParents = if ($privileges.Count -eq 1) { [object[]]@($privilegesNode.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element }) } else { [object[]]@() }
+    $execParents = [object[]]$execParents
+    $execNode = $execParents | Select-Object -First 1
+    if ($securityNode) { $security = @(,$securityNode) }
+    if ($privilegesNode) { $privileges = @(,$privilegesNode) }
+    if ($execNode) { $execParents = @(,$execNode) }
+    $securityElements = if ($trustInfo.Count -eq 1) { @($trustNode.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element }) } else { @() }
+    $securityElement = $securityElements | Select-Object -First 1
+    $privilegeElements = if ($securityElements.Count -eq 1) { @($securityElement.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element }) } else { @() }
+    $privilegeElement = $privilegeElements | Select-Object -First 1
+    $executionElements = if ($privilegeElements.Count -eq 1) { @($privilegeElement.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element }) } else { @() }
+    if ($securityElements.Count -ne 1 -or $privilegeElements.Count -ne 1 -or $executionElements.Count -ne 1) { Fail "$label document hierarchy is not exact" }
+    if ($security.Count -ne 1 -or $security[0].LocalName -cne 'security' -or $security[0].NamespaceURI -cne 'urn:schemas-microsoft-com:asm.v3' -or $privileges.Count -ne 1 -or $privileges[0].LocalName -cne 'requestedPrivileges' -or $privileges[0].NamespaceURI -cne 'urn:schemas-microsoft-com:asm.v3' -or $execParents.Count -ne 1 -or $execParents[0].LocalName -cne 'requestedExecutionLevel' -or $execParents[0].NamespaceURI -ne 'urn:schemas-microsoft-com:asm.v3') { Fail "$label document hierarchy or namespace is not exact" }
     $nodes = @($doc.SelectNodes("//*[local-name()='requestedExecutionLevel']"))
     if ($nodes.Count -ne 1) { Fail "$label must contain exactly one requestedExecutionLevel" }
     $node = $nodes[0]
@@ -102,6 +144,9 @@ function Assert-ExecutionManifest([string] $path, [string] $label, [string] $exp
 }
 
 $stage = Get-CanonicalDirectory $StagePath 'stage root'
+$stageParent = Split-Path -Path $stage -Parent
+$stagePin = Open-HeldDirectory $stage 'stage root' $stage
+$stageParentPin = Open-HeldDirectory $stageParent 'stage parent' $stageParent
 $required = @('manifest.json','NON-PRODUCTION.txt','Program Files\BootHop\boothop-gui.exe','Program Files\BootHop\boothop-helper.exe','Program Files\BootHop\boothop-gui.manifest','Program Files\BootHop\boothop-helper.manifest','ProgramData\BootHop\.directory-policy.json')
 $requiredDirs = @('Program Files','Program Files\BootHop','ProgramData','ProgramData\BootHop')
 $actualDirs = @(Get-ChildItem -LiteralPath $stage -Recurse -Directory -Force | ForEach-Object {
@@ -118,7 +163,8 @@ foreach ($name in $required) { if (-not (Contains-Exact $actual $name)) { Fail "
 foreach ($name in $actual) { if (-not (Contains-Exact $required $name)) { Fail "unexpected package file: $name" } }
 
 $manifestPath = Get-CanonicalFile (Join-Path $stage 'manifest.json') 'package manifest'
-$manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$manifestHeld = Open-HeldRead $manifestPath 'package manifest' $manifestPath
+$manifest = Read-HeldText $manifestHeld 'package manifest' | ConvertFrom-Json
 if ($manifest.schema_version -ne 1 -or $manifest.product -cne 'BootHop') { Fail 'invalid manifest identity' }
 if ($manifest.production_status -cne 'NON-PRODUCTION') { Fail 'missing NON-PRODUCTION status' }
 if ($manifest.architecture -cne 'x86_64-pc-windows-msvc') { Fail 'unsupported or missing architecture' }
@@ -129,23 +175,35 @@ if ($manifest.layout.program_files -cne 'Program Files\BootHop' -or $manifest.la
 if ($manifest.binaries.gui.protocol_version -ne 2 -or $manifest.binaries.helper.protocol_version -ne 2) { Fail 'mixed binary protocol metadata' }
 if ($manifest.binaries.gui.execution_level -cne 'asInvoker' -or $manifest.binaries.helper.execution_level -cne 'requireAdministrator') { Fail 'binary execution level metadata is incorrect' }
 if ($manifest.binaries.gui.path -cne 'Program Files\BootHop\boothop-gui.exe' -or $manifest.binaries.helper.path -cne 'Program Files\BootHop\boothop-helper.exe') { Fail 'binary paths must remain fixed and package-local' }
-if ($manifest.program_data_policy.directory -cne 'ProgramData\BootHop' -or $manifest.program_data_policy.owner -cne 'SYSTEM-or-BUILTIN-Administrators' -or $manifest.program_data_policy.ordinary_user_access -cne 'none') { Fail 'ProgramData policy metadata is incorrect' }
+if ($manifest.program_data_policy.directory -cne 'ProgramData\BootHop' -or $manifest.program_data_policy.owner -cne 'SYSTEM-or-BUILTIN-Administrators' -or $manifest.program_data_policy.ordinary_user_access -cne 'none' -or $manifest.program_data_policy.acl_enforcement -cne 'installer-required; staging-does-not-mutate-ACL') { Fail 'ProgramData policy metadata is incorrect' }
+
+$expectedForbidden = @('service','scheduled-task','run-key','startup-shortcut','driver','bcdedit','shell-command-handler')
+if ($null -eq $manifest.forbidden_artifacts -or @($manifest.forbidden_artifacts).Count -ne $expectedForbidden.Count) { Fail 'forbidden artifact policy is incorrect' }
+for ($index = 0; $index -lt $expectedForbidden.Count; $index++) { if ([string]$manifest.forbidden_artifacts[$index] -cne $expectedForbidden[$index]) { Fail 'forbidden artifact policy is incorrect' } }
 $gui = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-gui.exe') 'staged GUI PE'
 $helper = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-helper.exe') 'staged helper PE'
-$guiBefore = Get-Item -LiteralPath $gui -Force; $helperBefore = Get-Item -LiteralPath $helper -Force
-Assert-Amd64Pe $gui 'GUI PE'; Assert-Amd64Pe $helper 'helper PE'
-foreach ($pair in @(@($gui,$manifest.binaries.gui.sha256,'GUI',$manifest.binaries.gui.size,$guiBefore),@($helper,$manifest.binaries.helper.sha256,'helper',$manifest.binaries.helper.size,$helperBefore))) {
+$guiHeld = Open-HeldRead $gui 'GUI PE' $gui
+$helperHeld = Open-HeldRead $helper 'helper PE' $helper
+Assert-Amd64Pe $guiHeld 'GUI PE'; Assert-Amd64Pe $helperHeld 'helper PE'
+foreach ($pair in @(@($guiHeld,$manifest.binaries.gui.sha256,'GUI',$manifest.binaries.gui.size),@($helperHeld,$manifest.binaries.helper.sha256,'helper',$manifest.binaries.helper.size))) {
     if ([string]$pair[1] -cnotmatch '^[0-9a-f]{64}$') { Fail "$($pair[2]) hash is absent or malformed" }
-    if ([int64]$pair[3] -ne [int64]$pair[4].Length) { Fail "$($pair[2]) size does not match staged bytes" }
-    $stream = [IO.File]::Open($pair[0],[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); $sha = [Security.Cryptography.SHA256]::Create()
-    try { $hash = ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-','').ToLowerInvariant() } finally { $sha.Dispose(); $stream.Dispose() }
+    if ([int64]$pair[3] -ne [int64]$pair[0].Stream.Length) { Fail "$($pair[2]) size does not match staged bytes" }
+    $hash = Get-HeldHash $pair[0] $pair[2]
     if ($hash -cne [string]$pair[1]) { Fail "$($pair[2]) hash does not match staged bytes" }
-    $after = Get-Item -LiteralPath $pair[0] -Force
-    if ($after.Length -ne $pair[4].Length -or $after.LastWriteTimeUtc -ne $pair[4].LastWriteTimeUtc -or $after.Attributes -ne $pair[4].Attributes -or $after.FullName -cne $pair[4].FullName) { Fail "$($pair[2]) changed during package check" }
+    Assert-HeldIdentity $pair[0] $pair[2]
 }
-Assert-ExecutionManifest (Join-Path $stage 'Program Files\BootHop\boothop-gui.manifest') 'GUI manifest' 'asInvoker'
-Assert-ExecutionManifest (Join-Path $stage 'Program Files\BootHop\boothop-helper.manifest') 'helper manifest' 'requireAdministrator'
-$policy = Get-Content -LiteralPath (Join-Path $stage 'ProgramData\BootHop\.directory-policy.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($policy.schema_version -ne 1 -or $policy.path -cne 'ProgramData\BootHop' -or $policy.owner -cne 'SYSTEM-or-BUILTIN-Administrators' -or $policy.ordinary_user_access -cne 'none') { Fail 'ProgramData policy metadata is incorrect' }
-if ((Get-Content -LiteralPath (Join-Path $stage 'NON-PRODUCTION.txt') -Raw) -notmatch '(?i)installer.*recovery|recovery.*downgrade') { Fail 'non-production marker is incomplete' }
+ $guiManifestPath = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-gui.manifest') 'GUI manifest'
+ $helperManifestPath = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-helper.manifest') 'helper manifest'
+ $guiManifestHeld = Open-HeldRead $guiManifestPath 'GUI manifest' $guiManifestPath
+ $helperManifestHeld = Open-HeldRead $helperManifestPath 'helper manifest' $helperManifestPath
+Assert-ExecutionManifest $guiManifestHeld 'GUI manifest' 'asInvoker'
+Assert-ExecutionManifest $helperManifestHeld 'helper manifest' 'requireAdministrator'
+$policyPath = Get-CanonicalFile (Join-Path $stage 'ProgramData\BootHop\.directory-policy.json') 'directory policy'
+$policyHeld = Open-HeldRead $policyPath 'directory policy' $policyPath
+$policy = Read-HeldText $policyHeld 'directory policy' | ConvertFrom-Json
+if ($policy.schema_version -ne 1 -or $policy.path -cne 'ProgramData\BootHop' -or $policy.owner -cne 'SYSTEM-or-BUILTIN-Administrators' -or $policy.ordinary_user_access -cne 'none' -or $policy.acl_enforcement -cne 'installer-required; staging-does-not-mutate-ACL') { Fail 'ProgramData policy metadata is incorrect' }
+$markerPath = Get-CanonicalFile (Join-Path $stage 'NON-PRODUCTION.txt') 'non-production marker'
+$markerHeld = Open-HeldRead $markerPath 'non-production marker' $markerPath
+if ((Read-HeldText $markerHeld 'non-production marker') -notmatch '(?i)installer.*recovery|recovery.*downgrade') { Fail 'non-production marker is incomplete' }
+foreach ($held in @($manifestHeld,$guiHeld,$helperHeld,$guiManifestHeld,$helperManifestHeld,$policyHeld,$markerHeld,$stagePin,$stageParentPin)) { Close-Held $held }
 Write-Output 'Windows package check: passed'

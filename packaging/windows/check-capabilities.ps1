@@ -12,7 +12,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-function Fail([string] $message) { throw "Windows capability audit failed: $message" }
+. (Join-Path $PSScriptRoot 'held.ps1')
+function Close-AuditHandles {
+    foreach ($name in @('guiHeld','helperHeld','dumpbinHeld','rootPin','sourceHeld')) {
+        $variable = Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue
+        if ($null -ne $variable) { Close-Held $variable.Value }
+    }
+    $pins = Get-Variable -Name sourcePins -Scope Script -ErrorAction SilentlyContinue
+    if ($null -ne $pins) { foreach ($pin in $pins.Value) { Close-Held $pin } }
+}
+function Fail([string] $message) { Close-AuditHandles; throw "Windows capability audit failed: $message" }
 
 function Get-Absolute([string] $path, [string] $label) {
     if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { Fail "$label must be an absolute path" }
@@ -20,11 +29,13 @@ function Get-Absolute([string] $path, [string] $label) {
 }
 
 function Assert-NoReparseAncestors([string] $path, [string] $label) {
-    $current = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    while ($null -ne $current) {
+    $currentPath = [IO.Path]::GetFullPath($path)
+    while ($true) {
+        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
         if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        if ($null -eq $current.Parent -or $current.FullName -eq [IO.Path]::GetPathRoot($current.FullName)) { break }
-        $current = Get-Item -LiteralPath $current.Parent.FullName -Force -ErrorAction Stop
+        $parent = Split-Path -Path $currentPath -Parent
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
+        $currentPath = $parent
     }
 }
 
@@ -63,6 +74,10 @@ if ($TestOnlyFixtureMode) {
 }
 $guiPath = Get-CanonicalFile $GuiPath 'GUI PE'
 $helperPath = Get-CanonicalFile $HelperPath 'helper PE'
+$rootPin = Open-HeldDirectory $root 'source root' $root
+$dumpbinHeld = Open-HeldRead $dumpbin 'dumpbin' $dumpbin
+$guiHeld = Open-HeldRead $guiPath 'GUI PE' $guiPath
+$helperHeld = Open-HeldRead $helperPath 'helper PE' $helperPath
 
 function Read-Exact([IO.Stream] $stream, [int] $count, [string] $label) {
     $bytes = New-Object byte[] $count; $offset = 0
@@ -74,11 +89,10 @@ function Read-Exact([IO.Stream] $stream, [int] $count, [string] $label) {
     return $bytes
 }
 
-function Get-PeSnapshot([string] $path, [string] $label) {
-    $before = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    $stream = $null; $sha = $null
+function Get-PeSnapshot($held, [string] $label) {
+    Assert-HeldIdentity $held $label
+    $stream = $held.Stream; $sha = $null
     try {
-        $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $length = $stream.Length
         if ($length -lt 0x86) { Fail "$label is not a PE: file is too small" }
         $stream.Position = 0; $dos = Read-Exact $stream 64 $label
@@ -96,14 +110,13 @@ function Get-PeSnapshot([string] $path, [string] $label) {
         $hash = ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
     } finally {
         if ($null -ne $sha) { $sha.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
+        if (-not $stream.SafeFileHandle.IsClosed) { $stream.Position = 0 }
     }
-    $after = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    if ($before.Length -ne $after.Length -or $before.LastWriteTimeUtc -ne $after.LastWriteTimeUtc -or $before.Attributes -ne $after.Attributes -or $before.FullName -cne $after.FullName) { Fail "$label changed during PE inspection" }
-    return [pscustomobject]@{ Path = $path; Hash = $hash; Length = $length }
+    Assert-HeldIdentity $held $label
+    return [pscustomobject]@{ Held = $held; Path = $held.Path; Hash = $hash; Length = $length }
 }
 
-$guiPe = Get-PeSnapshot $guiPath 'GUI PE'; $helperPe = Get-PeSnapshot $helperPath 'helper PE'
+$guiPe = Get-PeSnapshot $guiHeld 'GUI PE'; $helperPe = Get-PeSnapshot $helperHeld 'helper PE'
 
 # Complete production source/generated input scope. Every root must exist and
 # contain a file; otherwise an audit could pass vacuously.
@@ -117,10 +130,12 @@ $sourceSpecs = @(
     @{ Relative = 'crates\protocol\src'; Directory = $true }
 )
 $sourceFiles = [Collections.Generic.List[object]]::new()
+$sourcePins = [Collections.Generic.List[object]]::new()
 foreach ($spec in $sourceSpecs) {
     $candidate = Join-Path $root $spec.Relative
     if ($spec.Directory) {
         $dir = Get-CanonicalDirectory $candidate "source root $($spec.Relative)"; Assert-Contained $root $dir "source root $($spec.Relative)"
+        $sourcePins.Add((Open-HeldDirectory $dir "source root $($spec.Relative)" $dir))
         $entries = @(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction Stop)
         if (@($entries | Where-Object { -not $_.PSIsContainer }).Count -eq 0) { Fail "source root is empty: $($spec.Relative)" }
         foreach ($entry in $entries) {
@@ -148,35 +163,42 @@ $allow = @{
 $patterns = @('SetFirmwareEnvironmentVariable','GetFirmwareEnvironmentVariable','GetFirmwareType','AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','ExitWindows','ShellExecute','CreateProcess','LoadLibrary','GetProcAddress','bcdedit')
 foreach ($file in $sourceFiles) {
     $canonicalFile = Get-CanonicalFile $file.FullName 'source file'; $relative = [IO.Path]::GetRelativePath($root, $canonicalFile).Replace('/','\')
-    $text = Get-Content -LiteralPath $canonicalFile -Raw -ErrorAction Stop
-    foreach ($pattern in $patterns) {
-        if ($text.IndexOf($pattern, [StringComparison]::Ordinal) -lt 0) { continue }
-        $allowed = $false
-        if ($allow.ContainsKey($pattern)) { foreach ($expected in $allow[$pattern]) { if ($relative -ceq $expected) { $allowed = $true; break } } }
-        if (-not $allowed) { Fail "source capability '$pattern' outside its allowlist: $relative" }
+    $sourceHeld = Open-HeldRead $canonicalFile 'source file' $canonicalFile
+    try {
+        $text = Read-HeldText $sourceHeld 'source file'
+        foreach ($pattern in $patterns) {
+            if ($text.IndexOf($pattern, [StringComparison]::Ordinal) -lt 0) { continue }
+            $allowed = $false
+            if ($allow.ContainsKey($pattern)) { foreach ($expected in $allow[$pattern]) { if ($relative -ceq $expected) { $allowed = $true; break } } }
+            if (-not $allowed) { Fail "source capability '$pattern' outside its allowlist: $relative" }
+        }
+    } finally {
+        Close-Held $sourceHeld
     }
 }
 
 function Invoke-Dumpbin([string] $path, [string] $label) {
-    $dumpbinIdentity = Get-Item -LiteralPath $dumpbin -Force -ErrorAction Stop
+    Assert-HeldIdentity $dumpbinHeld 'dumpbin'
+    Assert-HeldIdentity $guiHeld $label
+    if ($label -like '*helper*') { Assert-HeldIdentity $helperHeld $label }
     try { $output = @(& $dumpbin /imports $path 2>&1); $exitCode = $LASTEXITCODE } catch { Fail "dumpbin failed for $label" }
     if ($null -eq $exitCode -or $exitCode -ne 0 -or -not $?) { Fail "dumpbin failed for $label" }
     if ($output.Count -eq 0) { Fail "dumpbin output is empty for $label" }
-    $after = Get-Item -LiteralPath $dumpbin -Force -ErrorAction Stop
-    if ($after.Length -ne $dumpbinIdentity.Length -or $after.LastWriteTimeUtc -ne $dumpbinIdentity.LastWriteTimeUtc -or $after.Attributes -ne $dumpbinIdentity.Attributes -or $after.FullName -cne $dumpbinIdentity.FullName) { Fail 'dumpbin changed during audit' }
+    Assert-HeldIdentity $dumpbinHeld 'dumpbin'
+    if ($label -like '*helper*') { Assert-HeldIdentity $helperHeld $label } else { Assert-HeldIdentity $guiHeld $label }
     return ($output -join "`n")
 }
 
 function Parse-DumpbinImports([string] $text, [string] $label) {
     if ($text -match '(?i)\bordinal\b') { Fail "ordinal import is unsupported for $label" }
-    $lines = $text -split "`r?`n"; $inImports = $false; $currentDll = $false; $currentDllNames = 0; $names = [Collections.Generic.List[string]]::new()
+    $lines = $text -split "`r?`n"; $inImports = $false; $currentDll = $false; $currentDllNames = 0; $dllCount = 0; $names = [Collections.Generic.List[string]]::new()
     foreach ($line in $lines) {
         if ($line -match '(?i)Section contains the following imports:') { $inImports = $true; continue }
         if (-not $inImports -or [string]::IsNullOrWhiteSpace($line)) { continue }
         if ($line -match '^\s*Summary\s*$') { break }
         if ($line -match '^\s+[A-Za-z0-9_.-]+\.dll\s*$') {
-            if ($currentDll -and $currentDllNames -eq 0) { Fail "ordinal import is unsupported for $label" }
-            $currentDll = $true; $currentDllNames = 0; continue
+            if ($currentDll -and $currentDllNames -eq 0) { Fail "imports table has no named entries for $label" }
+            $currentDll = $true; $currentDllNames = 0; $dllCount++; continue
         }
         if ($line -match '^\s*[0-9A-Fa-f]{8,16}\s+(Import Address Table|Import Name Table)$' -or $line -match '^\s*[0-9A-Fa-f]+\s+(time date stamp|Index of first forwarder reference)$' -or $line -match '^\s*(?:[0-9A-Fa-f]+\s+){4,}[0-9A-Fa-f]+\s*$') { continue }
         if ($line -match '^\s*[0-9A-Fa-f]{1,16}\s+([A-Za-z_?$@][A-Za-z0-9_?$@.\-]*)\s*$') {
@@ -186,7 +208,9 @@ function Parse-DumpbinImports([string] $text, [string] $label) {
         Fail "unrecognized import form for $label"
     }
     if (-not $inImports) { Fail "unrecognized dumpbin output for $label" }
-    if ($currentDll -and $currentDllNames -eq 0) { Fail "ordinal import is unsupported for $label" }
+    if ($dllCount -eq 0) { Fail "imports table has no DLLs for $label" }
+    if ($currentDll -and $currentDllNames -eq 0) { Fail "imports table has no named entries for $label" }
+    if ($names.Count -eq 0) { Fail "imports table has no named entries for $label" }
     return @($names)
 }
 
@@ -195,5 +219,6 @@ $guiForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|A
 $helperForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|OpenProcessToken|InitiateSystemShutdown|ExitWindows|LoadLibrary|GetProcAddress|bcdedit|CreateProcess|ShellExecute'
 if (($guiImports | Where-Object { $_ -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
 if (($helperImports | Where-Object { $_ -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
-foreach ($pe in @($guiPe,$helperPe)) { if ((Get-FileHash -LiteralPath $pe.Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }
+foreach ($pe in @($guiPe,$helperPe)) { if ((Get-HeldHash $pe.Held $pe.Path) -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }
+foreach ($held in @($guiHeld,$helperHeld,$dumpbinHeld,$rootPin) + @($sourcePins)) { Close-Held $held }
 Write-Output 'Windows source and PE capability audit: passed'
