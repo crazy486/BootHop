@@ -44,17 +44,6 @@ function Get-CanonicalDirectory([string] $path, [string] $label) {
     return $item.FullName
 }
 
-function Get-CanonicalFile([string] $path, [string] $label) {
-    $absolute = Get-Absolute $path $label
-    $item = Get-Item -LiteralPath $absolute -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or $item.PSIsContainer) { Fail "$label is missing or not a regular file" }
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label must not be a reparse point" }
-    Assert-NoReparseAncestors $absolute $label
-    $resolved = (Resolve-Path -LiteralPath $absolute -ErrorAction Stop).Path
-    if ($resolved -cne $item.FullName) { Fail "$label canonical path changed during resolution" }
-    return $item.FullName
-}
-
 function Assert-Contained([string] $root, [string] $path, [string] $label) {
     $relative = [IO.Path]::GetRelativePath($root, $path)
     if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith('..\') -or $relative.StartsWith('../')) { Fail "$label escapes the source root" }
@@ -63,14 +52,14 @@ function Assert-Contained([string] $root, [string] $path, [string] $label) {
 $resources = New-HeldResourceSet
 try {
 $root = Get-CanonicalDirectory $RootPath 'source root'
-$dumpbin = Get-CanonicalFile $DumpbinPath 'dumpbin'
+$dumpbin = Get-Absolute $DumpbinPath 'dumpbin'
 if ($TestOnlyFixtureMode) {
     if ([IO.Path]::GetExtension($dumpbin) -cne '.ps1') { Fail 'test-only dumpbin must be a .ps1 fixture' }
 } elseif ([IO.Path]::GetFileName($dumpbin) -cne 'dumpbin.exe') {
     Fail 'production dumpbin must be canonical dumpbin.exe'
 }
-$guiPath = Get-CanonicalFile $GuiPath 'GUI PE'
-$helperPath = Get-CanonicalFile $HelperPath 'helper PE'
+$guiPath = Get-Absolute $GuiPath 'GUI PE'
+$helperPath = Get-Absolute $HelperPath 'helper PE'
 $rootPin = Open-HeldDirectoryPins $root 'source root' $root; [void](Add-HeldResource $resources $rootPin)
 $dumpbinResource = Open-HeldFileResource $dumpbin 'dumpbin' $dumpbin; [void](Add-HeldResource $resources $dumpbinResource); $dumpbinHeld = $dumpbinResource.Held
 $guiResource = Open-HeldFileResource $guiPath 'GUI PE' $guiPath; [void](Add-HeldResource $resources $guiResource); $guiHeld = $guiResource.Held
@@ -140,7 +129,7 @@ foreach ($spec in $sourceSpecs) {
             if (-not $entry.PSIsContainer) { $sourceFiles.Add($entry) }
         }
     } else {
-        $file = Get-CanonicalFile $candidate "source input $($spec.Relative)"; Assert-Contained $root $file "source input $($spec.Relative)"
+        $file = Get-Absolute $candidate "source input $($spec.Relative)"; Assert-Contained $root $file "source input $($spec.Relative)"
         if ((Get-Item -LiteralPath $file).Length -eq 0) { Fail "source input is empty: $($spec.Relative)" }
         $sourceFiles.Add((Get-Item -LiteralPath $file -Force))
     }
@@ -159,9 +148,11 @@ $allow = @{
 }
 $patterns = @('SetFirmwareEnvironmentVariable','GetFirmwareEnvironmentVariable','GetFirmwareType','AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','ExitWindows','ShellExecute','CreateProcess','LoadLibrary','GetProcAddress','bcdedit')
 foreach ($file in $sourceFiles) {
-    $canonicalFile = Get-CanonicalFile $file.FullName 'source file'; $relative = [IO.Path]::GetRelativePath($root, $canonicalFile).Replace('/','\')
-    $sourceResource = Open-HeldFileResource $canonicalFile 'source file' $canonicalFile; [void](Add-HeldResource $resources $sourceResource); $sourceHeld = $sourceResource.Held
+    $sourcePath = Get-Absolute $file.FullName 'source file'
+    $sourceResource = Open-HeldFileResource $sourcePath 'source file' $sourcePath; [void](Add-HeldResource $resources $sourceResource); $sourceHeld = $sourceResource.Held
+    $canonicalFile = $sourceHeld.Canonical; $relative = [IO.Path]::GetRelativePath($root, $canonicalFile).Replace('/','\')
     try {
+        if ($sourceHeld.Stream.Length -eq 0) { Fail "source input is empty: $relative" }
         $text = Read-HeldText $sourceHeld 'source file'
         foreach ($pattern in $patterns) {
             if ($text.IndexOf($pattern, [StringComparison]::Ordinal) -lt 0) { continue }

@@ -22,16 +22,6 @@ function Assert-NoReparseAncestors([string] $path, [string] $label) {
         $currentPath = $parent
     }
 }
-function Get-CanonicalFile([string] $path, [string] $label) {
-    $absolute = Get-Absolute $path $label
-    $item = Get-Item -LiteralPath $absolute -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or $item.PSIsContainer) { Fail "$label input is missing or not a regular file" }
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label input must not be a reparse point" }
-    Assert-NoReparseAncestors $absolute $label
-    $resolved = (Resolve-Path -LiteralPath $absolute -ErrorAction Stop).Path
-    if ($resolved -cne $item.FullName) { Fail "$label input canonical path changed during resolution" }
-    return $item.FullName
-}
 function Get-ExistingOrNewOutput([string] $path) {
     $absolute = Get-Absolute $path 'output'
     $probe = $absolute
@@ -54,8 +44,8 @@ function Get-ExistingOrNewOutput([string] $path) {
     return (Get-Item -LiteralPath $absolute -Force).FullName
 }
 function Get-SourceSnapshot([string] $path, [string] $label) {
-    $pins = Open-HeldDirectoryPins (Split-Path -Path $path -Parent) "$label input parent" (Split-Path -Path $path -Parent)
-    try { $held = Open-HeldRead $path $label $path }
+    $pins = Open-HeldDirectoryPins (Split-Path -Path $path -Parent) $label (Split-Path -Path $path -Parent)
+    try { $held = Open-HeldRead $path "$label input" $path }
     catch { Close-Held $pins; throw }
     try { return [pscustomobject]@{ Path=$path; Pins=$pins; Held=$held; Stream=$held.Stream; Hash=(Get-HeldHash $held $label); Length=$held.Stream.Length } }
     catch { Close-Held $held; Close-Held $pins; throw }
@@ -84,8 +74,8 @@ $resources = New-HeldResourceSet
 try {
 $scriptRoot = (Resolve-Path $PSScriptRoot).Path
 Assert-NoReparseAncestors $scriptRoot 'packaging script root'
-$gui = Get-CanonicalFile $GuiPath 'GUI'
-$helper = Get-CanonicalFile $HelperPath 'helper'
+$gui = Get-Absolute $GuiPath 'GUI'
+$helper = Get-Absolute $HelperPath 'helper'
 $output = Get-ExistingOrNewOutput $OutputPath
 $programFiles = Join-Path $output 'Program Files\BootHop'; $programData = Join-Path $output 'ProgramData\BootHop'
 New-Item -ItemType Directory -Path $programFiles,$programData -Force | Out-Null
@@ -102,14 +92,14 @@ try {
     Copy-Snapshot $guiSnapshot (Join-Path $programFiles 'boothop-gui.exe') 'GUI'
     Copy-Snapshot $helperSnapshot (Join-Path $programFiles 'boothop-helper.exe') 'helper'
     foreach ($manifestName in @('boothop-gui.manifest','boothop-helper.manifest')) {
-        $source = Get-CanonicalFile (Join-Path $scriptRoot $manifestName) "manifest $manifestName"
+        $source = Get-Absolute (Join-Path $scriptRoot $manifestName) "manifest $manifestName"
         $sourceSnapshot = Get-SourceSnapshot $source "manifest $manifestName"
         [void](Add-HeldResource $resources $sourceSnapshot.Pins); [void](Add-HeldResource $resources $sourceSnapshot.Held)
         try { Copy-Snapshot $sourceSnapshot (Join-Path $programFiles $manifestName) "manifest $manifestName" } finally { Close-Held $sourceSnapshot.Held }
     }
     $policy = [ordered]@{ schema_version=1; path='ProgramData\BootHop'; owner='SYSTEM-or-BUILTIN-Administrators'; ordinary_user_access='none'; acl_enforcement='installer-required; staging-does-not-mutate-ACL'; note='Intent metadata only; staging never creates, changes, or validates a live ACL.' }
     $policy | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $programData '.directory-policy.json') -Encoding UTF8 -NoNewline
-    $manifestSource = Get-SourceSnapshot (Get-CanonicalFile (Join-Path $scriptRoot 'manifest.json') 'manifest.json') 'manifest.json'
+    $manifestSource = Get-SourceSnapshot (Get-Absolute (Join-Path $scriptRoot 'manifest.json') 'manifest.json') 'manifest.json'
     [void](Add-HeldResource $resources $manifestSource.Pins); [void](Add-HeldResource $resources $manifestSource.Held)
     try { $manifest = Read-HeldText $manifestSource.Held 'manifest.json' | ConvertFrom-Json } finally { Close-Held $manifestSource.Held }
     $manifest.binaries.gui.sha256 = (Get-HeldHash $guiSnapshot.Held 'GUI').ToLowerInvariant()

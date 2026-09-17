@@ -29,24 +29,6 @@ function Get-CanonicalDirectory([string] $path, [string] $label) {
     return $item.FullName
 }
 
-function Get-CanonicalFile([string] $path, [string] $label) {
-    if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { Fail "$label must be absolute" }
-    $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($path)) -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or $item.PSIsContainer) { Fail "$label is missing or not a regular file" }
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label must not be a reparse point" }
-    $currentPath = [IO.Path]::GetFullPath($path)
-    while ($true) {
-        $current = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
-        if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "$label contains a reparse point: $($current.FullName)" }
-        $parent = Split-Path -Path $currentPath -Parent
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $currentPath -or $currentPath -eq [IO.Path]::GetPathRoot($currentPath)) { break }
-        $currentPath = $parent
-    }
-    $resolved = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).Path
-    if ($resolved -cne $item.FullName) { Fail "$label canonical path changed during resolution" }
-    return $item.FullName
-}
-
 function Contains-Exact([object[]] $values, [string] $expected) {
     foreach ($value in $values) { if ([string]$value -ceq $expected) { return $true } }
     return $false
@@ -161,7 +143,7 @@ $actual = @(Get-ChildItem -LiteralPath $stage -Recurse -File -Force | ForEach-Ob
 foreach ($name in $required) { if (-not (Contains-Exact $actual $name)) { Fail "missing required file: $name" } }
 foreach ($name in $actual) { if (-not (Contains-Exact $required $name)) { Fail "unexpected package file: $name" } }
 
-$manifestPath = Get-CanonicalFile (Join-Path $stage 'manifest.json') 'package manifest'
+$manifestPath = [IO.Path]::GetFullPath((Join-Path $stage 'manifest.json'))
 $manifestResource = Open-HeldFileResource $manifestPath 'package manifest' $manifestPath; [void](Add-HeldResource $resources $manifestResource)
 $manifestHeld = $manifestResource.Held
 $manifest = Read-HeldText $manifestHeld 'package manifest' | ConvertFrom-Json
@@ -180,8 +162,8 @@ if ($manifest.program_data_policy.directory -cne 'ProgramData\BootHop' -or $mani
 $expectedForbidden = @('service','scheduled-task','run-key','startup-shortcut','driver','bcdedit','shell-command-handler')
 if ($null -eq $manifest.forbidden_artifacts -or @($manifest.forbidden_artifacts).Count -ne $expectedForbidden.Count) { Fail 'forbidden artifact policy is incorrect' }
 for ($index = 0; $index -lt $expectedForbidden.Count; $index++) { if ([string]$manifest.forbidden_artifacts[$index] -cne $expectedForbidden[$index]) { Fail 'forbidden artifact policy is incorrect' } }
-$gui = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-gui.exe') 'staged GUI PE'
-$helper = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-helper.exe') 'staged helper PE'
+$gui = [IO.Path]::GetFullPath((Join-Path $stage 'Program Files\BootHop\boothop-gui.exe'))
+$helper = [IO.Path]::GetFullPath((Join-Path $stage 'Program Files\BootHop\boothop-helper.exe'))
 $guiResource = Open-HeldFileResource $gui 'GUI PE' $gui; [void](Add-HeldResource $resources $guiResource); $guiHeld = $guiResource.Held
 $helperResource = Open-HeldFileResource $helper 'helper PE' $helper; [void](Add-HeldResource $resources $helperResource); $helperHeld = $helperResource.Held
 Assert-Amd64Pe $guiHeld 'GUI PE'; Assert-Amd64Pe $helperHeld 'helper PE'
@@ -192,17 +174,17 @@ foreach ($pair in @(@($guiHeld,$manifest.binaries.gui.sha256,'GUI',$manifest.bin
     if ($hash -cne [string]$pair[1]) { Fail "$($pair[2]) hash does not match staged bytes" }
     Assert-HeldIdentity $pair[0] $pair[2]
 }
- $guiManifestPath = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-gui.manifest') 'GUI manifest'
- $helperManifestPath = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-helper.manifest') 'helper manifest'
+ $guiManifestPath = [IO.Path]::GetFullPath((Join-Path $stage 'Program Files\BootHop\boothop-gui.manifest'))
+ $helperManifestPath = [IO.Path]::GetFullPath((Join-Path $stage 'Program Files\BootHop\boothop-helper.manifest'))
  $guiManifestResource = Open-HeldFileResource $guiManifestPath 'GUI manifest' $guiManifestPath; [void](Add-HeldResource $resources $guiManifestResource); $guiManifestHeld = $guiManifestResource.Held
  $helperManifestResource = Open-HeldFileResource $helperManifestPath 'helper manifest' $helperManifestPath; [void](Add-HeldResource $resources $helperManifestResource); $helperManifestHeld = $helperManifestResource.Held
 Assert-ExecutionManifest $guiManifestHeld 'GUI manifest' 'asInvoker'
 Assert-ExecutionManifest $helperManifestHeld 'helper manifest' 'requireAdministrator'
-$policyPath = Get-CanonicalFile (Join-Path $stage 'ProgramData\BootHop\.directory-policy.json') 'directory policy'
+$policyPath = [IO.Path]::GetFullPath((Join-Path $stage 'ProgramData\BootHop\.directory-policy.json'))
 $policyResource = Open-HeldFileResource $policyPath 'directory policy' $policyPath; [void](Add-HeldResource $resources $policyResource); $policyHeld = $policyResource.Held
 $policy = Read-HeldText $policyHeld 'directory policy' | ConvertFrom-Json
 if ($policy.schema_version -ne 1 -or $policy.path -cne 'ProgramData\BootHop' -or $policy.owner -cne 'SYSTEM-or-BUILTIN-Administrators' -or $policy.ordinary_user_access -cne 'none' -or $policy.acl_enforcement -cne 'installer-required; staging-does-not-mutate-ACL') { Fail 'ProgramData policy metadata is incorrect' }
-$markerPath = Get-CanonicalFile (Join-Path $stage 'NON-PRODUCTION.txt') 'non-production marker'
+$markerPath = [IO.Path]::GetFullPath((Join-Path $stage 'NON-PRODUCTION.txt'))
 $markerResource = Open-HeldFileResource $markerPath 'non-production marker' $markerPath; [void](Add-HeldResource $resources $markerResource); $markerHeld = $markerResource.Held
 if ((Read-HeldText $markerHeld 'non-production marker') -notmatch '(?i)installer.*recovery|recovery.*downgrade') { Fail 'non-production marker is incomplete' }
 Write-Output 'Windows package check: passed'

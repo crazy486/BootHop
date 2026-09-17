@@ -25,7 +25,7 @@ public static class WindowsFileHandle {
         return new FileStream(h, FileAccess.Read, 1, false);
     }
     public static FileStream OpenDirectory(string path) {
-        var h = CreateFileW(path, 0x80000000u, 1u, IntPtr.Zero, 3u, 0x02000000u, IntPtr.Zero);
+        var h = CreateFileW(path, 0x80000000u, 1u, IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
         if (h.IsInvalid) { h.Dispose(); throw new IOException("CreateFileW directory failed: " + Marshal.GetLastWin32Error()); }
         return new FileStream(h, FileAccess.Read, 1, false);
     }
@@ -39,6 +39,10 @@ public static class WindowsFileHandle {
         Info info; if (!GetFileInformationByHandle(handle, out info)) throw new IOException("GetFileInformationByHandle failed: " + Marshal.GetLastWin32Error());
         return (info.Attributes & 0x400u) != 0;
     }
+    public static bool IsDirectory(SafeFileHandle handle) {
+        Info info; if (!GetFileInformationByHandle(handle, out info)) throw new IOException("GetFileInformationByHandle failed: " + Marshal.GetLastWin32Error());
+        return (info.Attributes & 0x10u) != 0;
+    }
     public static string ProcessImagePath(IntPtr process) {
         uint size = 32768; var chars = new char[size];
         if (!QueryFullProcessImageNameW(process, 0, chars, ref size)) throw new IOException("QueryFullProcessImageNameW failed: " + Marshal.GetLastWin32Error());
@@ -48,12 +52,20 @@ public static class WindowsFileHandle {
 '@
 }
 
-function Normalize-HeldPath([string] $path) { if ($path.StartsWith('\\?\')) { return $path.Substring(4) }; return $path }
+function Normalize-HeldPath([string] $path) {
+    if ($path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { return '\\' + $path.Substring(8) }
+    if ($path.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $path.Substring(4) }
+    return $path
+}
 function Open-HeldRead([string] $path, [string] $label, [string] $expectedCanonical = $null) {
-    try { $stream = [WindowsFileHandle]::OpenFile($path) } catch { throw "Held $label open failed: $($_.Exception.Message)" }
+    try { $stream = [WindowsFileHandle]::OpenFile($path) } catch {
+        if ($_.Exception.Message -match 'CreateFileW file failed:\s*(2|3)(?:\D|$)') { throw "$label is missing or not a regular file" }
+        throw "Held $label open failed: $($_.Exception.Message)"
+    }
     try {
         $identity = [WindowsFileHandle]::Identity($stream.SafeFileHandle); $final = Normalize-HeldPath (($identity -split '\|')[0])
         if ([WindowsFileHandle]::IsReparsePoint($stream.SafeFileHandle)) { throw "Held $label is a reparse point" }
+        if ([WindowsFileHandle]::IsDirectory($stream.SafeFileHandle)) { throw "$label is missing or not a regular file" }
         if ($null -ne $expectedCanonical -and -not [string]::Equals($final, $expectedCanonical, [StringComparison]::Ordinal)) { throw "Held $label final path differs from canonical path" }
         return [pscustomobject]@{ Stream=$stream; Identity=$identity; Canonical=$final; Path=$path }
     } catch { $stream.Dispose(); throw }
@@ -96,7 +108,8 @@ function Open-HeldDirectoryPins([string] $path, [string] $label, [string] $expec
     }
 }
 function Open-HeldFileResource([string] $path, [string] $label, [string] $expectedCanonical = $null) {
-    $parent = Split-Path -Path ([IO.Path]::GetFullPath($path)) -Parent
+    if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { throw "$label must be absolute" }
+    $path = [IO.Path]::GetFullPath($path); $parent = Split-Path -Path $path -Parent
     $pins = Open-HeldDirectoryPins $parent "$label parent" $parent
     try { $held = Open-HeldRead $path $label $expectedCanonical; return [pscustomobject]@{ Kind='FileResource'; Held=$held; Pins=$pins } }
     catch { Close-Held $pins; throw }

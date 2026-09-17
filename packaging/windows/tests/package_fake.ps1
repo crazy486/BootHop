@@ -54,6 +54,9 @@ try {
     & $stageScript -GuiPath $gui -HelperPath $helper -OutputPath $out
     & $packageCheck -StagePath $out
     . (Join-Path $root 'packaging\windows\held.ps1')
+    $heldSource = Get-Content -LiteralPath (Join-Path $root 'packaging\windows\held.ps1') -Raw
+    Assert ($heldSource -match '0x02200000u') 'directory pins must use no-follow reparse-point semantics'
+    Assert ((Normalize-HeldPath '\\?\UNC\server\share\fixture') -ceq '\\server\share\fixture') 'UNC final paths must normalize without dropping the UNC prefix'
     $swapHeld = Open-HeldRead $gui 'held swap fixture' $gui
     try {
         Assert-Fails { [IO.File]::WriteAllBytes($gui, [byte[]](1,2,3)) } 'being used by another process'
