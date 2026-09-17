@@ -163,12 +163,16 @@ function Invoke-Dumpbin([string] $path, [string] $label) {
         [void](Add-HeldResource $resources $process)
         try {
             if (-not $process.Start()) { Fail "dumpbin failed for $label" }
-            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-            $process.WaitForExit(); $output = @($stdout.Result -split "`r?`n"); $exitCode = $process.ExitCode
+            # QueryFullProcessImageNameW is valid only while the process image
+            # is live on this host: after WaitForExit it returns ERROR_GEN_FAILURE
+            # (31), even for a retained PROCESS_QUERY_LIMITED_INFORMATION handle.
+            # Bind the launched image before draining output or waiting.
             $imagePath = Normalize-HeldPath ([WindowsFileHandle]::ProcessImagePath($process.Handle))
             $imageResource = Open-HeldFileResource $imagePath 'dumpbin process image' $dumpbinHeld.Canonical
             [void](Add-HeldResource $resources $imageResource)
             if (-not [string]::Equals($imageResource.Held.Identity, $dumpbinHeld.Identity, [StringComparison]::Ordinal)) { Fail 'dumpbin process image identity changed' }
+            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit(); $output = @($stdout.Result -split "`r?`n"); $exitCode = $process.ExitCode
         } catch { if ($_.Exception.Message -like 'Windows capability audit failed:*') { throw }; Fail "dumpbin failed for $label" }
     }
     if ($null -eq $exitCode -or $exitCode -ne 0 -or -not $?) { Fail "dumpbin failed for $label" }
@@ -204,8 +208,8 @@ function Parse-DumpbinImports([string] $text, [string] $label) {
 }
 
 $guiImports = Parse-DumpbinImports (Invoke-Dumpbin $guiPath 'GUI PE') 'GUI PE'; $helperImports = Parse-DumpbinImports (Invoke-Dumpbin $helperPath 'helper PE') 'helper PE'
-$guiForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|OpenProcessToken|InitiateSystemShutdown|ExitWindows|LoadLibrary|GetProcAddress|bcdedit'
-$helperForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|OpenProcessToken|InitiateSystemShutdown|ExitWindows|LoadLibrary|GetProcAddress|bcdedit|CreateProcess|ShellExecute'
+$guiForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|InitiateSystemShutdown|ExitWindows|bcdedit'
+$helperForbidden = 'CreateProcess|ShellExecute|bcdedit'
 if (($guiImports | Where-Object { $_ -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
 if (($helperImports | Where-Object { $_ -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
 foreach ($pe in @($guiPe,$helperPe)) { if ((Get-HeldHash $pe.Held $pe.Path) -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }

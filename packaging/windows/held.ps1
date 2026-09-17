@@ -6,6 +6,7 @@ if ($null -eq ('WindowsFileHandle' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
+using System.Text;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -18,7 +19,7 @@ public static class WindowsFileHandle {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError=true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Info info);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, [Out] char[] path, uint length, uint flags);
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, [Out] char[] name, ref uint size);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, [Out] StringBuilder name, ref uint size);
     public static FileStream OpenFile(string path) {
         var h = CreateFileW(path, 0x80000000u, 1u, IntPtr.Zero, 3u, 0x00200000u, IntPtr.Zero);
         if (h.IsInvalid) { h.Dispose(); throw new IOException("CreateFileW file failed: " + Marshal.GetLastWin32Error()); }
@@ -44,9 +45,9 @@ public static class WindowsFileHandle {
         return (info.Attributes & 0x10u) != 0;
     }
     public static string ProcessImagePath(IntPtr process) {
-        uint size = 32768; var chars = new char[size];
-        if (!QueryFullProcessImageNameW(process, 0, chars, ref size)) throw new IOException("QueryFullProcessImageNameW failed: " + Marshal.GetLastWin32Error());
-        return new string(chars, 0, (int)size);
+        var name = new StringBuilder(32768); uint size = (uint)name.Capacity;
+        if (!QueryFullProcessImageNameW(process, 0, name, ref size)) throw new IOException("QueryFullProcessImageNameW failed: " + Marshal.GetLastWin32Error());
+        return name.ToString();
     }
 }
 '@

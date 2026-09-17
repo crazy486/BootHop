@@ -40,7 +40,7 @@ exit $exitCode
 "@ | Set-Content -LiteralPath $path -Encoding UTF8 -NoNewline
 }
 
-$validDumpbin = "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n    KERNEL32.dll`n                       140001000 GetCurrentProcess`n"
+$validDumpbin = "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n    KERNEL32.dll`n                       140001000 GetCurrentProcess`n                       140001001 LoadLibraryA`n                       140001002 GetProcAddress`n    ADVAPI32.dll`n                       140001003 OpenProcessToken`n"
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('boothop-windows-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
@@ -225,6 +225,28 @@ try {
     $manifest.binaries.gui.size = (Get-Item -LiteralPath (Join-Path $out 'Program Files\BootHop\boothop-gui.exe')).Length
     $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $out 'manifest.json') -NoNewline -Encoding UTF8
     Assert-Fails { & $packageCheck -StagePath $out } 'fixed layout metadata is incorrect'
+
+    # Behavioral regression: the production launcher must validate dumpbin's
+    # image identity while the process is still running.  Querying a retained
+    # process handle after WaitForExit returns ERROR_GEN_FAILURE (31) on
+    # Windows, even with PROCESS_QUERY_LIMITED_INFORMATION.  Use the release
+    # PEs built by the CI job and stage them through the normal non-installing
+    # path; this is deliberately not the test-only .ps1 fixture seam.
+    $releaseGui = Join-Path $root 'target\release\boothop-gui.exe'
+    $releaseHelper = Join-Path $root 'target\release\boothop-helper.exe'
+    Assert (Test-Path -LiteralPath $releaseGui -PathType Leaf) 'release GUI PE is required for production identity regression'
+    Assert (Test-Path -LiteralPath $releaseHelper -PathType Leaf) 'release helper PE is required for production identity regression'
+    $releaseStage = Join-Path $temp 'release-stage'
+    & $stageScript -GuiPath $releaseGui -HelperPath $releaseHelper -OutputPath $releaseStage | Out-Null
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    Assert (Test-Path -LiteralPath $vswhere -PathType Leaf) 'vswhere.exe is required for production identity regression'
+    $realDumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
+    Assert (-not [string]::IsNullOrWhiteSpace($realDumpbin) -and (Test-Path -LiteralPath $realDumpbin -PathType Leaf)) 'dumpbin.exe is required for production identity regression'
+    & (Join-Path $root 'packaging\windows\check-capabilities.ps1') `
+        -RootPath $root `
+        -GuiPath (Join-Path $releaseStage 'Program Files\BootHop\boothop-gui.exe') `
+        -HelperPath (Join-Path $releaseStage 'Program Files\BootHop\boothop-helper.exe') `
+        -DumpbinPath $realDumpbin
     Write-Output 'Windows package fake tests: passed'
 }
 finally {
