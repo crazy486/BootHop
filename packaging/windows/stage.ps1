@@ -54,9 +54,11 @@ function Get-ExistingOrNewOutput([string] $path) {
     return (Get-Item -LiteralPath $absolute -Force).FullName
 }
 function Get-SourceSnapshot([string] $path, [string] $label) {
-    $held = Open-HeldRead $path $label $path
-    try { return [pscustomobject]@{ Path=$path; Held=$held; Stream=$held.Stream; Hash=(Get-HeldHash $held $label); Length=$held.Stream.Length } }
-    catch { Close-Held $held; throw }
+    $pins = Open-HeldDirectoryPins (Split-Path -Path $path -Parent) "$label input parent" (Split-Path -Path $path -Parent)
+    try { $held = Open-HeldRead $path $label $path }
+    catch { Close-Held $pins; throw }
+    try { return [pscustomobject]@{ Path=$path; Pins=$pins; Held=$held; Stream=$held.Stream; Hash=(Get-HeldHash $held $label); Length=$held.Stream.Length } }
+    catch { Close-Held $held; Close-Held $pins; throw }
 }
 function Copy-Snapshot($snapshot, [string] $destination, [string] $label) {
     $destination = Get-Absolute $destination 'staged output'
@@ -78,6 +80,8 @@ function Copy-Snapshot($snapshot, [string] $destination, [string] $label) {
     } finally { $stream.Dispose() }
 }
 
+$resources = New-HeldResourceSet
+try {
 $scriptRoot = (Resolve-Path $PSScriptRoot).Path
 Assert-NoReparseAncestors $scriptRoot 'packaging script root'
 $gui = Get-CanonicalFile $GuiPath 'GUI'
@@ -88,21 +92,25 @@ New-Item -ItemType Directory -Path $programFiles,$programData -Force | Out-Null
 Assert-NoReparseAncestors $programFiles 'Program Files output'; Assert-NoReparseAncestors $programData 'ProgramData output'
  $outputPin = $null; $outputParentPin = $null; $programFilesPin = $null; $programDataPin = $null; $guiSnapshot = $null; $helperSnapshot = $null
 try {
-    $outputPin = Open-HeldDirectory $output 'stage output' $output
-    $outputParentPin = Open-HeldDirectory (Split-Path -Path $output -Parent) 'stage output parent' (Split-Path -Path $output -Parent)
-    $programFilesPin = Open-HeldDirectory $programFiles 'Program Files output' $programFiles
-    $programDataPin = Open-HeldDirectory $programData 'ProgramData output' $programData
+    $outputPin = Open-HeldDirectoryPins $output 'stage output' $output; [void](Add-HeldResource $resources $outputPin)
+    $outputParentPin = Open-HeldDirectoryPins (Split-Path -Path $output -Parent) 'stage output parent' (Split-Path -Path $output -Parent); [void](Add-HeldResource $resources $outputParentPin)
+    $programFilesPin = Open-HeldDirectoryPins $programFiles 'Program Files output' $programFiles; [void](Add-HeldResource $resources $programFilesPin)
+    $programDataPin = Open-HeldDirectoryPins $programData 'ProgramData output' $programData; [void](Add-HeldResource $resources $programDataPin)
     $guiSnapshot = Get-SourceSnapshot $gui 'GUI'; $helperSnapshot = Get-SourceSnapshot $helper 'helper'
+    [void](Add-HeldResource $resources $guiSnapshot.Pins); [void](Add-HeldResource $resources $guiSnapshot.Held)
+    [void](Add-HeldResource $resources $helperSnapshot.Pins); [void](Add-HeldResource $resources $helperSnapshot.Held)
     Copy-Snapshot $guiSnapshot (Join-Path $programFiles 'boothop-gui.exe') 'GUI'
     Copy-Snapshot $helperSnapshot (Join-Path $programFiles 'boothop-helper.exe') 'helper'
     foreach ($manifestName in @('boothop-gui.manifest','boothop-helper.manifest')) {
         $source = Get-CanonicalFile (Join-Path $scriptRoot $manifestName) "manifest $manifestName"
         $sourceSnapshot = Get-SourceSnapshot $source "manifest $manifestName"
+        [void](Add-HeldResource $resources $sourceSnapshot.Pins); [void](Add-HeldResource $resources $sourceSnapshot.Held)
         try { Copy-Snapshot $sourceSnapshot (Join-Path $programFiles $manifestName) "manifest $manifestName" } finally { Close-Held $sourceSnapshot.Held }
     }
     $policy = [ordered]@{ schema_version=1; path='ProgramData\BootHop'; owner='SYSTEM-or-BUILTIN-Administrators'; ordinary_user_access='none'; acl_enforcement='installer-required; staging-does-not-mutate-ACL'; note='Intent metadata only; staging never creates, changes, or validates a live ACL.' }
     $policy | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $programData '.directory-policy.json') -Encoding UTF8 -NoNewline
     $manifestSource = Get-SourceSnapshot (Get-CanonicalFile (Join-Path $scriptRoot 'manifest.json') 'manifest.json') 'manifest.json'
+    [void](Add-HeldResource $resources $manifestSource.Pins); [void](Add-HeldResource $resources $manifestSource.Held)
     try { $manifest = Read-HeldText $manifestSource.Held 'manifest.json' | ConvertFrom-Json } finally { Close-Held $manifestSource.Held }
     $manifest.binaries.gui.sha256 = (Get-HeldHash $guiSnapshot.Held 'GUI').ToLowerInvariant()
     $manifest.binaries.helper.sha256 = (Get-HeldHash $helperSnapshot.Held 'helper').ToLowerInvariant()
@@ -124,3 +132,4 @@ shutdown, or reboot is performed by this stage.
     Close-Held $programFilesPin; Close-Held $programDataPin; Close-Held $outputPin; Close-Held $outputParentPin
 }
 Write-Output $output
+} finally { Close-HeldResourceSet $resources }

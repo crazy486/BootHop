@@ -14,12 +14,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'held.ps1')
 function Close-AuditHandles {
-    foreach ($name in @('guiHeld','helperHeld','dumpbinHeld','rootPin','sourceHeld')) {
-        $variable = Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue
-        if ($null -ne $variable) { Close-Held $variable.Value }
-    }
-    $pins = Get-Variable -Name sourcePins -Scope Script -ErrorAction SilentlyContinue
-    if ($null -ne $pins) { foreach ($pin in $pins.Value) { Close-Held $pin } }
+    Close-HeldResourceSet $resources
 }
 function Fail([string] $message) { Close-AuditHandles; throw "Windows capability audit failed: $message" }
 
@@ -65,6 +60,8 @@ function Assert-Contained([string] $root, [string] $path, [string] $label) {
     if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith('..\') -or $relative.StartsWith('../')) { Fail "$label escapes the source root" }
 }
 
+$resources = New-HeldResourceSet
+try {
 $root = Get-CanonicalDirectory $RootPath 'source root'
 $dumpbin = Get-CanonicalFile $DumpbinPath 'dumpbin'
 if ($TestOnlyFixtureMode) {
@@ -74,10 +71,10 @@ if ($TestOnlyFixtureMode) {
 }
 $guiPath = Get-CanonicalFile $GuiPath 'GUI PE'
 $helperPath = Get-CanonicalFile $HelperPath 'helper PE'
-$rootPin = Open-HeldDirectory $root 'source root' $root
-$dumpbinHeld = Open-HeldRead $dumpbin 'dumpbin' $dumpbin
-$guiHeld = Open-HeldRead $guiPath 'GUI PE' $guiPath
-$helperHeld = Open-HeldRead $helperPath 'helper PE' $helperPath
+$rootPin = Open-HeldDirectoryPins $root 'source root' $root; [void](Add-HeldResource $resources $rootPin)
+$dumpbinResource = Open-HeldFileResource $dumpbin 'dumpbin' $dumpbin; [void](Add-HeldResource $resources $dumpbinResource); $dumpbinHeld = $dumpbinResource.Held
+$guiResource = Open-HeldFileResource $guiPath 'GUI PE' $guiPath; [void](Add-HeldResource $resources $guiResource); $guiHeld = $guiResource.Held
+$helperResource = Open-HeldFileResource $helperPath 'helper PE' $helperPath; [void](Add-HeldResource $resources $helperResource); $helperHeld = $helperResource.Held
 
 function Read-Exact([IO.Stream] $stream, [int] $count, [string] $label) {
     $bytes = New-Object byte[] $count; $offset = 0
@@ -135,7 +132,7 @@ foreach ($spec in $sourceSpecs) {
     $candidate = Join-Path $root $spec.Relative
     if ($spec.Directory) {
         $dir = Get-CanonicalDirectory $candidate "source root $($spec.Relative)"; Assert-Contained $root $dir "source root $($spec.Relative)"
-        $sourcePins.Add((Open-HeldDirectory $dir "source root $($spec.Relative)" $dir))
+        $sourcePin = Open-HeldDirectoryPins $dir "source root $($spec.Relative)" $dir; [void](Add-HeldResource $resources $sourcePin); $sourcePins.Add($sourcePin)
         $entries = @(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction Stop)
         if (@($entries | Where-Object { -not $_.PSIsContainer }).Count -eq 0) { Fail "source root is empty: $($spec.Relative)" }
         foreach ($entry in $entries) {
@@ -163,7 +160,7 @@ $allow = @{
 $patterns = @('SetFirmwareEnvironmentVariable','GetFirmwareEnvironmentVariable','GetFirmwareType','AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','ExitWindows','ShellExecute','CreateProcess','LoadLibrary','GetProcAddress','bcdedit')
 foreach ($file in $sourceFiles) {
     $canonicalFile = Get-CanonicalFile $file.FullName 'source file'; $relative = [IO.Path]::GetRelativePath($root, $canonicalFile).Replace('/','\')
-    $sourceHeld = Open-HeldRead $canonicalFile 'source file' $canonicalFile
+    $sourceResource = Open-HeldFileResource $canonicalFile 'source file' $canonicalFile; [void](Add-HeldResource $resources $sourceResource); $sourceHeld = $sourceResource.Held
     try {
         $text = Read-HeldText $sourceHeld 'source file'
         foreach ($pattern in $patterns) {
@@ -181,7 +178,24 @@ function Invoke-Dumpbin([string] $path, [string] $label) {
     Assert-HeldIdentity $dumpbinHeld 'dumpbin'
     Assert-HeldIdentity $guiHeld $label
     if ($label -like '*helper*') { Assert-HeldIdentity $helperHeld $label }
-    try { $output = @(& $dumpbin /imports $path 2>&1); $exitCode = $LASTEXITCODE } catch { Fail "dumpbin failed for $label" }
+    if ($TestOnlyFixtureMode) {
+        try { $output = @(& $dumpbin /imports $path 2>&1); $exitCode = $LASTEXITCODE } catch { Fail "dumpbin failed for $label" }
+    } else {
+        $process = [Diagnostics.Process]::new(); $process.StartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $process.StartInfo.FileName = $dumpbin; $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true; $process.StartInfo.RedirectStandardOutput = $true; $process.StartInfo.RedirectStandardError = $true
+        [void]$process.StartInfo.ArgumentList.Add('/imports'); [void]$process.StartInfo.ArgumentList.Add($path)
+        [void](Add-HeldResource $resources $process)
+        try {
+            if (-not $process.Start()) { Fail "dumpbin failed for $label" }
+            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit(); $output = @($stdout.Result -split "`r?`n"); $exitCode = $process.ExitCode
+            $imagePath = Normalize-HeldPath ([WindowsFileHandle]::ProcessImagePath($process.Handle))
+            $imageResource = Open-HeldFileResource $imagePath 'dumpbin process image' $dumpbinHeld.Canonical
+            [void](Add-HeldResource $resources $imageResource)
+            if (-not [string]::Equals($imageResource.Held.Identity, $dumpbinHeld.Identity, [StringComparison]::Ordinal)) { Fail 'dumpbin process image identity changed' }
+        } catch { if ($_.Exception.Message -like 'Windows capability audit failed:*') { throw }; Fail "dumpbin failed for $label" }
+    }
     if ($null -eq $exitCode -or $exitCode -ne 0 -or -not $?) { Fail "dumpbin failed for $label" }
     if ($output.Count -eq 0) { Fail "dumpbin output is empty for $label" }
     Assert-HeldIdentity $dumpbinHeld 'dumpbin'
@@ -220,5 +234,5 @@ $helperForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariabl
 if (($guiImports | Where-Object { $_ -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
 if (($helperImports | Where-Object { $_ -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
 foreach ($pe in @($guiPe,$helperPe)) { if ((Get-HeldHash $pe.Held $pe.Path) -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }
-foreach ($held in @($guiHeld,$helperHeld,$dumpbinHeld,$rootPin) + @($sourcePins)) { Close-Held $held }
 Write-Output 'Windows source and PE capability audit: passed'
+} finally { Close-HeldResourceSet $resources }

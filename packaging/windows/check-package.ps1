@@ -8,10 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'held.ps1')
 function Close-PackageHandles {
-    foreach ($name in @('manifestHeld','guiHeld','helperHeld','guiManifestHeld','helperManifestHeld','policyHeld','markerHeld','stagePin','stageParentPin')) {
-        $variable = Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue
-        if ($null -ne $variable) { Close-Held $variable.Value }
-    }
+    Close-HeldResourceSet $resources
 }
 function Fail([string] $message) { Close-PackageHandles; throw "Windows package check failed: $message" }
 
@@ -143,10 +140,12 @@ function Assert-ExecutionManifest($held, [string] $label, [string] $expectedLeve
     }
 }
 
+$resources = New-HeldResourceSet
+try {
 $stage = Get-CanonicalDirectory $StagePath 'stage root'
 $stageParent = Split-Path -Path $stage -Parent
-$stagePin = Open-HeldDirectory $stage 'stage root' $stage
-$stageParentPin = Open-HeldDirectory $stageParent 'stage parent' $stageParent
+$stagePin = Open-HeldDirectoryPins $stage 'stage root' $stage; [void](Add-HeldResource $resources $stagePin)
+$stageParentPin = Open-HeldDirectoryPins $stageParent 'stage parent' $stageParent; [void](Add-HeldResource $resources $stageParentPin)
 $required = @('manifest.json','NON-PRODUCTION.txt','Program Files\BootHop\boothop-gui.exe','Program Files\BootHop\boothop-helper.exe','Program Files\BootHop\boothop-gui.manifest','Program Files\BootHop\boothop-helper.manifest','ProgramData\BootHop\.directory-policy.json')
 $requiredDirs = @('Program Files','Program Files\BootHop','ProgramData','ProgramData\BootHop')
 $actualDirs = @(Get-ChildItem -LiteralPath $stage -Recurse -Directory -Force | ForEach-Object {
@@ -163,7 +162,8 @@ foreach ($name in $required) { if (-not (Contains-Exact $actual $name)) { Fail "
 foreach ($name in $actual) { if (-not (Contains-Exact $required $name)) { Fail "unexpected package file: $name" } }
 
 $manifestPath = Get-CanonicalFile (Join-Path $stage 'manifest.json') 'package manifest'
-$manifestHeld = Open-HeldRead $manifestPath 'package manifest' $manifestPath
+$manifestResource = Open-HeldFileResource $manifestPath 'package manifest' $manifestPath; [void](Add-HeldResource $resources $manifestResource)
+$manifestHeld = $manifestResource.Held
 $manifest = Read-HeldText $manifestHeld 'package manifest' | ConvertFrom-Json
 if ($manifest.schema_version -ne 1 -or $manifest.product -cne 'BootHop') { Fail 'invalid manifest identity' }
 if ($manifest.production_status -cne 'NON-PRODUCTION') { Fail 'missing NON-PRODUCTION status' }
@@ -182,8 +182,8 @@ if ($null -eq $manifest.forbidden_artifacts -or @($manifest.forbidden_artifacts)
 for ($index = 0; $index -lt $expectedForbidden.Count; $index++) { if ([string]$manifest.forbidden_artifacts[$index] -cne $expectedForbidden[$index]) { Fail 'forbidden artifact policy is incorrect' } }
 $gui = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-gui.exe') 'staged GUI PE'
 $helper = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-helper.exe') 'staged helper PE'
-$guiHeld = Open-HeldRead $gui 'GUI PE' $gui
-$helperHeld = Open-HeldRead $helper 'helper PE' $helper
+$guiResource = Open-HeldFileResource $gui 'GUI PE' $gui; [void](Add-HeldResource $resources $guiResource); $guiHeld = $guiResource.Held
+$helperResource = Open-HeldFileResource $helper 'helper PE' $helper; [void](Add-HeldResource $resources $helperResource); $helperHeld = $helperResource.Held
 Assert-Amd64Pe $guiHeld 'GUI PE'; Assert-Amd64Pe $helperHeld 'helper PE'
 foreach ($pair in @(@($guiHeld,$manifest.binaries.gui.sha256,'GUI',$manifest.binaries.gui.size),@($helperHeld,$manifest.binaries.helper.sha256,'helper',$manifest.binaries.helper.size))) {
     if ([string]$pair[1] -cnotmatch '^[0-9a-f]{64}$') { Fail "$($pair[2]) hash is absent or malformed" }
@@ -194,16 +194,16 @@ foreach ($pair in @(@($guiHeld,$manifest.binaries.gui.sha256,'GUI',$manifest.bin
 }
  $guiManifestPath = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-gui.manifest') 'GUI manifest'
  $helperManifestPath = Get-CanonicalFile (Join-Path $stage 'Program Files\BootHop\boothop-helper.manifest') 'helper manifest'
- $guiManifestHeld = Open-HeldRead $guiManifestPath 'GUI manifest' $guiManifestPath
- $helperManifestHeld = Open-HeldRead $helperManifestPath 'helper manifest' $helperManifestPath
+ $guiManifestResource = Open-HeldFileResource $guiManifestPath 'GUI manifest' $guiManifestPath; [void](Add-HeldResource $resources $guiManifestResource); $guiManifestHeld = $guiManifestResource.Held
+ $helperManifestResource = Open-HeldFileResource $helperManifestPath 'helper manifest' $helperManifestPath; [void](Add-HeldResource $resources $helperManifestResource); $helperManifestHeld = $helperManifestResource.Held
 Assert-ExecutionManifest $guiManifestHeld 'GUI manifest' 'asInvoker'
 Assert-ExecutionManifest $helperManifestHeld 'helper manifest' 'requireAdministrator'
 $policyPath = Get-CanonicalFile (Join-Path $stage 'ProgramData\BootHop\.directory-policy.json') 'directory policy'
-$policyHeld = Open-HeldRead $policyPath 'directory policy' $policyPath
+$policyResource = Open-HeldFileResource $policyPath 'directory policy' $policyPath; [void](Add-HeldResource $resources $policyResource); $policyHeld = $policyResource.Held
 $policy = Read-HeldText $policyHeld 'directory policy' | ConvertFrom-Json
 if ($policy.schema_version -ne 1 -or $policy.path -cne 'ProgramData\BootHop' -or $policy.owner -cne 'SYSTEM-or-BUILTIN-Administrators' -or $policy.ordinary_user_access -cne 'none' -or $policy.acl_enforcement -cne 'installer-required; staging-does-not-mutate-ACL') { Fail 'ProgramData policy metadata is incorrect' }
 $markerPath = Get-CanonicalFile (Join-Path $stage 'NON-PRODUCTION.txt') 'non-production marker'
-$markerHeld = Open-HeldRead $markerPath 'non-production marker' $markerPath
+$markerResource = Open-HeldFileResource $markerPath 'non-production marker' $markerPath; [void](Add-HeldResource $resources $markerResource); $markerHeld = $markerResource.Held
 if ((Read-HeldText $markerHeld 'non-production marker') -notmatch '(?i)installer.*recovery|recovery.*downgrade') { Fail 'non-production marker is incomplete' }
-foreach ($held in @($manifestHeld,$guiHeld,$helperHeld,$guiManifestHeld,$helperManifestHeld,$policyHeld,$markerHeld,$stagePin,$stageParentPin)) { Close-Held $held }
 Write-Output 'Windows package check: passed'
+} finally { Close-HeldResourceSet $resources }

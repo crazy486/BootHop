@@ -61,6 +61,13 @@ try {
         Assert-Fails { Assert-HeldIdentity $swapHeld 'held swap fixture' } 'identity changed'
         $swapHeld.Identity = $savedIdentity
     } finally { Close-Held $swapHeld }
+    $directResources = New-HeldResourceSet
+    try {
+        $directResource = Open-HeldFileResource $gui 'direct-exception fixture' $gui
+        [void](Add-HeldResource $directResources $directResource)
+        try { throw 'injected direct exception' } catch { } finally { Close-HeldResourceSet $directResources }
+        Assert ((Get-HeldResourceCount $directResources) -eq 0) 'direct exceptions must release every held resource'
+    } finally { Close-HeldResourceSet $directResources }
 
     $manifest = Get-Content (Join-Path $out 'manifest.json') -Raw | ConvertFrom-Json
     Assert ($manifest.protocol_version -eq 2) 'protocol version must be 2'
@@ -165,6 +172,7 @@ try {
     $junction = Join-Path $temp 'junction-root'
     try { New-Item -ItemType Junction -Path $junction -Target $junctionTarget -ErrorAction Stop | Out-Null }
     catch { throw "FAIL: unable to create required directory junction fixture: $($_.Exception.Message)" }
+    Assert-Fails { Open-HeldDirectoryPins $junction 'junction fixture' $junction } 'contains a reparse point'
     Assert-Fails { & $stageScript -GuiPath (Join-Path $junction 'boothop-gui.exe') -HelperPath $helper -OutputPath (Join-Path $temp 'reparse-stage') } 'GUI contains a reparse point'
     Remove-Item -LiteralPath $junction -Force
     $emptyRoot = Join-Path $temp 'empty-source'; New-Item -ItemType Directory -Path $emptyRoot -Force | Out-Null
