@@ -1046,6 +1046,7 @@ struct ExprAudit<'a> {
     parameter_boundary_functions: &'a HashSet<String>,
     parameters: &'a HashSet<String>,
     tainted_bindings: HashSet<String>,
+    string_bindings: HashSet<String>,
     boot_order_bindings: HashSet<String>,
     receiver_types: HashMap<String, String>,
     return_tainted: bool,
@@ -1076,6 +1077,7 @@ impl ExprAudit<'_> {
             parameter_boundary_functions,
             parameters,
             tainted_bindings: HashSet::new(),
+            string_bindings: HashSet::new(),
             boot_order_bindings: HashSet::new(),
             receiver_types: HashMap::new(),
             return_tainted: false,
@@ -1198,6 +1200,60 @@ impl ExprAudit<'_> {
         visitor.found
     }
 
+    fn is_string_constructor(&self, expr: &Expr) -> bool {
+        let Expr::Call(call) = expr else { return false };
+        let Expr::Path(path) = &*call.func else {
+            return false;
+        };
+        let canonical = self.path(&path.path);
+        canonical.len() >= 4
+            && is_standard_string_path(&canonical[..canonical.len() - 2])
+            && matches!(
+                canonical.last().map(String::as_str),
+                Some("new" | "with_capacity")
+            )
+    }
+
+    fn is_string_binding_pattern(&self, pattern: &Pat) -> Option<String> {
+        let Pat::Type(typed) = pattern else {
+            return None;
+        };
+        let Type::Path(path) = &*typed.ty else {
+            return None;
+        };
+        if !is_standard_string_path(&self.path(&path.path)) {
+            return None;
+        }
+        simple_pattern_name(&typed.pat)
+    }
+
+    fn is_string_write_macro(&self, path: &[String], mac: &syn::Macro) -> bool {
+        if path.last().map(String::as_str) != Some("write") {
+            return false;
+        }
+        let Ok(arguments) = parse_macro_exprs(mac) else {
+            return false;
+        };
+        let Some(first) = arguments.into_iter().next() else {
+            return false;
+        };
+        let Expr::Reference(reference) = first else {
+            return false;
+        };
+        if reference.mutability.is_none() {
+            return false;
+        }
+        let Expr::Path(path) = &*reference.expr else {
+            return false;
+        };
+        path.path.segments.len() == 1
+            && path
+                .path
+                .segments
+                .first()
+                .is_some_and(|segment| self.string_bindings.contains(&segment.ident.to_string()))
+    }
+
     fn command_receiver(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Path(path) => is_process_command(&self.path(&path.path)),
@@ -1298,6 +1354,9 @@ impl ExprAudit<'_> {
         match expression {
             Expr::Path(path) => {
                 if let Some(binding) = path.path.segments.last() {
+                    if !tainted && !boot_order {
+                        self.string_bindings.remove(&binding.ident.to_string());
+                    }
                     if tainted {
                         self.tainted_bindings.insert(binding.ident.to_string());
                     }
@@ -1324,7 +1383,9 @@ impl ExprAudit<'_> {
 
     fn inspect_macro(&mut self, mac: &syn::Macro) {
         let canonical = self.path(&mac.path);
-        if !is_allowed_test_macro(&canonical) {
+        let safe_production_format =
+            !self.report_unresolved_wrappers && self.is_string_write_macro(&canonical, mac);
+        if !is_allowed_test_macro(&canonical) && !safe_production_format {
             self.report("test code invokes an unallowlisted macro that cannot be audited");
             return;
         }
@@ -1486,6 +1547,7 @@ impl Visit<'_> for ExprAudit<'_> {
     }
 
     fn visit_expr_assign(&mut self, expression: &ExprAssign) {
+        self.mark_assignment_target(&expression.left, false, false);
         let system_path = self.has_system_path(&expression.right);
         let boot_order = self.has_boot_order(&expression.right);
         self.mark_assignment_target(&expression.left, system_path, boot_order);
@@ -1516,6 +1578,18 @@ impl Visit<'_> for ExprAudit<'_> {
     }
 
     fn visit_local(&mut self, local: &syn::Local) {
+        if let Some(binding) = simple_pattern_name(&local.pat) {
+            if local
+                .init
+                .as_ref()
+                .is_some_and(|init| self.is_string_constructor(&init.expr))
+                || self.is_string_binding_pattern(&local.pat).is_some()
+            {
+                self.string_bindings.insert(binding);
+            } else {
+                self.string_bindings.remove(&binding);
+            }
+        }
         if let Pat::Ident(binding) = &local.pat
             && let Some(init) = &local.init
             && let Some(owner) = self.receiver_type(&init.expr)
@@ -1581,6 +1655,12 @@ fn is_allowed_test_macro(path: &[String]) -> bool {
         [prefix, name] if prefix == "serde_json" && name == "json" => true,
         _ => false,
     }
+}
+
+fn is_standard_string_path(path: &[String]) -> bool {
+    path.iter()
+        .map(String::as_str)
+        .eq(["std", "string", "String"])
 }
 
 fn is_process_command(path: &[String]) -> bool {
@@ -1821,6 +1901,45 @@ fn audit_source(source: &str, label: &str) -> Result<(), String> {
     );
     let file = parsed.get(&path).expect("just inserted source");
     audit_test_items(
+        &file.items,
+        &path,
+        &root,
+        &AliasMap::new(),
+        &parsed,
+        &mut state,
+    );
+    if state.issues.is_empty() {
+        Ok(())
+    } else {
+        Err(state
+            .issues
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+            .join("; "))
+    }
+}
+
+#[cfg(test)]
+fn audit_production_fixture(source: &str, label: &str) -> Result<(), String> {
+    let file = syn::parse_file(source).map_err(|error| error.to_string())?;
+    let root = Path::new(".")
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let path = PathBuf::from(label);
+    let mut parsed = HashMap::new();
+    parsed.insert(path.clone(), file);
+    let tainted = collect_tainted_functions(&parsed);
+    let parameter_boundaries = collect_parameter_boundary_functions(&parsed, &tainted);
+    let dangerous = collect_dangerous_functions(&parsed, &tainted, &parameter_boundaries);
+    let file = parsed.get(&path).expect("just inserted source");
+    let mut state = AuditState {
+        dangerous_functions: dangerous,
+        tainted_functions: tainted,
+        parameter_boundary_functions: parameter_boundaries,
+        ..Default::default()
+    };
+    audit_cfg_modules(
         &file.items,
         &path,
         &root,
@@ -2136,5 +2255,45 @@ mod tests {
             }
         "#;
         assert!(super::audit_source(source, "fixture.rs").is_err());
+    }
+
+    #[test]
+    fn pure_string_formatting_wrapper_is_not_marked_as_boundary() {
+        let source = r#"
+            struct RequestId;
+            impl RequestId {
+                fn from_bytes(bytes: [u8; 16]) -> Self {
+                    let mut text = std::string::String::with_capacity(32);
+                    for byte in bytes {
+                        write!(&mut text, "{byte:02x}");
+                    }
+                    let _ = text;
+                    RequestId
+                }
+            }
+            #[cfg(test)]
+            mod tests {
+                fn exercise() {
+                    let _ = RequestId::from_bytes([0; 16]);
+                }
+            }
+        "#;
+        assert!(super::audit_production_fixture(source, "fixture.rs").is_ok());
+    }
+
+    #[test]
+    fn formatting_macro_on_non_string_target_remains_a_boundary() {
+        let source = r#"
+            fn write_to_file(mut file: std::fs::File) {
+                write!(&mut file, "boundary");
+            }
+            #[cfg(test)]
+            mod tests {
+                fn exercise(file: std::fs::File) {
+                    super::write_to_file(file);
+                }
+            }
+        "#;
+        assert!(super::audit_production_fixture(source, "fixture.rs").is_err());
     }
 }

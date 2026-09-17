@@ -30,7 +30,7 @@ impl RequestId {
     }
 
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        let mut text = String::with_capacity(32);
+        let mut text = std::string::String::with_capacity(32);
         for byte in bytes {
             use std::fmt::Write;
             let _ = write!(&mut text, "{byte:02x}");
