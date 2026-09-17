@@ -187,10 +187,8 @@ fn save_portable(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
     })();
     drop(file);
     let result = result.and_then(|()| atomic_replace(&temp, path));
-    if result.is_err() {
-        if fs::remove_file(&temp).is_err() {
-            return Err(CacheError::Unavailable);
-        }
+    if result.is_err() && fs::remove_file(&temp).is_err() {
+        return Err(CacheError::Unavailable);
     }
     result
 }
