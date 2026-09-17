@@ -31,9 +31,10 @@ impl RequestId {
 
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         let mut text = std::string::String::with_capacity(32);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
         for byte in bytes {
-            use std::fmt::Write;
-            let _ = write!(&mut text, "{byte:02x}");
+            text.push(HEX[(byte >> 4) as usize] as char);
+            text.push(HEX[(byte & 0x0f) as usize] as char);
         }
         // A zero ID is never emitted by the production generator. Keep the
         // constructor useful for tests while decode/validation remains strict.
