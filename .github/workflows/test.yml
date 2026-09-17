@@ -51,23 +51,6 @@ jobs:
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Fake package layout tests
-        run: packaging/linux/tests/installer_fake.sh
-      - name: Development package archive smoke test
-        run: packaging/linux/package-smoke.sh
-
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          targets: x86_64-pc-windows-msvc
-          components: rustfmt, clippy
-      - name: Formatting
-        run: cargo fmt --check
-      - name: Clippy
         run: |
           log="$(mktemp)"
           trap 'rm -f "$log"' EXIT
@@ -94,6 +77,23 @@ jobs:
             echo "::error title=Clippy failed::$tail_text"
           fi
           exit "$status"
+      - name: Fake package layout tests
+        run: packaging/linux/tests/installer_fake.sh
+      - name: Development package archive smoke test
+        run: packaging/linux/package-smoke.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Workspace tests
         shell: pwsh
         run: |
