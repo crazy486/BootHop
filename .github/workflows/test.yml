@@ -25,17 +25,26 @@ jobs:
         run: |
           log="$(mktemp)"
           trap 'rm -f "$log"' EXIT
-          if cargo test --workspace --locked 2>&1 | tee "$log"; then
-            status="${PIPESTATUS[0]}"
-          else
-            status="${PIPESTATUS[0]}"
+          set +e
+          cargo test --workspace --locked 2>&1 | tee "$log"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          cargo_status="${pipeline_status[0]:-1}"
+          tee_status="${pipeline_status[1]:-1}"
+          status="$cargo_status"
+          if [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ]; then
+            status="$tee_status"
           fi
           if [ "$status" -ne 0 ]; then
-            tail_text="$(tail -n 80 "$log" | head -c 4000)"
-            tail_text="${tail_text//%/%25}"
-            tail_text="${tail_text//$'\r'/%0D}"
-            tail_text="${tail_text//$'\n'/%0A}"
-            tail_text="${tail_text:0:10000}"
+            if [ -r "$log" ]; then
+              tail_text="$(tail -n 80 "$log" | head -c 4000)"
+              tail_text="${tail_text//%/%25}"
+              tail_text="${tail_text//$'\r'/%0D}"
+              tail_text="${tail_text//$'\n'/%0A}"
+              tail_text="${tail_text:0:10000}"
+            else
+              tail_text="Unable to read workspace test log."
+            fi
             echo "::error title=Workspace tests failed::$tail_text"
           fi
           exit "$status"
@@ -63,9 +72,10 @@ jobs:
       - name: Workspace tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $log = Join-Path $env:RUNNER_TEMP ("boothop-workspace-tests-{0}.log" -f [guid]::NewGuid().ToString('N'))
           try {
-            & cargo test --workspace --locked 2>&1 | Tee-Object -FilePath $log
+            & cargo test --workspace --locked 2>&1 | Tee-Object -FilePath $log -ErrorAction Stop
             $status = $LASTEXITCODE
             if ($status -ne 0) {
               $tailText = (Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue | Out-String)
