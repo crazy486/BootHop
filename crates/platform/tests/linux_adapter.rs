@@ -984,6 +984,7 @@ fn switch_write_readback_and_reboot_evidence_matrix() {
         cause,
         stages,
         residual_assessment,
+        rollback_assessment,
         ..
     } = error
     else {
@@ -991,11 +992,17 @@ fn switch_write_readback_and_reboot_evidence_matrix() {
     };
     assert_eq!(*cause, Error::RebootRejected);
     assert_eq!(
+        rollback_assessment,
+        boothop_core::RollbackAssessment::Unsafe
+    );
+    assert_eq!(
         stages,
         [
             TargetValidated,
             BootNextVerified,
             RebootRejected,
+            RollbackAttempted,
+            RollbackUnsafe,
             ResidualPossible
         ]
     );
