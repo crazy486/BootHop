@@ -68,7 +68,32 @@ jobs:
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          set +e
+          cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee "$log"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          cargo_status="${pipeline_status[0]:-1}"
+          tee_status="${pipeline_status[1]:-1}"
+          status="$cargo_status"
+          if [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ]; then
+            status="$tee_status"
+          fi
+          if [ "$status" -ne 0 ]; then
+            if [ -r "$log" ]; then
+              tail_text="$(tail -n 80 "$log" | tail -c 4000)"
+              tail_text="${tail_text//%/%25}"
+              tail_text="${tail_text//$'\r'/%0D}"
+              tail_text="${tail_text//$'\n'/%0A}"
+              tail_text="${tail_text:0:10000}"
+            else
+              tail_text="Unable to read Clippy log."
+            fi
+            echo "::error title=Clippy failed::$tail_text"
+          fi
+          exit "$status"
       - name: Workspace tests
         shell: pwsh
         run: |
