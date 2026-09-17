@@ -8,7 +8,10 @@ param(
     # This seam is intentionally unavailable to the production CI invocation.
     # It exists only so package_fake.ps1 can exercise parser failure cases without
     # executing a real PE or pretending a .ps1 is Visual Studio dumpbin.exe.
-    [switch] $TestOnlyFixtureMode
+    [switch] $TestOnlyFixtureMode,
+    # Test-only cleanup seam: fail after starting dumpbin so redirected-pipe
+    # cleanup is exercised without launching any BootHop binary.
+    [switch] $TestOnlyInjectProcessImageFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,9 +40,15 @@ $resources = New-HeldResourceSet
 try {
 $root = Get-AbsoluteDirectory $RootPath 'source root'
 $dumpbin = Get-Absolute $DumpbinPath 'dumpbin'
-if ($TestOnlyFixtureMode) {
+if ($TestOnlyInjectProcessImageFailure -and -not $TestOnlyFixtureMode) {
+    Fail 'test-only process failure requires fixture mode'
+}
+if ($TestOnlyInjectProcessImageFailure -and [IO.Path]::GetFileName($dumpbin) -cne 'dumpbin.exe') {
+    Fail 'test-only process failure requires canonical dumpbin.exe'
+}
+if ($TestOnlyFixtureMode -and -not $TestOnlyInjectProcessImageFailure) {
     if ([IO.Path]::GetExtension($dumpbin) -cne '.ps1') { Fail 'test-only dumpbin must be a .ps1 fixture' }
-} elseif ([IO.Path]::GetFileName($dumpbin) -cne 'dumpbin.exe') {
+} elseif (-not $TestOnlyFixtureMode -and [IO.Path]::GetFileName($dumpbin) -cne 'dumpbin.exe') {
     Fail 'production dumpbin must be canonical dumpbin.exe'
 }
 $guiPath = Get-Absolute $GuiPath 'GUI PE'
@@ -153,16 +162,21 @@ function Invoke-Dumpbin([string] $path, [string] $label) {
     Assert-HeldIdentity $dumpbinHeld 'dumpbin'
     Assert-HeldIdentity $guiHeld $label
     if ($label -like '*helper*') { Assert-HeldIdentity $helperHeld $label }
-    if ($TestOnlyFixtureMode) {
+    if ($TestOnlyFixtureMode -and -not $TestOnlyInjectProcessImageFailure) {
         try { $output = @(& $dumpbin /imports $path 2>&1); $exitCode = $LASTEXITCODE } catch { Fail "dumpbin failed for $label" }
     } else {
         $process = [Diagnostics.Process]::new(); $process.StartInfo = [Diagnostics.ProcessStartInfo]::new()
-        $process.StartInfo.FileName = $dumpbin; $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.FileName = $dumpbinHeld.Canonical; $process.StartInfo.UseShellExecute = $false
         $process.StartInfo.CreateNoWindow = $true; $process.StartInfo.RedirectStandardOutput = $true; $process.StartInfo.RedirectStandardError = $true
         [void]$process.StartInfo.ArgumentList.Add('/imports'); [void]$process.StartInfo.ArgumentList.Add($path)
         [void](Add-HeldResource $resources $process)
         try {
             if (-not $process.Start()) { Fail "dumpbin failed for $label" }
+            # Start both drains before any identity query or injected failure.
+            # A dumpbin process can fill either redirected pipe while cleanup
+            # is waiting for it to exit.
+            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+            if ($TestOnlyInjectProcessImageFailure) { throw 'injected process image failure' }
             # QueryFullProcessImageNameW is valid only while the process image
             # is live on this host: after WaitForExit it returns ERROR_GEN_FAILURE
             # (31), even for a retained PROCESS_QUERY_LIMITED_INFORMATION handle.
@@ -171,9 +185,12 @@ function Invoke-Dumpbin([string] $path, [string] $label) {
             $imageResource = Open-HeldFileResource $imagePath 'dumpbin process image' $dumpbinHeld.Canonical
             [void](Add-HeldResource $resources $imageResource)
             if (-not [string]::Equals($imageResource.Held.Identity, $dumpbinHeld.Identity, [StringComparison]::Ordinal)) { Fail 'dumpbin process image identity changed' }
-            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
             $process.WaitForExit(); $output = @($stdout.Result -split "`r?`n"); $exitCode = $process.ExitCode
-        } catch { if ($_.Exception.Message -like 'Windows capability audit failed:*') { throw }; Fail "dumpbin failed for $label" }
+        } catch {
+            if ($_.Exception.Message -like 'Windows capability audit failed:*' -or
+                ($TestOnlyInjectProcessImageFailure -and $_.Exception.Message -eq 'injected process image failure')) { throw }
+            Fail "dumpbin failed for $label"
+        }
     }
     if ($null -eq $exitCode -or $exitCode -ne 0 -or -not $?) { Fail "dumpbin failed for $label" }
     if ($output.Count -eq 0) { Fail "dumpbin output is empty for $label" }
@@ -184,19 +201,19 @@ function Invoke-Dumpbin([string] $path, [string] $label) {
 
 function Parse-DumpbinImports([string] $text, [string] $label) {
     if ($text -match '(?i)\bordinal\b') { Fail "ordinal import is unsupported for $label" }
-    $lines = $text -split "`r?`n"; $inImports = $false; $currentDll = $false; $currentDllNames = 0; $dllCount = 0; $names = [Collections.Generic.List[string]]::new()
+    $lines = $text -split "`r?`n"; $inImports = $false; $currentDll = $null; $currentDllNames = 0; $dllCount = 0; $names = [Collections.Generic.List[object]]::new()
     foreach ($line in $lines) {
         if ($line -match '(?i)Section contains the following imports:') { $inImports = $true; continue }
         if (-not $inImports -or [string]::IsNullOrWhiteSpace($line)) { continue }
         if ($line -match '^\s*Summary\s*$') { break }
         if ($line -match '^\s+[A-Za-z0-9_.-]+\.dll\s*$') {
             if ($currentDll -and $currentDllNames -eq 0) { Fail "imports table has no named entries for $label" }
-            $currentDll = $true; $currentDllNames = 0; $dllCount++; continue
+            $currentDll = $line.Trim(); $currentDllNames = 0; $dllCount++; continue
         }
         if ($line -match '^\s*[0-9A-Fa-f]{8,16}\s+(Import Address Table|Import Name Table)$' -or $line -match '^\s*[0-9A-Fa-f]+\s+(time date stamp|Index of first forwarder reference)$' -or $line -match '^\s*(?:[0-9A-Fa-f]+\s+){4,}[0-9A-Fa-f]+\s*$') { continue }
         if ($line -match '^\s*[0-9A-Fa-f]{1,16}\s+([A-Za-z_?$@][A-Za-z0-9_?$@.\-]*)\s*$') {
             if (-not $currentDll) { Fail "unrecognized import form for $label" }
-            $names.Add($Matches[1]); $currentDllNames++; continue
+            $names.Add([pscustomobject]@{ Dll = $currentDll; Name = $Matches[1] }); $currentDllNames++; continue
         }
         Fail "unrecognized import form for $label"
     }
@@ -207,11 +224,28 @@ function Parse-DumpbinImports([string] $text, [string] $label) {
     return @($names)
 }
 
+function Assert-RuntimeImportProvenance($imports, [string] $label) {
+    # Exact loader imports observed in audited Rust/MSVC runtime support, with
+    # DLL provenance retained from dumpbin. Application source remains
+    # forbidden from declaring or resolving these APIs.
+    $approved = @{
+        'kernel32.dll' = @('LoadLibraryA','LoadLibraryExA','LoadLibraryExW','LoadLibraryW','GetProcAddress')
+    }
+    foreach ($import in $imports) {
+        if ($import.Name -imatch '^(LoadLibrary|GetProcAddress)') {
+            $dll = $import.Dll.ToLowerInvariant()
+            $allowed = $approved.ContainsKey($dll) -and @($approved[$dll] | Where-Object { $_ -ceq $import.Name }).Count -eq 1
+            if (-not $allowed) { Fail "dynamic-loader import lacks audited runtime provenance for $label" }
+        }
+    }
+}
+
 $guiImports = Parse-DumpbinImports (Invoke-Dumpbin $guiPath 'GUI PE') 'GUI PE'; $helperImports = Parse-DumpbinImports (Invoke-Dumpbin $helperPath 'helper PE') 'helper PE'
+Assert-RuntimeImportProvenance $guiImports 'GUI PE'; Assert-RuntimeImportProvenance $helperImports 'helper PE'
 $guiForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|InitiateSystemShutdown|ExitWindows|bcdedit'
 $helperForbidden = 'CreateProcess|ShellExecute|bcdedit'
-if (($guiImports | Where-Object { $_ -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
-if (($helperImports | Where-Object { $_ -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
+if (($guiImports | Where-Object { $_.Name -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
+if (($helperImports | Where-Object { $_.Name -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
 foreach ($pe in @($guiPe,$helperPe)) { if ((Get-HeldHash $pe.Held $pe.Path) -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }
 Write-Output 'Windows source and PE capability audit: passed'
 } finally { Close-HeldResourceSet $resources }

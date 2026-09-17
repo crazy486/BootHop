@@ -145,6 +145,12 @@ try {
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin } 'production dumpbin must be canonical dumpbin.exe'
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
+    New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetProcAddress', 'GetProcAddressEvil'))
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'dynamic-loader import lacks audited runtime provenance'
+    New-FakeDumpbin $dumpbin $validDumpbin
+    New-FakeDumpbin $dumpbin ($validDumpbin.Replace('KERNEL32.dll', 'USER32.dll'))
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'dynamic-loader import lacks audited runtime provenance'
+    New-FakeDumpbin $dumpbin $validDumpbin
     New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n"
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'imports table has no DLLs'
     New-FakeDumpbin $dumpbin "Dump of file fixture`n  File Type: EXECUTABLE IMAGE`n  Section contains the following imports:`n    KERNEL32.dll`n"
@@ -247,6 +253,42 @@ try {
         -GuiPath (Join-Path $releaseStage 'Program Files\BootHop\boothop-gui.exe') `
         -HelperPath (Join-Path $releaseStage 'Program Files\BootHop\boothop-helper.exe') `
         -DumpbinPath $realDumpbin
+
+    # Bounded cleanup regression: inject a process-image query failure after
+    # launching the real dumpbin (never BootHop).  The child produces enough
+    # redirected output to fill a pipe if the launcher waits for cleanup
+    # before starting both async drains.  Run the audit in a child with a
+    # hard timeout so the pre-fix behavior is a deterministic RED result,
+    # rather than allowing the fixture test itself to hang.
+    $probeScript = Join-Path $root 'packaging\windows\check-capabilities.ps1'
+    $probe = [Diagnostics.Process]::new()
+    $probe.StartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $probe.StartInfo.FileName = (Get-Process -Id $PID).Path
+    $probe.StartInfo.UseShellExecute = $false
+    $probe.StartInfo.RedirectStandardOutput = $true
+    $probe.StartInfo.RedirectStandardError = $true
+    foreach ($arg in @('-NoProfile', '-File', $probeScript,
+        '-RootPath', $root,
+        '-GuiPath', (Join-Path $releaseStage 'Program Files\BootHop\boothop-gui.exe'),
+        '-HelperPath', (Join-Path $releaseStage 'Program Files\BootHop\boothop-helper.exe'),
+        '-DumpbinPath', $realDumpbin,
+        '-TestOnlyFixtureMode', '-TestOnlyInjectProcessImageFailure')) {
+        [void]$probe.StartInfo.ArgumentList.Add($arg)
+    }
+    $probeWatch = [Diagnostics.Stopwatch]::StartNew()
+    Assert $probe.Start() 'identity-failure cleanup probe failed to start'
+    $probeOut = $probe.StandardOutput.ReadToEndAsync()
+    $probeErr = $probe.StandardError.ReadToEndAsync()
+    if (-not $probe.WaitForExit(5000)) {
+        try { $probe.Kill($true); $probe.WaitForExit() } catch { }
+        throw 'FAIL: injected identity failure cleanup exceeded 5 seconds'
+    }
+    $probeWatch.Stop()
+    Assert ($probe.ExitCode -ne 0) 'injected identity failure unexpectedly succeeded'
+    $probeText = [string]::Concat($probeOut.Result, $probeErr.Result)
+    Assert ($probeText -match 'injected process image failure') 'identity-failure cleanup probe did not report the injected failure'
+    Assert ($probeWatch.Elapsed.TotalSeconds -lt 5) 'identity-failure cleanup probe exceeded its bound'
+    $probe.Dispose()
     Write-Output 'Windows package fake tests: passed'
 }
 finally {
