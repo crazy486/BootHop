@@ -5,7 +5,9 @@ pub use super::{
     OPERATION_MUTEX_DACL, OPERATION_MUTEX_NAME, OPERATION_MUTEX_TIMEOUT_MS, OperationMutex,
     WaitOutcome, WindowsOperationGuard,
 };
-use boothop_core::{Error, PlatformOperation};
+use boothop_core::Error;
+#[cfg(windows)]
+use boothop_core::PlatformOperation;
 
 pub fn validate_existing_mutex_dacl(sddl: &str) -> bool {
     sddl == super::OPERATION_MUTEX_DACL

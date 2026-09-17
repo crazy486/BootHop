@@ -168,7 +168,7 @@ pub fn write_all(fd: RawFd, mut bytes: &[u8], deadline: Instant) -> io::Result<(
 #[cfg(test)]
 mod tests {
     use super::failure;
-    use boothop_core::Error;
+    use boothop_core::{Error, PlatformOperation};
     use std::io;
 
     #[test]
