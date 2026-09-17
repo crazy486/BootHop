@@ -22,7 +22,23 @@ jobs:
       - name: Isolation checker adversarial fixture
         run: packaging/linux/tests/isolation_checker_fake.sh
       - name: Workspace tests
-        run: cargo test --workspace --locked
+        run: |
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          if cargo test --workspace --locked 2>&1 | tee "$log"; then
+            status="${PIPESTATUS[0]}"
+          else
+            status="${PIPESTATUS[0]}"
+          fi
+          if [ "$status" -ne 0 ]; then
+            tail_text="$(tail -n 80 "$log" | head -c 4000)"
+            tail_text="${tail_text//%/%25}"
+            tail_text="${tail_text//$'\r'/%0D}"
+            tail_text="${tail_text//$'\n'/%0A}"
+            tail_text="${tail_text:0:10000}"
+            echo "::error title=Workspace tests failed::$tail_text"
+          fi
+          exit "$status"
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
@@ -45,7 +61,23 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Workspace tests
-        run: cargo test --workspace --locked
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP ("boothop-workspace-tests-{0}.log" -f [guid]::NewGuid().ToString('N'))
+          try {
+            & cargo test --workspace --locked 2>&1 | Tee-Object -FilePath $log
+            $status = $LASTEXITCODE
+            if ($status -ne 0) {
+              $tailText = (Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue | Out-String)
+              $tailText = $tailText.Substring(0, [Math]::Min(4000, $tailText.Length))
+              $tailText = $tailText.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              $tailText = $tailText.Substring(0, [Math]::Min(10000, $tailText.Length))
+              Write-Host "::error title=Workspace tests failed::$tailText"
+            }
+          } finally {
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          }
+          exit $status
       - name: Release build
         run: cargo build --workspace --release --locked
       - name: Fake Windows package tests
