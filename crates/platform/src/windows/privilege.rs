@@ -14,7 +14,7 @@ pub const ERROR_NOT_ALL_ASSIGNED: i32 = 1300;
 pub const ERROR_NO_SUCH_PRIVILEGE: i32 = 1313;
 pub const ERROR_INVALID_DATA: i32 = 13;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn previous_state_layout_valid(
     return_length: usize,
     count: usize,
