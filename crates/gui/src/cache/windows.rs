@@ -803,7 +803,9 @@ fn same_path(left: &Path, right: &Path) -> bool {
 #[cfg(windows)]
 fn normalize_final_path(path: &Path) -> String {
     let mut value = path.to_string_lossy().replace('/', "\\");
-    if let Some(stripped) = value.strip_prefix(r"\\?\") {
+    if let Some(stripped) = value.strip_prefix(r"\\?\UNC\") {
+        value = format!(r"\\{stripped}");
+    } else if let Some(stripped) = value.strip_prefix(r"\\?\") {
         value = stripped.to_owned();
     }
     while value.ends_with('\\') && value.len() > 3 {
@@ -919,6 +921,14 @@ mod tests {
             fixed_destination(parent),
             Path::new(r"C:\Users\test\AppData\Local\Other\cache-v1.json")
         );
+    }
+
+    #[test]
+    fn fake_unc_final_path_matches_unc_input() {
+        assert!(same_path(
+            Path::new(r"\\?\UNC\server\share\BootHop"),
+            Path::new(r"\\server\share\BootHop"),
+        ));
     }
 
     #[test]
