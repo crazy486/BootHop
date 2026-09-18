@@ -9,10 +9,12 @@ use boothop_core::{BootId, Os};
 use serde::{Deserialize, Serialize};
 #[cfg(not(windows))]
 use std::fs::{self, OpenOptions};
+#[cfg(all(windows, debug_assertions))]
+use std::io::Write;
 use std::{
     ffi::OsStr,
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -25,7 +27,8 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 #[cfg(windows)]
 #[cfg(debug_assertions)]
 fn cache_diagnostic(reason: &'static str) {
-    eprintln!("BootHop cache diagnostic: {reason}");
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(stderr, "BootHop cache diagnostic: {reason}");
 }
 
 #[cfg(windows)]
@@ -35,7 +38,11 @@ fn cache_diagnostic(_reason: &'static str) {}
 #[cfg(windows)]
 #[cfg(debug_assertions)]
 fn cache_diagnostic_code(reason: &'static str, code: u32) {
-    eprintln!("BootHop cache diagnostic: {reason} (Win32 error {code})");
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(
+        stderr,
+        "BootHop cache diagnostic: {reason} (Win32 error {code})"
+    );
 }
 
 #[cfg(windows)]
@@ -206,7 +213,7 @@ fn save_portable(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         .open(&temp)
         .map_err(|_| CacheError::Unavailable)?;
     let result = (|| {
-        file.write_all(bytes).map_err(|_| CacheError::Unavailable)?;
+        std::io::Write::write_all(&mut file, bytes).map_err(|_| CacheError::Unavailable)?;
         file.sync_all().map_err(|_| CacheError::Unavailable)
     })();
     drop(file);
@@ -316,9 +323,7 @@ fn save_native(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         return fail_owned(&mut temp_file, error);
     }
     if let Err(error) = (|| {
-        temp_file
-            .file
-            .write_all(bytes)
+        std::io::Write::write_all(&mut temp_file.file, bytes)
             .map_err(|_| CacheError::Unavailable)?;
         temp_file
             .file
