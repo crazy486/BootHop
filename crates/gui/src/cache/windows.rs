@@ -9,12 +9,10 @@ use boothop_core::{BootId, Os};
 use serde::{Deserialize, Serialize};
 #[cfg(not(windows))]
 use std::fs::{self, OpenOptions};
-#[cfg(all(windows, debug_assertions))]
-use std::io::Write;
 use std::{
     ffi::OsStr,
     fs::File,
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -23,31 +21,6 @@ const LIMIT: usize = 64 * 1024;
 const CACHE_FILE: &str = "cache-v1.json";
 const CACHE_DIRECTORY: &str = "BootHop";
 static NEXT: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(windows)]
-#[cfg(debug_assertions)]
-fn cache_diagnostic(reason: &'static str) {
-    let mut stderr = std::io::stderr();
-    let _ = writeln!(stderr, "BootHop cache diagnostic: {reason}");
-}
-
-#[cfg(windows)]
-#[cfg(not(debug_assertions))]
-fn cache_diagnostic(_reason: &'static str) {}
-
-#[cfg(windows)]
-#[cfg(debug_assertions)]
-fn cache_diagnostic_code(reason: &'static str, code: u32) {
-    let mut stderr = std::io::stderr();
-    let _ = writeln!(
-        stderr,
-        "BootHop cache diagnostic: {reason} (Win32 error {code})"
-    );
-}
-
-#[cfg(windows)]
-#[cfg(not(debug_assertions))]
-fn cache_diagnostic_code(_reason: &'static str, _code: u32) {}
 
 /// Resolve the one cache location beneath the LocalAppData known folder.
 /// Tests pass an ordinary temporary absolute directory; production uses the
@@ -101,11 +74,7 @@ enum WireOs {
 
 impl Cache for WindowsCache {
     fn load(&self) -> Result<Option<CachedTarget>, CacheError> {
-        let path = self.path.as_ref().map_err(|error| {
-            #[cfg(windows)]
-            cache_diagnostic("cache lexical path validation failed");
-            error.clone()
-        })?;
+        let path = self.path.as_ref().map_err(Clone::clone)?;
         #[cfg(windows)]
         return load_native(path);
         #[cfg(not(windows))]
@@ -213,7 +182,7 @@ fn save_portable(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         .open(&temp)
         .map_err(|_| CacheError::Unavailable)?;
     let result = (|| {
-        std::io::Write::write_all(&mut file, bytes).map_err(|_| CacheError::Unavailable)?;
+        file.write_all(bytes).map_err(|_| CacheError::Unavailable)?;
         file.sync_all().map_err(|_| CacheError::Unavailable)
     })();
     drop(file);
@@ -323,7 +292,9 @@ fn save_native(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         return fail_owned(&mut temp_file, error);
     }
     if let Err(error) = (|| {
-        std::io::Write::write_all(&mut temp_file.file, bytes)
+        temp_file
+            .file
+            .write_all(bytes)
             .map_err(|_| CacheError::Unavailable)?;
         temp_file
             .file
@@ -368,21 +339,10 @@ fn native_context(path: &Path, create_parent: bool) -> Result<Option<NativeConte
         .parent()
         .and_then(Path::parent)
         .ok_or(CacheError::Unavailable)?;
-    let root = match native_open_directory(root_path, false, false) {
-        Ok(Some(root)) => root,
-        Ok(None) => {
-            cache_diagnostic("root directory missing");
-            return Ok(None);
-        }
-        Err(error) => {
-            cache_diagnostic("root directory open/type validation failed");
-            return Err(error);
-        }
+    let Some(root) = native_open_directory(root_path, false, false)? else {
+        return Ok(None);
     };
-    if let Err(error) = validate_directory(&root, None, root_path) {
-        cache_diagnostic("root directory containment/identity validation failed");
-        return Err(error);
-    }
+    validate_directory(&root, None, root_path)?;
     let parent_path = root_path.join(CACHE_DIRECTORY);
     let parent = match native_open_directory(&parent_path, false, true)? {
         Some(parent) => parent,
@@ -424,12 +384,7 @@ fn native_open_directory(
     else {
         return Ok(None);
     };
-    if !is_directory {
-        cache_diagnostic("directory handle is not a directory");
-        return Err(CacheError::Unavailable);
-    }
-    if reparse {
-        cache_diagnostic("directory handle is a reparse point");
+    if !is_directory || reparse {
         return Err(CacheError::Unavailable);
     }
     Ok(Some(NativeDirectory {
@@ -514,14 +469,12 @@ fn native_open(
         if create_new && error == 80 {
             return Ok(None);
         }
-        cache_diagnostic_code("CreateFileW failed for cache path", error);
         return Err(CacheError::Unavailable);
     }
     let file = unsafe { File::from_raw_handle(raw as _) };
     let identity = match native_identity(&file) {
         Ok(identity) => identity,
         Err(error) => {
-            cache_diagnostic("cache handle identity query failed");
             if create_new {
                 let _ = dispose_handle(&file);
             }
@@ -531,7 +484,6 @@ fn native_open(
     let (is_directory, reparse) = match native_type(&file) {
         Ok(facts) => facts,
         Err(error) => {
-            cache_diagnostic("cache handle type query failed");
             if create_new {
                 let _ = dispose_handle(&file);
             }
@@ -541,7 +493,6 @@ fn native_open(
     let final_path = match native_final_path(&file) {
         Ok(path) => path,
         Err(error) => {
-            cache_diagnostic("cache handle final-path query failed");
             if create_new {
                 let _ = dispose_handle(&file);
             }
@@ -765,15 +716,12 @@ fn validate_directory(
                 .ok_or(CacheError::Unavailable)?,
             &parent.final_path,
         ) {
-            cache_diagnostic("directory parent containment mismatch");
             return Err(CacheError::Unavailable);
         }
     } else if !same_path(&directory.final_path, expected) {
-        cache_diagnostic("directory final-path mismatch");
         return Err(CacheError::Unavailable);
     }
     if directory.identity.volume == 0 || directory.identity.index == 0 {
-        cache_diagnostic("directory identity is zero");
         return Err(CacheError::Unavailable);
     }
     Ok(())
@@ -861,7 +809,41 @@ fn normalize_final_path(path: &Path) -> String {
     while value.ends_with('\\') && value.len() > 3 {
         value.pop();
     }
+    let mut value = expand_short_path(&value).unwrap_or(value);
+    while value.ends_with('\\') && value.len() > 3 {
+        value.pop();
+    }
     value.to_ascii_lowercase()
+}
+
+#[cfg(windows)]
+fn expand_short_path(path: &str) -> Option<String> {
+    use std::os::windows::{ffi::OsStrExt, ffi::OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut buffer = vec![0u16; 512];
+    loop {
+        let length =
+            unsafe { GetLongPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return None;
+        }
+        if (length as usize) < buffer.len() {
+            return Some(
+                std::ffi::OsString::from_wide(&buffer[..length as usize])
+                    .to_string_lossy()
+                    .replace('/', "\\"),
+            );
+        }
+        if length as usize >= 32 * 1024 {
+            return None;
+        }
+        buffer.resize(length as usize + 1, 0);
+    }
 }
 
 #[cfg(all(test, windows))]
