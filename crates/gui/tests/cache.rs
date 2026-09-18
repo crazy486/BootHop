@@ -207,6 +207,11 @@ mod windows_tests {
         );
         assert!(resolve_windows_cache_path(std::ffi::OsStr::new("relative")).is_err());
         assert!(resolve_windows_cache_path(root.join("../escape").as_os_str()).is_err());
+        let mut nul_base = root.as_os_str().to_os_string();
+        nul_base.push("\0");
+        assert!(resolve_windows_cache_path(&nul_base).is_err());
+        let nul_cache = PathBuf::from(format!("{}\\BootHop\\cache-v1.json\0", root.display()));
+        assert!(WindowsCache::at(nul_cache).load().is_err());
     }
 
     #[test]

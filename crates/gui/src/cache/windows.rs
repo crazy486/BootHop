@@ -228,11 +228,12 @@ fn load_native(path: &Path) -> Result<Option<CachedTarget>, CacheError> {
     let Some(context) = native_context(path, false)? else {
         return Ok(None);
     };
+    let expected_cache = context.parent.final_path.join(CACHE_FILE);
     let Some(cache_file) = native_open_file(path, false)? else {
         return Ok(None);
     };
     validate_context(&context)?;
-    validate_child_file(&context.parent, &cache_file, path)?;
+    validate_child_file(&context.parent, &cache_file, &expected_cache)?;
     if cache_file_size(&cache_file)? > LIMIT as u64 {
         return Err(CacheError::Unavailable);
     }
@@ -248,7 +249,7 @@ fn load_native(path: &Path) -> Result<Option<CachedTarget>, CacheError> {
     let Some(current_file) = native_open_file(path, false)? else {
         return Err(CacheError::Unavailable);
     };
-    validate_child_file(&context.parent, &current_file, path)?;
+    validate_child_file(&context.parent, &current_file, &expected_cache)?;
     if current_file.identity != cache_file.identity {
         return Err(CacheError::Unavailable);
     }
@@ -272,9 +273,10 @@ fn load_native(path: &Path) -> Result<Option<CachedTarget>, CacheError> {
 fn save_native(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
     validate_cache_path(path)?;
     let context = native_context(path, true)?.ok_or(CacheError::Unavailable)?;
+    let expected_cache = context.parent.final_path.join(CACHE_FILE);
     validate_context(&context)?;
     if let Some(cache_file) = native_open_file(path, false)? {
-        validate_child_file(&context.parent, &cache_file, path)?;
+        validate_child_file(&context.parent, &cache_file, &expected_cache)?;
     }
     let temp = context.parent.final_path.join(format!(
         ".cache-v1-{}-{}.tmp",
@@ -323,7 +325,7 @@ fn save_native(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
     };
     temp_file.final_path = renamed_path;
     if temp_file.identity != original_identity
-        || validate_child_file(&context.parent, &temp_file, path).is_err()
+        || validate_child_file(&context.parent, &temp_file, &expected_cache).is_err()
     {
         return fail_owned(&mut temp_file, CacheError::Unavailable);
     }
@@ -342,7 +344,8 @@ fn native_context(path: &Path, create_parent: bool) -> Result<Option<NativeConte
     let Some(root) = native_open_directory(root_path, false, false)? else {
         return Ok(None);
     };
-    validate_directory(&root, None, root_path)?;
+    let canonical_root = canonical_existing_path(root_path)?;
+    validate_directory(&root, None, &canonical_root)?;
     let parent_path = root_path.join(CACHE_DIRECTORY);
     let parent = match native_open_directory(&parent_path, false, true)? {
         Some(parent) => parent,
@@ -809,19 +812,28 @@ fn normalize_final_path(path: &Path) -> String {
     while value.ends_with('\\') && value.len() > 3 {
         value.pop();
     }
-    let mut value = expand_short_path(&value).unwrap_or(value);
-    while value.ends_with('\\') && value.len() > 3 {
-        value.pop();
-    }
     value.to_ascii_lowercase()
 }
 
 #[cfg(windows)]
-fn expand_short_path(path: &str) -> Option<String> {
+fn canonical_existing_path(path: &Path) -> Result<PathBuf, CacheError> {
     use std::os::windows::{ffi::OsStrExt, ffi::OsStringExt};
     use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
 
-    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+    let value = path.to_string_lossy().replace('/', "\\");
+    if value.contains('\0') {
+        return Err(CacheError::Unavailable);
+    }
+    let query = if value.starts_with(r"\\?\") {
+        value
+    } else if let Some(unc) = value.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{unc}")
+    } else if value.as_bytes().get(1) == Some(&b':') {
+        format!(r"\\?\{value}")
+    } else {
+        return Err(CacheError::Unavailable);
+    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(&query)
         .encode_wide()
         .chain(Some(0))
         .collect();
@@ -830,17 +842,15 @@ fn expand_short_path(path: &str) -> Option<String> {
         let length =
             unsafe { GetLongPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
         if length == 0 {
-            return None;
+            return Err(CacheError::Unavailable);
         }
         if (length as usize) < buffer.len() {
-            return Some(
-                std::ffi::OsString::from_wide(&buffer[..length as usize])
-                    .to_string_lossy()
-                    .replace('/', "\\"),
-            );
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+                &buffer[..length as usize],
+            )));
         }
         if length as usize >= 32 * 1024 {
-            return None;
+            return Err(CacheError::Unavailable);
         }
         buffer.resize(length as usize + 1, 0);
     }
@@ -977,7 +987,8 @@ mod tests {
 }
 
 fn validate_base(base: &Path) -> Result<(), CacheError> {
-    if !base.is_absolute()
+    if base.as_os_str().as_encoded_bytes().contains(&0)
+        || !base.is_absolute()
         || base
             .components()
             .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
@@ -988,7 +999,8 @@ fn validate_base(base: &Path) -> Result<(), CacheError> {
 }
 
 fn validate_cache_path(path: &Path) -> Result<(), CacheError> {
-    if !path.is_absolute()
+    if path.as_os_str().as_encoded_bytes().contains(&0)
+        || !path.is_absolute()
         || path.file_name() != Some(OsStr::new(CACHE_FILE))
         || path
             .components()
