@@ -514,6 +514,18 @@ fn known_folder_result(hr: i32, pointer_is_null: bool) -> Result<(), i32> {
     }
 }
 
+const KNOWN_FOLDER_MAX_UTF16: usize = 32 * 1024;
+
+fn bounded_utf16_len<I>(units: I) -> Option<usize>
+where
+    I: IntoIterator<Item = u16>,
+{
+    units
+        .into_iter()
+        .take(KNOWN_FOLDER_MAX_UTF16)
+        .position(|unit| unit == 0)
+}
+
 fn contains_range(base: usize, end: usize, start: usize, length: usize) -> bool {
     start >= base
         && start <= end
@@ -701,6 +713,18 @@ pub(crate) mod native {
         file: File,
         trusted_root: bool,
         parent_id: Option<u128>,
+    }
+
+    struct CoTaskMemBuffer(*mut u16);
+
+    impl Drop for CoTaskMemBuffer {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CoTaskMemFree(self.0.cast());
+                }
+            }
+        }
     }
 
     impl Clone for NativeHandle {
@@ -1185,17 +1209,16 @@ pub(crate) mod native {
                     &mut raw_path,
                 )
             };
-            known_folder_result(hr, raw_path.is_null())?;
-            let mut len = 0;
-            while unsafe { *raw_path.add(len) } != 0 {
-                len += 1;
-            }
+            let raw_path = CoTaskMemBuffer(raw_path);
+            known_folder_result(hr, raw_path.0.is_null())?;
+            let len = bounded_utf16_len(
+                (0..KNOWN_FOLDER_MAX_UTF16).map(|offset| unsafe { *raw_path.0.add(offset) }),
+            )
+            .ok_or(POLICY_ERROR)?;
             let path = PathBuf::from(std::ffi::OsString::from_wide(unsafe {
-                std::slice::from_raw_parts(raw_path, len)
+                std::slice::from_raw_parts(raw_path.0, len)
             }));
-            unsafe {
-                CoTaskMemFree(raw_path.cast());
-            }
+            drop(raw_path);
             handle(path, true, None, false, true)
         }
 
@@ -1770,6 +1793,24 @@ mod tests {
         assert!(known_folder_result(0, false).is_ok());
         assert_eq!(known_folder_result(0, true), Err(POLICY_ERROR));
         assert_eq!(known_folder_result(-1, true), Err(-1));
+    }
+
+    #[test]
+    fn known_folder_utf16_scan_requires_bounded_terminator() {
+        assert_eq!(
+            bounded_utf16_len([b'C' as u16, b':' as u16, 0].into_iter()),
+            Some(2)
+        );
+        assert_eq!(
+            bounded_utf16_len(std::iter::repeat_n(b'x' as u16, KNOWN_FOLDER_MAX_UTF16)),
+            None
+        );
+        assert_eq!(
+            bounded_utf16_len(
+                std::iter::repeat_n(b'x' as u16, KNOWN_FOLDER_MAX_UTF16).chain(std::iter::once(0))
+            ),
+            None
+        );
     }
 
     #[test]
