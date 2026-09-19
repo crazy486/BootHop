@@ -64,7 +64,7 @@ verified.
 | Linux development environment | Built by CI | Fake/staging only | Not accepted | Not accepted | No |
 | Linux Arch Wayland reference | Code target only | Not installed | Not run | Not run | No |
 | Ubuntu 24.04 Wayland/X11 or OVMF | Code/reference only | Not installed | Not run | Not run | No |
-| Windows 11 x86-64 | Not implemented in 11L | MSI not built | 1W blocked | 1W blocked | No |
+| Windows 11 x86-64 | Production software integrated; CI build verified | Non-installing stage only; installer not implemented | W0/W1 not started | W1 not started; Windows1W is separate `PASS_WITH_LIMITATION` research evidence | No |
 
 No signature, runner, artifact-size, additional-dependency, or real-machine
 field above may be inferred from a successful fake build.

@@ -1,22 +1,31 @@
 # Firmware and reboot acceptance record
 
 Status: **NOT ACCEPTED**. This is a run sheet, not evidence that a machine was
-changed. The Linux development package and fake tests do not fill any result
-below. Windows 11 evidence is blocked by the outstanding 1W real-machine gate;
-the Linux package does not provide a Windows implementation.
+changed. Development packages, staged Windows artifacts, and fake tests do not
+fill any result below. Windows1W research is complete with a limitation, but
+Windows production W0/W1 have not started.
 
 ## Windows production authorization boundary
 
-Windows production acceptance is **NOT STARTED**. The software branch may
+Windows production acceptance is **NOT STARTED**. The integrated production
+software may
 compile, stage, and statically audit a package, but those checks never invoke a
 firmware API, UAC/helper, ACL change, BCD operation, shutdown, or reboot.
 Windows1W is the separate read-only native-API research record and remains
 `PASS_WITH_LIMITATION`; it is not W1 and does not close Linux Stage 5. Linux
 Stage 5 is the separate post-boot closure and remains pending.
 
-W1--W5 require separate, fresh authorization and private evidence:
+The detailed Windows runbook is
+[windows-real-system.md](windows-real-system.md). W0--W5 require separate,
+fresh authorization and private evidence:
 
-1. **W1 read-only:** native reads and privilege restoration only.
+0. **W0 install:** exact-artifact fixed layout and protected ProgramData ACL;
+   no executable launch, firmware access, configuration, or reboot. It remains
+   blocked until an approved installer/provisioner exists.
+1. **W1 read-only:** production Inspect reads `GetFirmwareType`, `BootOrder`,
+   `BootCurrent`, and the deduplicated union of `Boot####` entries referenced by
+   those two controls. It validates shared parsing/canonical identity and
+   privilege restoration. It deliberately does not read `BootNext`.
 2. **W2 configure:** elevated helper and protected ProgramData record/ACL
    validation only; no firmware write or reboot.
 3. **W3 pre-switch:** target identity and BootNext conflict observation only.
@@ -31,14 +40,14 @@ error by the production policy; it is not evidence of absent `BootNext`.
 Code-signing, an atomic installer, interrupted-upgrade recovery, and downgrade
 prevention are also release requirements and are not supplied by staging.
 
-Run this checklist only after explicit authorization. Record the exact host,
-kernel/OS, firmware vendor and version, boot mode, systemd/polkit versions (if
-Linux), package checksum, and operator. Do not replace a missing value with
+Run this checklist only for its separately authorized stage. Record the exact
+host, kernel/OS, firmware vendor and version, boot mode, systemd/polkit versions
+(if Linux), package checksum, and operator. Do not replace a missing value with
 “passed”. Preserve before/after command output and screenshots with the run ID.
 
 | Field | Linux host / UEFI VM | Windows 11 host |
 |---|---|---|
-| Environment and authorization/run ID | **Not run** | **Not run (1W gate)** |
+| Environment and authorization/run ID | **Not run** | **Not run (W0/W1)** |
 | Package and binary SHA-256 | **Not measured** | **Not measured** |
 | Before BootOrder | **Not read** | **Not read** |
 | Before BootNext (including absent vs value) | **Not read** | **Not read** |
@@ -52,6 +61,9 @@ Linux), package checksum, and operator. Do not replace a missing value with
 | Pass/fail and residual-risk notes | **Not assessed** | **Not assessed** |
 
 ## Authorized procedure (one host at a time)
+
+The multi-stage procedure below begins only after W0 and W1. It does not alter
+the narrower W1 contract above.
 
 1. Confirm UEFI mode, record firmware details, and capture BootOrder,
    BootCurrent, BootNext (or an explicit not-found result), and every selected

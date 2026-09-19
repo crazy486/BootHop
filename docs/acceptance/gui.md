@@ -6,8 +6,9 @@ renderer quality, desktop-session compatibility, or Windows support. Every
 cell below requires an attached screenshot and a run log; “build succeeded” is
 not a GUI result.
 
-The Windows GUI executable is now a compile-time and fake-test artifact only.
-Its staged manifest requests `asInvoker`; only the fixed helper requests
+The Windows GUI is integrated production software with compile/static/fake
+verification, but it has not been run for real-system acceptance. Its staged
+manifest requests `asInvoker`; only the fixed helper requests
 `requireAdministrator`. No UAC prompt, helper launch, firmware operation,
 shutdown, reboot, installation, or real Windows desktop session was exercised.
 Windows1W read-only research and Linux Stage 5 post-boot closure remain

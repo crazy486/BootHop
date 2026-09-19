@@ -1,9 +1,10 @@
 # BootHop
 
 BootHop is a deliberately conservative boot-target switcher. The repository
-currently contains a Linux development build, Windows compile-only production
-sources, and mock/fake tests. It is not a cross-platform release and does not
-claim that a machine has booted another OS.
+currently contains a Linux development build, integrated Windows production
+software with compile/static/fake verification, and mock/fake tests. It is not
+a cross-platform release and does not claim that a machine has booted another
+OS.
 
 ## Current status
 
@@ -45,8 +46,10 @@ script stages files and prints the archive path without installing it.
 
 ## Acceptance and release gates
 
-Read [firmware acceptance](docs/acceptance/firmware.md), [GUI acceptance](docs/acceptance/gui.md),
-and [release readiness](docs/acceptance/release.md) before any separately
+Read [Windows real-system acceptance](docs/acceptance/windows-real-system.md),
+[firmware acceptance](docs/acceptance/firmware.md),
+[GUI acceptance](docs/acceptance/gui.md), and
+[release readiness](docs/acceptance/release.md) before any separately
 authorized real-system run. Missing evidence stays **NOT ACCEPTED**; fake tests
 and package builds must never be recorded as real firmware or Windows success.
 
