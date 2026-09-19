@@ -152,9 +152,16 @@ jobs:
           $bundle = Join-Path $env:RUNNER_TEMP 'boothop-windows-acceptance'
           $bundleStage = Join-Path $bundle 'stage'
           New-Item -ItemType Directory -Path $bundle | Out-Null
-          Copy-Item -LiteralPath $env:BOOTHOP_STAGE -Destination $bundleStage -Recurse
+          Copy-Item -LiteralPath $env:BOOTHOP_STAGE -Destination $bundleStage -Recurse -Force
+          ./packaging/windows/check-package.ps1 -StagePath $bundleStage
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere.exe is missing' }
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find '**\dumpbin.exe' | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($dumpbin) -or -not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw 'dumpbin.exe is missing' }
           $gui = Join-Path $bundleStage 'Program Files\BootHop\boothop-gui.exe'
           $helper = Join-Path $bundleStage 'Program Files\BootHop\boothop-helper.exe'
+          ./packaging/windows/check-capabilities.ps1 `
+            -RootPath $env:GITHUB_WORKSPACE -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin
           $guiFile = Get-Item -LiteralPath $gui
           $helperFile = Get-Item -LiteralPath $helper
           $guiHash = (Get-FileHash -LiteralPath $gui -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -198,4 +205,5 @@ jobs:
           name: boothop-windows-acceptance-${{ github.sha }}
           path: ${{ env.BOOTHOP_ACCEPTANCE_BUNDLE }}
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 14

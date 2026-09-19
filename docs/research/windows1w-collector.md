@@ -5,9 +5,9 @@ Date: 2026-09-14
 This package is a read-only research collector preparation artifact. It is
 not the BootHop Windows adapter, helper, GUI, installer, or production
 implementation. Windows1W is **PASS_WITH_LIMITATION** and its research hard
-gate is released. This does not mean the Windows production adapter is
-complete: Linux Stage 5 remains **pending**, the Windows production
-implementation has **not begun**, and no additional firmware read is
+gate is released. The later Windows production software is now integrated,
+but W0 installation and W1--W5 real-system acceptance remain **not started**.
+Linux Stage 5 remains **pending**, and no additional firmware read is
 authorized by this status.
 
 ## Native boundary

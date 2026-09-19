@@ -2,6 +2,11 @@
 
 Date: 2026-09-14
 
+Historical status note: this design predates the integrated Windows production
+software. Statements below about production implementation not having begun
+describe the gate at design time; current W0/W1 status is maintained in
+`docs/acceptance/windows-real-system.md`.
+
 ## Scope and status
 
 This document specifies software preparation only. The collector is an independent research and acceptance tool for a later, separately authorized Windows1W real-system session. It is not the BootHop Windows adapter, helper, GUI, or production implementation. Building, testing, and auditing it does not complete Windows1W or Linux Stage 5.
