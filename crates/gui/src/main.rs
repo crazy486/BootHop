@@ -55,7 +55,8 @@ mod linux {
         ui.set_configure_enabled(c.can_configure());
         ui.set_selection_enabled(c.can_select());
         ui.set_confirmation_enabled(c.can_select() && c.selected().is_some());
-        ui.set_windows_confirmed(c.confirmed());
+        ui.set_target_confirmed(c.confirmed());
+        ui.set_target_os_name("Windows".into());
         ui.set_candidates(ModelRc::new(VecModel::from(
             c.candidates()
                 .iter()
@@ -105,6 +106,7 @@ mod linux {
             ThreadExecutor,
             cache,
             wake,
+            Os::Windows,
         )));
         render(&ui, &controller.borrow());
         {
@@ -152,8 +154,8 @@ mod linux {
         {
             let c = controller.clone();
             let weak = ui.as_weak();
-            ui.on_confirm_windows(move |confirmed| {
-                c.borrow_mut().confirm_windows(confirmed);
+            ui.on_confirm_target(move |confirmed| {
+                c.borrow_mut().confirm_target(confirmed);
                 if let Some(ui) = weak.upgrade() {
                     render(&ui, &c.borrow());
                 }
@@ -237,7 +239,8 @@ mod windows {
         ui.set_configure_enabled(c.can_configure());
         ui.set_selection_enabled(c.can_select());
         ui.set_confirmation_enabled(c.can_select() && c.selected().is_some());
-        ui.set_windows_confirmed(c.confirmed());
+        ui.set_target_confirmed(c.confirmed());
+        ui.set_target_os_name("Linux".into());
         ui.set_candidates(ModelRc::new(VecModel::from(
             c.candidates()
                 .iter()
@@ -282,6 +285,7 @@ mod windows {
             ThreadExecutor,
             cache,
             wake,
+            Os::Linux,
         )));
         render(&ui, &controller.borrow());
         {
@@ -329,8 +333,8 @@ mod windows {
         {
             let c = controller.clone();
             let weak = ui.as_weak();
-            ui.on_confirm_windows(move |confirmed| {
-                c.borrow_mut().confirm_windows(confirmed);
+            ui.on_confirm_target(move |confirmed| {
+                c.borrow_mut().confirm_target(confirmed);
                 if let Some(ui) = weak.upgrade() {
                     render(&ui, &c.borrow());
                 }
@@ -342,7 +346,7 @@ mod windows {
             ui.on_configure(move || {
                 let selected = c.borrow().selected();
                 if let Some(id) = selected {
-                    c.borrow_mut().handle(UiIntent::Configure(id, Os::Windows));
+                    c.borrow_mut().handle(UiIntent::Configure(id, Os::Linux));
                 }
                 if let Some(ui) = weak.upgrade() {
                     render(&ui, &c.borrow());

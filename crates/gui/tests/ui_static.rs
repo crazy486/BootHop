@@ -5,8 +5,9 @@ fn single_window_declares_required_actions_and_unconditional_warning() {
     assert_eq!(ui.matches("inherits Window").count(), 1);
     for text in [
         "点击后将立即重启，请先保存工作",
-        "重启进入 Windows",
-        "我确认所选目标是 Windows",
+        "重启进入 ",
+        "我确认所选目标是 ",
+        "target-os-name",
         "检查启动配置",
         "配置所选目标",
         "复制诊断",
@@ -14,6 +15,7 @@ fn single_window_declares_required_actions_and_unconditional_warning() {
         assert!(ui.contains(text), "missing {text}");
     }
     assert!(!ui.contains("已进入 Windows"));
+    assert!(!ui.contains("已进入 Linux"));
 }
 #[test]
 fn slint_is_explicitly_pinned_and_exclusive_to_gui() {
@@ -50,8 +52,9 @@ fn linux_entry_point_wires_explicit_callbacks_and_event_loop_completions() {
         "on_inspect",
         "on_switch_target",
         "on_select_target",
-        "on_confirm_windows",
+        "on_confirm_target",
         "on_configure",
+        "Os::Windows",
         "on_completed",
         "upgrade_in_event_loop",
         "ThreadExecutor",
@@ -71,6 +74,7 @@ fn windows_entry_point_wires_helper_client_and_untrusted_local_cache_only() {
         "on_inspect",
         "on_switch_target",
         "on_configure",
+        "Os::Linux",
     ] {
         assert!(main.contains(boundary), "missing {boundary}");
     }

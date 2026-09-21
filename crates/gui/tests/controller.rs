@@ -71,6 +71,9 @@ impl Cache for FakeCache {
 }
 type TestController = Controller<FakeHelper, Manual, FakeCache>;
 fn setup(cache: FakeCache) -> (TestController, FakeHelper, Manual, FakeCache) {
+    setup_for(cache, Os::Windows)
+}
+fn setup_for(cache: FakeCache, target_os: Os) -> (TestController, FakeHelper, Manual, FakeCache) {
     let helper = FakeHelper::default();
     let executor = Manual::default();
     (
@@ -79,6 +82,7 @@ fn setup(cache: FakeCache) -> (TestController, FakeHelper, Manual, FakeCache) {
             executor.clone(),
             cache.clone(),
             Arc::new(|| {}),
+            target_os,
         ),
         helper,
         executor,
@@ -129,7 +133,7 @@ fn inspect(c: &mut TestController, h: &FakeHelper, e: &Manual, r: Report) {
 }
 fn select(c: &mut TestController) {
     assert!(c.select(BootId(7)));
-    c.confirm_windows(true);
+    c.confirm_target(true);
 }
 fn nested(error: Error) -> Error {
     Error::FlowFailure {
@@ -226,7 +230,7 @@ fn unique_or_named_candidate_never_auto_selects_or_configures() {
     inspect(&mut c, &h, &e, report());
     assert!(!c.can_configure());
     assert_eq!(c.selected(), None);
-    c.confirm_windows(true);
+    c.confirm_target(true);
     c.handle(UiIntent::Configure(BootId(7), Os::Windows));
     assert!(e.0.lock().unwrap().is_empty());
     assert_eq!(h.calls.lock().unwrap().len(), 1);
@@ -238,7 +242,7 @@ fn configure_requires_matching_selection_and_explicit_confirmation() {
     assert!(c.select(BootId(7)));
     c.handle(UiIntent::Configure(BootId(7), Os::Windows));
     assert!(e.0.lock().unwrap().is_empty());
-    c.confirm_windows(true);
+    c.confirm_target(true);
     c.handle(UiIntent::Configure(BootId(8), Os::Windows));
     assert!(e.0.lock().unwrap().is_empty());
     c.handle(UiIntent::Configure(BootId(7), Os::Windows));
@@ -277,7 +281,7 @@ fn unsupported_candidate_cannot_be_selected() {
     r.candidates[0].classification = Classification::Unsupported;
     inspect(&mut c, &h, &e, r);
     assert!(!c.select(BootId(7)));
-    c.confirm_windows(true);
+    c.confirm_target(true);
     c.handle(UiIntent::Configure(BootId(7), Os::Windows));
     assert!(!c.can_configure());
     assert!(e.0.lock().unwrap().is_empty());
@@ -292,7 +296,7 @@ fn ambiguous_candidate_requires_manual_selection_and_confirmation() {
     assert!(!c.can_configure());
     assert!(c.select(BootId(7)));
     assert!(!c.can_configure());
-    c.confirm_windows(true);
+    c.confirm_target(true);
     assert!(c.can_configure());
     c.handle(UiIntent::Configure(BootId(7), Os::Windows));
     assert_eq!(e.0.lock().unwrap().len(), 1);
@@ -577,6 +581,68 @@ fn client_failures_preserve_phase_and_dont_replay() {
 }
 
 #[test]
+fn controller_targets_the_explicit_opposite_os_without_cross_direction_acceptance() {
+    let (mut c, h, e, _) = setup_for(FakeCache::default(), Os::Linux);
+    inspect(&mut c, &h, &e, report());
+    assert!(c.select(BootId(7)));
+    c.confirm_target(true);
+    c.handle(UiIntent::Configure(BootId(7), Os::Windows));
+    assert_eq!(c.state(), &UiState::Failed);
+    assert!(e.0.lock().unwrap().is_empty());
+
+    inspect(&mut c, &h, &e, report());
+    assert!(c.select(BootId(7)));
+    c.confirm_target(true);
+    c.handle(UiIntent::Configure(BootId(7), Os::Linux));
+    assert_eq!(c.state(), &UiState::Busy);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Ok(Report {
+            record: RecordDiagnostic::Ready {
+                boot_id: BootId(7),
+                os: Os::Linux,
+            },
+            stages: vec![Stage::TargetValidated],
+            ..report()
+        }),
+    );
+    assert_eq!(c.state(), &UiState::Configured);
+    c.handle(UiIntent::Switch);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Ok(Report {
+            record: RecordDiagnostic::Ready {
+                boot_id: BootId(7),
+                os: Os::Linux,
+            },
+            stages: vec![
+                Stage::TargetValidated,
+                Stage::BootNextVerified,
+                Stage::RebootAccepted,
+            ],
+            ..report()
+        }),
+    );
+    assert_eq!(
+        *h.calls.lock().unwrap(),
+        vec![
+            Request::Inspect,
+            Request::Inspect,
+            Request::Configure {
+                boot_id: BootId(7),
+                os: Os::Linux,
+            },
+            Request::Switch { os: Os::Linux },
+        ]
+    );
+    assert_eq!(c.state(), &UiState::RebootRequested);
+}
+
+#[test]
 fn pre_send_native_io_preserves_fixed_stage_and_win32_code_for_diagnosis() {
     let (mut c, h, e, cache) = setup(FakeCache::default());
     c.handle(UiIntent::Inspect);
@@ -777,6 +843,7 @@ fn completion_notifies_but_only_poll_mutates_ui_state() {
         e.clone(),
         FakeCache::default(),
         Arc::new(move || *w.lock().unwrap() += 1),
+        Os::Windows,
     );
     c.handle(UiIntent::Inspect);
     h.replies.lock().unwrap().push_back(Ok(report()));
@@ -817,7 +884,13 @@ fn executor_failure_is_before_send_and_never_runs_helper() {
         }
     }
     let h = FakeHelper::default();
-    let mut c = Controller::new(h.clone(), Reject, FakeCache::default(), Arc::new(|| {}));
+    let mut c = Controller::new(
+        h.clone(),
+        Reject,
+        FakeCache::default(),
+        Arc::new(|| {}),
+        Os::Windows,
+    );
     c.handle(UiIntent::Switch);
     assert_eq!(c.state(), &UiState::Failed);
     assert!(c.diagnostic().contains("BeforeSend"));
@@ -843,6 +916,7 @@ fn thread_executor_runs_only_fake_helper_away_from_ui_thread() {
         Arc::new(move || {
             wake_tx.send(()).unwrap();
         }),
+        Os::Windows,
     );
     c.handle(UiIntent::Inspect);
     assert_ne!(
@@ -1157,7 +1231,7 @@ fn inspect_changed_target_allows_fresh_explicit_reselection_but_never_switch() {
         assert!(c.select(BootId(7)));
         c.handle(UiIntent::Configure(BootId(7), Os::Windows));
         assert!(e.0.lock().unwrap().is_empty());
-        c.confirm_windows(true);
+        c.confirm_target(true);
         assert!(c.can_configure());
         c.handle(UiIntent::Configure(BootId(7), Os::Windows));
         finish(

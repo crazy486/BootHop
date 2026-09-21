@@ -110,9 +110,16 @@ pub struct Controller<H, E, C> {
     pending_action: Option<RequestAction>,
     unknown_action: Option<RequestAction>,
     reboot_rejected: bool,
+    target_os: Os,
 }
 impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
-    pub fn new(helper: H, executor: E, cache: C, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub fn new(
+        helper: H,
+        executor: E,
+        cache: C,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        target_os: Os,
+    ) -> Self {
         let (state, target, warning) = match cache.load() {
             Ok(Some(target)) => (UiState::CachedTarget(target.clone()), Some(target), None),
             Ok(None) => (UiState::Unconfigured, None, None),
@@ -139,6 +146,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             pending_action: None,
             unknown_action: None,
             reboot_rejected: false,
+            target_os,
         }
     }
     pub fn state(&self) -> &UiState {
@@ -207,7 +215,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             .map(|c| c.boot_id);
         self.selected.is_some()
     }
-    pub fn confirm_windows(&mut self, confirmed: bool) {
+    pub fn confirm_target(&mut self, confirmed: bool) {
         if self.can_select() {
             self.confirmed = confirmed && self.selected.is_some();
         }
@@ -218,7 +226,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
         match self.state {
             UiState::Unconfigured if self.inspected => {
-                "检查完成：未发现登记记录。请选择并确认 Windows；未验证启动链。"
+                "检查完成：未发现登记记录。请选择并确认目标操作系统；未验证启动链。"
             }
             UiState::Unconfigured => "本地缓存中没有目标；尚未检查受保护配置。请主动检查。",
             UiState::CachedTarget(_) => "缓存状态，切换时将重新验证",
@@ -259,9 +267,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
         }
         let request = match intent {
             UiIntent::Inspect => Request::Inspect,
-            UiIntent::Switch if self.can_switch() => Request::Switch { os: Os::Windows },
+            UiIntent::Switch if self.can_switch() => Request::Switch { os: self.target_os },
             UiIntent::Switch => return,
-            UiIntent::Configure(_, os) if os != Os::Windows => {
+            UiIntent::Configure(_, os) if os != self.target_os => {
                 self.fail(ClientError::Domain(Error::UnexpectedOs));
                 return;
             }
@@ -323,7 +331,7 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
     }
     fn success(&mut self, request: Request, report: Report) {
         // Validate the entire request/report relationship before trusting any returned display data.
-        let Some(outcome) = validate_report(request, &report) else {
+        let Some(outcome) = validate_report(request, &report, self.target_os) else {
             self.fail(ClientError::UnknownAfterSend(TransportError::Protocol));
             return;
         };
@@ -449,19 +457,16 @@ enum ValidatedReport {
     RebootUnknown,
 }
 
-/// Public report semantics guaranteed by core::execute on a Linux host.
+/// Public report semantics guaranteed by core::execute for the configured opposite-OS target.
 /// The GUI does not independently validate or receive identity material. For a
 /// successful Inspect of an existing Ready record, it trusts the privileged
 /// helper/core contract that saved and live canonical identities matched; a
 /// Missing-record Inspect is discovery only and has no saved identity to match.
-fn validate_report(request: Request, report: &Report) -> Option<ValidatedReport> {
+fn validate_report(request: Request, report: &Report, target_os: Os) -> Option<ValidatedReport> {
     let target = match report.record {
         RecordDiagnostic::Missing => None,
-        RecordDiagnostic::Ready {
-            boot_id,
-            os: Os::Windows,
-        } => Some(boot_id),
-        RecordDiagnostic::Ready { os: Os::Linux, .. } => return None,
+        RecordDiagnostic::Ready { boot_id, os } if os == target_os => Some(boot_id),
+        RecordDiagnostic::Ready { .. } => return None,
     };
     let supported_target = target.is_some_and(|id| {
         let mut matches = report
@@ -481,29 +486,30 @@ fn validate_report(request: Request, report: &Report) -> Option<ValidatedReport>
                 ValidatedReport::Inspected
             })
         }
-        Request::Configure {
-            boot_id,
-            os: Os::Windows,
-        } if target == Some(boot_id)
-            && supported_target
-            && report.stages == [Stage::TargetValidated] =>
+        Request::Configure { boot_id, os }
+            if os == target_os
+                && target == Some(boot_id)
+                && supported_target
+                && report.stages == [Stage::TargetValidated] =>
         {
             Some(ValidatedReport::Configured)
         }
-        Request::Switch { os: Os::Windows } if supported_target => match report.stages.as_slice() {
-            [
-                Stage::TargetValidated,
-                Stage::BootNextVerified,
-                Stage::RebootAccepted,
-            ] => Some(ValidatedReport::RebootAccepted),
-            [
-                Stage::TargetValidated,
-                Stage::BootNextVerified,
-                Stage::RebootUnknown,
-                Stage::ResidualPossible,
-            ] => Some(ValidatedReport::RebootUnknown),
-            _ => None,
-        },
+        Request::Switch { os } if os == target_os && supported_target => {
+            match report.stages.as_slice() {
+                [
+                    Stage::TargetValidated,
+                    Stage::BootNextVerified,
+                    Stage::RebootAccepted,
+                ] => Some(ValidatedReport::RebootAccepted),
+                [
+                    Stage::TargetValidated,
+                    Stage::BootNextVerified,
+                    Stage::RebootUnknown,
+                    Stage::ResidualPossible,
+                ] => Some(ValidatedReport::RebootUnknown),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
