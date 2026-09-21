@@ -13,11 +13,29 @@ pub struct SpawnSpec {
     pub environment: Vec<(&'static str, &'static str)>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeIoStage {
+    OpenHelper,
+    ReadHelperIdentity,
+    ResolveHelperPath,
+    OpenProcessToken,
+    SizeTokenUser,
+    ReadTokenUser,
+    ValidateTokenUser,
+    ConvertUserSid,
+    ValidateUserSidText,
+    FreeUserSid,
+    ConvertPipeSecurity,
+    FreePipeSecurity,
+    CreateNamedPipe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportError {
     Launch,
     Cancelled,
     Authentication,
     Io,
+    NativeIo { stage: NativeIoStage, raw_code: u32 },
     Timeout,
     Exit,
     Protocol,

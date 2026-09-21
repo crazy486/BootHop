@@ -5,7 +5,7 @@ use boothop_core::{
 use boothop_gui::{
     cache::{Cache, CacheError, CachedTarget},
     controller::{Controller, Executor, Helper, Job, ScheduleError, UiIntent, UiState},
-    helper_client::{ClientError, TransportError},
+    helper_client::{ClientError, NativeIoStage, TransportError},
 };
 use std::{
     collections::VecDeque,
@@ -574,6 +574,29 @@ fn client_failures_preserve_phase_and_dont_replay() {
         assert!(e.0.lock().unwrap().is_empty());
         assert!(cache.writes.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn pre_send_native_io_preserves_fixed_stage_and_win32_code_for_diagnosis() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::BeforeSend(TransportError::NativeIo {
+            stage: NativeIoStage::CreateNamedPipe,
+            raw_code: 5,
+        })),
+    );
+
+    assert_eq!(c.state(), &UiState::Failed);
+    assert_eq!(
+        c.diagnostic(),
+        "BeforeSend: NativeIo { stage: CreateNamedPipe, raw_code: 5 }"
+    );
+    assert!(e.0.lock().unwrap().is_empty());
+    assert!(cache.writes.lock().unwrap().is_empty());
 }
 
 #[test]

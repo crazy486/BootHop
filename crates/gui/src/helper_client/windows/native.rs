@@ -2,7 +2,7 @@
 //! on non-Windows hosts, and all policy inputs are fixed by the parent module.
 
 use super::{FileIdentity, HELPER_IMAGE_PATH, WatchdogState, WindowsLaunchSpec, WindowsPipeSpec};
-use crate::helper_client::{Event, TransportError};
+use crate::helper_client::{Event, NativeIoStage, TransportError};
 use boothop_protocol::RequestId;
 use std::{
     ptr::null_mut,
@@ -92,6 +92,13 @@ fn free_local(ptr: *mut core::ffi::c_void) -> Result<(), TransportError> {
         Ok(())
     } else {
         Err(TransportError::Io)
+    }
+}
+
+fn native_io(stage: NativeIoStage) -> TransportError {
+    TransportError::NativeIo {
+        stage,
+        raw_code: unsafe { GetLastError() },
     }
 }
 
@@ -354,15 +361,13 @@ impl SystemWindowsBoundary {
             )
         };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Authentication);
+            return Err(native_io(NativeIoStage::OpenHelper));
         }
         let handle = Handle(handle);
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         let got_info = unsafe { GetFileInformationByHandle(handle.0, &mut info) } != 0;
         if !got_info {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Authentication);
+            return Err(native_io(NativeIoStage::ReadHelperIdentity));
         }
         if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
             || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -379,8 +384,7 @@ impl SystemWindowsBoundary {
             )
         };
         if count == 0 || count as usize >= canonical.len() {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Authentication);
+            return Err(native_io(NativeIoStage::ResolveHelperPath));
         }
         canonical.truncate(count as usize);
         let canonical =
@@ -537,8 +541,7 @@ impl SystemWindowsBoundary {
         let process = unsafe { GetCurrentProcess() };
         let mut token = null_mut();
         if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Io);
+            return Err(native_io(NativeIoStage::OpenProcessToken));
         }
         let token = Handle(token);
         let mut size = 0;
@@ -546,7 +549,7 @@ impl SystemWindowsBoundary {
             GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut size);
         }
         if size == 0 {
-            return Err(TransportError::Io);
+            return Err(native_io(NativeIoStage::SizeTokenUser));
         }
         let mut raw = vec![0u64; (size as usize).div_ceil(std::mem::size_of::<u64>())];
         let token_info_ok = unsafe {
@@ -559,13 +562,15 @@ impl SystemWindowsBoundary {
             )
         } != 0;
         if !token_info_ok {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Io);
+            return Err(native_io(NativeIoStage::ReadTokenUser));
         }
         if (size as usize) < std::mem::size_of::<TOKEN_USER>()
             || (size as usize) > raw.len() * std::mem::size_of::<u64>()
         {
-            return Err(TransportError::Io);
+            return Err(TransportError::NativeIo {
+                stage: NativeIoStage::ValidateTokenUser,
+                raw_code: 0,
+            });
         }
         let user = unsafe { &*raw.as_ptr().cast::<TOKEN_USER>() };
         let available = size as usize;
@@ -579,11 +584,13 @@ impl SystemWindowsBoundary {
         let mut text = null_mut();
         let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } != 0;
         if !converted {
-            let _error = unsafe { GetLastError() };
-            return Err(TransportError::Io);
+            return Err(native_io(NativeIoStage::ConvertUserSid));
         }
         if text.is_null() {
-            return Err(TransportError::Io);
+            return Err(TransportError::NativeIo {
+                stage: NativeIoStage::ValidateUserSidText,
+                raw_code: 0,
+            });
         }
         let mut len = 0;
         unsafe {
@@ -592,11 +599,20 @@ impl SystemWindowsBoundary {
             }
         }
         if len == 184 {
-            free_local(text.cast())?;
-            return Err(TransportError::Io);
+            free_local(text.cast()).map_err(|_| TransportError::NativeIo {
+                stage: NativeIoStage::FreeUserSid,
+                raw_code: 0,
+            })?;
+            return Err(TransportError::NativeIo {
+                stage: NativeIoStage::ValidateUserSidText,
+                raw_code: 0,
+            });
         }
         let value = unsafe { String::from_utf16(std::slice::from_raw_parts(text, len)) };
-        free_local(text.cast())?;
+        free_local(text.cast()).map_err(|_| TransportError::NativeIo {
+            stage: NativeIoStage::FreeUserSid,
+            raw_code: 0,
+        })?;
         value.map_err(|_| TransportError::Io)
     }
 
@@ -942,9 +958,12 @@ impl SystemWindowsBoundary {
             )
         } == 0
         {
-            let _error = unsafe { GetLastError() };
+            let error = unsafe { GetLastError() };
             let _ = free_local(descriptor.cast());
-            return Err(TransportError::Io);
+            return Err(TransportError::NativeIo {
+                stage: NativeIoStage::ConvertPipeSecurity,
+                raw_code: error,
+            });
         }
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -968,9 +987,16 @@ impl SystemWindowsBoundary {
         } else {
             0
         };
-        let descriptor_result = free_local(descriptor.cast());
+        let descriptor_result =
+            free_local(descriptor.cast()).map_err(|_| TransportError::NativeIo {
+                stage: NativeIoStage::FreePipeSecurity,
+                raw_code: 0,
+            });
         if pipe.is_null() || pipe == INVALID_HANDLE_VALUE {
-            return Err(descriptor_result.err().unwrap_or(TransportError::Io));
+            return Err(descriptor_result.err().unwrap_or(TransportError::NativeIo {
+                stage: NativeIoStage::CreateNamedPipe,
+                raw_code: pipe_error,
+            }));
         }
         let pipe = Handle(pipe);
         if let Err(error) = descriptor_result {
