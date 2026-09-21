@@ -275,7 +275,10 @@ fn fixed_windows_launch_and_pipe_specs_bind_request_id_without_generic_paths() {
     assert!(pipe.first_instance());
     assert!(pipe.reject_remote());
     assert!(pipe.is_secure());
-    assert!(pipe.dacl().contains("S-1-5-21-1-2-3-1001"));
+    assert_eq!(
+        pipe.dacl(),
+        "D:P(A;;GRGW;;;S-1-5-21-1-2-3-1001)(A;;GRGW;;;SY)(A;;GRGW;;;BA)"
+    );
 }
 
 #[test]

@@ -15,7 +15,7 @@ pub const HELPER_IMAGE_PATH: &str = r"C:\Program Files\BootHop\boothop-helper.ex
 pub const GUI_EXECUTION_LEVEL: &str = "asInvoker";
 pub const HELPER_RUNAS_VERB: &str = "runas";
 pub const PIPE_NAME_PREFIX: &str = r"\\.\pipe\BootHop.";
-pub const PIPE_DACL_SUFFIX: &str = ")(A;;GRGW;;;SY)(A;;GRGW;;;BA)";
+pub const PIPE_DACL_SUFFIX: &str = "(A;;GRGW;;;SY)(A;;GRGW;;;BA)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsLaunchSpec {
