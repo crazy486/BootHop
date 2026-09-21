@@ -361,13 +361,13 @@ impl SystemWindowsBoundary {
             )
         };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(native_io(NativeIoStage::OpenHelper));
+            return Err(native_io(NativeIoStage::HelperFileOpen));
         }
         let handle = Handle(handle);
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         let got_info = unsafe { GetFileInformationByHandle(handle.0, &mut info) } != 0;
         if !got_info {
-            return Err(native_io(NativeIoStage::ReadHelperIdentity));
+            return Err(native_io(NativeIoStage::HelperIdentityRead));
         }
         if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
             || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -384,7 +384,7 @@ impl SystemWindowsBoundary {
             )
         };
         if count == 0 || count as usize >= canonical.len() {
-            return Err(native_io(NativeIoStage::ResolveHelperPath));
+            return Err(native_io(NativeIoStage::HelperPathResolve));
         }
         canonical.truncate(count as usize);
         let canonical =
@@ -541,7 +541,7 @@ impl SystemWindowsBoundary {
         let process = unsafe { GetCurrentProcess() };
         let mut token = null_mut();
         if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-            return Err(native_io(NativeIoStage::OpenProcessToken));
+            return Err(native_io(NativeIoStage::ProcessTokenOpen));
         }
         let token = Handle(token);
         let mut size = 0;
@@ -549,7 +549,7 @@ impl SystemWindowsBoundary {
             GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut size);
         }
         if size == 0 {
-            return Err(native_io(NativeIoStage::SizeTokenUser));
+            return Err(native_io(NativeIoStage::TokenUserSize));
         }
         let mut raw = vec![0u64; (size as usize).div_ceil(std::mem::size_of::<u64>())];
         let token_info_ok = unsafe {
@@ -562,13 +562,13 @@ impl SystemWindowsBoundary {
             )
         } != 0;
         if !token_info_ok {
-            return Err(native_io(NativeIoStage::ReadTokenUser));
+            return Err(native_io(NativeIoStage::TokenUserRead));
         }
         if (size as usize) < std::mem::size_of::<TOKEN_USER>()
             || (size as usize) > raw.len() * std::mem::size_of::<u64>()
         {
             return Err(TransportError::NativeIo {
-                stage: NativeIoStage::ValidateTokenUser,
+                stage: NativeIoStage::TokenUserValidate,
                 raw_code: 0,
             });
         }
@@ -584,11 +584,11 @@ impl SystemWindowsBoundary {
         let mut text = null_mut();
         let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } != 0;
         if !converted {
-            return Err(native_io(NativeIoStage::ConvertUserSid));
+            return Err(native_io(NativeIoStage::UserSidFormat));
         }
         if text.is_null() {
             return Err(TransportError::NativeIo {
-                stage: NativeIoStage::ValidateUserSidText,
+                stage: NativeIoStage::UserSidValidate,
                 raw_code: 0,
             });
         }
@@ -600,17 +600,17 @@ impl SystemWindowsBoundary {
         }
         if len == 184 {
             free_local(text.cast()).map_err(|_| TransportError::NativeIo {
-                stage: NativeIoStage::FreeUserSid,
+                stage: NativeIoStage::UserSidRelease,
                 raw_code: 0,
             })?;
             return Err(TransportError::NativeIo {
-                stage: NativeIoStage::ValidateUserSidText,
+                stage: NativeIoStage::UserSidValidate,
                 raw_code: 0,
             });
         }
         let value = unsafe { String::from_utf16(std::slice::from_raw_parts(text, len)) };
         free_local(text.cast()).map_err(|_| TransportError::NativeIo {
-            stage: NativeIoStage::FreeUserSid,
+            stage: NativeIoStage::UserSidRelease,
             raw_code: 0,
         })?;
         value.map_err(|_| TransportError::Io)
@@ -961,7 +961,7 @@ impl SystemWindowsBoundary {
             let error = unsafe { GetLastError() };
             let _ = free_local(descriptor.cast());
             return Err(TransportError::NativeIo {
-                stage: NativeIoStage::ConvertPipeSecurity,
+                stage: NativeIoStage::PipeSecurityBuild,
                 raw_code: error,
             });
         }
@@ -989,12 +989,12 @@ impl SystemWindowsBoundary {
         };
         let descriptor_result =
             free_local(descriptor.cast()).map_err(|_| TransportError::NativeIo {
-                stage: NativeIoStage::FreePipeSecurity,
+                stage: NativeIoStage::PipeSecurityRelease,
                 raw_code: 0,
             });
         if pipe.is_null() || pipe == INVALID_HANDLE_VALUE {
             return Err(descriptor_result.err().unwrap_or(TransportError::NativeIo {
-                stage: NativeIoStage::CreateNamedPipe,
+                stage: NativeIoStage::PipeCreate,
                 raw_code: pipe_error,
             }));
         }

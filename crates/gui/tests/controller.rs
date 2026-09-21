@@ -585,7 +585,7 @@ fn pre_send_native_io_preserves_fixed_stage_and_win32_code_for_diagnosis() {
         &h,
         &e,
         Err(ClientError::BeforeSend(TransportError::NativeIo {
-            stage: NativeIoStage::CreateNamedPipe,
+            stage: NativeIoStage::PipeCreate,
             raw_code: 5,
         })),
     );
@@ -593,7 +593,7 @@ fn pre_send_native_io_preserves_fixed_stage_and_win32_code_for_diagnosis() {
     assert_eq!(c.state(), &UiState::Failed);
     assert_eq!(
         c.diagnostic(),
-        "BeforeSend: NativeIo { stage: CreateNamedPipe, raw_code: 5 }"
+        "BeforeSend: NativeIo { stage: PipeCreate, raw_code: 5 }"
     );
     assert!(e.0.lock().unwrap().is_empty());
     assert!(cache.writes.lock().unwrap().is_empty());

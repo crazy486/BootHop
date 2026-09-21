@@ -14,19 +14,19 @@ pub struct SpawnSpec {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeIoStage {
-    OpenHelper,
-    ReadHelperIdentity,
-    ResolveHelperPath,
-    OpenProcessToken,
-    SizeTokenUser,
-    ReadTokenUser,
-    ValidateTokenUser,
-    ConvertUserSid,
-    ValidateUserSidText,
-    FreeUserSid,
-    ConvertPipeSecurity,
-    FreePipeSecurity,
-    CreateNamedPipe,
+    HelperFileOpen,
+    HelperIdentityRead,
+    HelperPathResolve,
+    ProcessTokenOpen,
+    TokenUserSize,
+    TokenUserRead,
+    TokenUserValidate,
+    UserSidFormat,
+    UserSidValidate,
+    UserSidRelease,
+    PipeSecurityBuild,
+    PipeSecurityRelease,
+    PipeCreate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
