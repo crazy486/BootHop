@@ -630,10 +630,14 @@ impl SystemWindowsBoundary {
             ..Default::default()
         };
         if unsafe { ShellExecuteExW(&mut info) } == 0 {
-            return if unsafe { GetLastError() } == ERROR_CANCELLED {
+            let error = unsafe { GetLastError() };
+            return if error == ERROR_CANCELLED {
                 Err(TransportError::Cancelled)
             } else {
-                Err(TransportError::Launch)
+                Err(TransportError::NativeIo {
+                    stage: NativeIoStage::HelperLaunch,
+                    raw_code: error,
+                })
             };
         }
         if info.hProcess.is_null() {

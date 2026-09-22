@@ -14,6 +14,7 @@ pub struct SpawnSpec {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeIoStage {
+    HelperLaunch,
     HelperFileOpen,
     HelperIdentityRead,
     HelperPathResolve,

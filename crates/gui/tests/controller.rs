@@ -666,6 +666,29 @@ fn pre_send_native_io_preserves_fixed_stage_and_win32_code_for_diagnosis() {
 }
 
 #[test]
+fn helper_launch_failure_preserves_application_control_code_before_send() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::BeforeSend(TransportError::NativeIo {
+            stage: NativeIoStage::HelperLaunch,
+            raw_code: 4551,
+        })),
+    );
+
+    assert_eq!(c.state(), &UiState::Failed);
+    assert_eq!(
+        c.diagnostic(),
+        "BeforeSend: NativeIo { stage: HelperLaunch, raw_code: 4551 }"
+    );
+    assert!(e.0.lock().unwrap().is_empty());
+    assert!(cache.writes.lock().unwrap().is_empty());
+}
+
+#[test]
 fn authorization_launch_exit_127_is_neutral_and_explicitly_not_sent() {
     let (mut c, h, e, cache) = setup(FakeCache::default());
     c.handle(UiIntent::Inspect);
