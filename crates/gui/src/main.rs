@@ -3,7 +3,9 @@ mod linux {
     use boothop_core::{BootId, Classification, Os};
     use boothop_gui::{
         cache::{Cache, LinuxCache, safe_description},
-        controller::{Controller, Executor, Helper, ThreadExecutor, UiIntent},
+        controller::{
+            Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent,
+        },
         helper_client::{HelperClient, linux::SystemProcess},
         ui::{AppWindow, CandidateRow},
     };
@@ -86,6 +88,24 @@ mod linux {
     }
 
     pub fn run() -> Result<(), slint::PlatformError> {
+        let cache = LinuxCache::from_environment(
+            std::env::var_os("XDG_STATE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        );
+        // The ordinary launch gets one synchronous Switch attempt before any
+        // window exists. Setup mode and every non-accepted outcome fall back
+        // to the existing UI with the controller state and diagnostics intact.
+        let mut controller = Controller::new(
+            HelperClient::<SystemProcess>::system(),
+            ThreadExecutor,
+            cache,
+            Arc::new(|| {}),
+            Os::Windows,
+        );
+        if controller.startup(super::startup_mode()) == StartupDisposition::Exit {
+            return Ok(());
+        }
+
         // Fix the approved runtime backend/renderer rather than taking renderer overrides.
         slint::BackendSelector::new()
             .backend_name("winit".into())
@@ -96,18 +116,8 @@ mod linux {
         let wake = Arc::new(move || {
             let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_completed());
         });
-        let cache = LinuxCache::from_environment(
-            std::env::var_os("XDG_STATE_HOME").as_deref(),
-            std::env::var_os("HOME").as_deref(),
-        );
-        // This constructor only reads local cache. A new process boundary is lazy until run(Request).
-        let controller = Rc::new(RefCell::new(Controller::new(
-            HelperClient::<SystemProcess>::system(),
-            ThreadExecutor,
-            cache,
-            wake,
-            Os::Windows,
-        )));
+        controller.set_wake(wake);
+        let controller = Rc::new(RefCell::new(controller));
         render(&ui, &controller.borrow());
         {
             let c = controller.clone();
@@ -183,12 +193,26 @@ fn main() -> Result<(), slint::PlatformError> {
     linux::run()
 }
 
+fn startup_mode() -> boothop_gui::controller::StartupMode {
+    use boothop_gui::controller::StartupMode;
+
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next()) {
+        (None, None) => StartupMode::QuickHop,
+        (Some(arg), None) if arg == "--setup" || arg == "--settings" => StartupMode::Setup,
+        // Unknown or conflicting arguments fail safe to the visible setup UI.
+        _ => StartupMode::Setup,
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use boothop_core::{BootId, Classification, Os};
     use boothop_gui::{
         cache::{Cache, WindowsCache, safe_description},
-        controller::{Controller, Executor, Helper, ThreadExecutor, UiIntent},
+        controller::{
+            Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent,
+        },
         helper_client::windows::WindowsClient,
         ui::{AppWindow, CandidateRow},
     };
@@ -270,6 +294,18 @@ mod windows {
     }
 
     pub fn run() -> Result<(), slint::PlatformError> {
+        let cache = WindowsCache::from_local_app_data();
+        let mut controller = Controller::new(
+            WindowsClient::system(),
+            ThreadExecutor,
+            cache,
+            Arc::new(|| {}),
+            Os::Linux,
+        );
+        if controller.startup(super::startup_mode()) == StartupDisposition::Exit {
+            return Ok(());
+        }
+
         slint::BackendSelector::new()
             .backend_name("winit".into())
             .renderer_name("femtovg".into())
@@ -279,14 +315,8 @@ mod windows {
         let wake = Arc::new(move || {
             let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_completed());
         });
-        let cache = WindowsCache::from_local_app_data();
-        let controller = Rc::new(RefCell::new(Controller::new(
-            WindowsClient::system(),
-            ThreadExecutor,
-            cache,
-            wake,
-            Os::Linux,
-        )));
+        controller.set_wake(wake);
+        let controller = Rc::new(RefCell::new(controller));
         render(&ui, &controller.borrow());
         {
             let c = controller.clone();

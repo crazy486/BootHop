@@ -4,7 +4,10 @@ use boothop_core::{
 };
 use boothop_gui::{
     cache::{Cache, CacheError, CachedTarget},
-    controller::{Controller, Executor, Helper, Job, ScheduleError, UiIntent, UiState},
+    controller::{
+        Controller, Executor, Helper, Job, ScheduleError, StartupDisposition, StartupMode,
+        UiIntent, UiState,
+    },
     helper_client::{ClientError, NativeIoStage, TransportError},
 };
 use std::{
@@ -148,7 +151,7 @@ fn nested(error: Error) -> Error {
 }
 
 #[test]
-fn ordinary_open_never_calls_helper() {
+fn controller_construction_never_calls_helper() {
     let (c, h, e, _) = setup(FakeCache::default());
     assert_eq!(c.state(), &UiState::Unconfigured);
     assert!(c.status().contains("本地缓存"));
@@ -578,6 +581,127 @@ fn client_failures_preserve_phase_and_dont_replay() {
         assert!(e.0.lock().unwrap().is_empty());
         assert!(cache.writes.lock().unwrap().is_empty());
     }
+}
+
+fn cached(os: Os) -> FakeCache {
+    FakeCache {
+        loaded: Ok(Some(CachedTarget {
+            boot_id: BootId(7),
+            os,
+            description_utf16: Some("configured target".encode_utf16().collect()),
+        })),
+        ..FakeCache::default()
+    }
+}
+
+#[test]
+fn quick_hop_unconfigured_and_setup_modes_show_ui_without_switch() {
+    let (mut unconfigured, helper, executor, _) = setup(FakeCache::default());
+    assert_eq!(
+        unconfigured.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(executor.0.lock().unwrap().is_empty());
+
+    let (mut unreadable, helper, executor, _) = setup(FakeCache {
+        loaded: Err(CacheError::Unavailable),
+        ..FakeCache::default()
+    });
+    assert_eq!(
+        unreadable.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert_eq!(unreadable.state(), &UiState::Failed);
+    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(executor.0.lock().unwrap().is_empty());
+
+    let (mut configured, helper, executor, _) = setup(cached(Os::Windows));
+    assert_eq!(
+        configured.startup(StartupMode::Setup),
+        StartupDisposition::ShowWindow
+    );
+    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(executor.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quick_hop_configured_sends_exactly_one_switch_and_exits_on_acceptance() {
+    let (mut c, h, e, _) = setup(cached(Os::Windows));
+    h.replies
+        .lock()
+        .unwrap()
+        .push_back(Ok(switched(Stage::RebootAccepted)));
+
+    assert_eq!(
+        c.startup(StartupMode::QuickHop),
+        StartupDisposition::Exit
+    );
+    assert_eq!(
+        c.startup(StartupMode::QuickHop),
+        StartupDisposition::Exit
+    );
+    assert_eq!(
+        *h.calls.lock().unwrap(),
+        vec![Request::Switch { os: Os::Windows }]
+    );
+    assert!(e.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quick_hop_failure_or_wrong_os_shows_ui_without_retry() {
+    let (mut failed, helper, executor, _) = setup(cached(Os::Windows));
+    helper
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Err(ClientError::Domain(Error::BootNextConflict)));
+    assert_eq!(
+        failed.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert_eq!(failed.state(), &UiState::Failed);
+    assert_eq!(
+        *helper.calls.lock().unwrap(),
+        vec![Request::Switch { os: Os::Windows }]
+    );
+    assert!(executor.0.lock().unwrap().is_empty());
+    assert_eq!(
+        failed.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert_eq!(helper.calls.lock().unwrap().len(), 1);
+
+    let (mut unknown, helper, executor, _) = setup(cached(Os::Windows));
+    helper
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Err(ClientError::UnknownAfterSend(
+            TransportError::Timeout,
+        )));
+    assert_eq!(
+        unknown.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert_eq!(unknown.state(), &UiState::UnknownResult);
+    assert_eq!(helper.calls.lock().unwrap().len(), 1);
+    assert!(executor.0.lock().unwrap().is_empty());
+    assert_eq!(
+        unknown.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert_eq!(helper.calls.lock().unwrap().len(), 1);
+
+    let (mut wrong_os, helper, executor, _) = setup(cached(Os::Linux));
+    assert_eq!(
+        wrong_os.startup(StartupMode::QuickHop),
+        StartupDisposition::ShowWindow
+    );
+    assert_eq!(wrong_os.state(), &UiState::Failed);
+    assert!(wrong_os.diagnostic().contains("UnexpectedOs"));
+    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(executor.0.lock().unwrap().is_empty());
 }
 
 #[test]

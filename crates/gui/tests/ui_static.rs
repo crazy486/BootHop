@@ -64,6 +64,35 @@ fn linux_entry_point_wires_explicit_callbacks_and_event_loop_completions() {
 }
 
 #[test]
+fn entry_point_runs_quick_hop_before_constructing_the_window() {
+    let main =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    for boundary in [
+        "StartupMode::QuickHop",
+        "StartupMode::Setup",
+        "--setup",
+        "--settings",
+        "StartupDisposition::Exit",
+        ".startup(super::startup_mode())",
+    ] {
+        assert!(main.contains(boundary), "missing {boundary}");
+    }
+
+    for platform in ["mod linux", "mod windows"] {
+        let platform_start = main.find(platform).unwrap();
+        let platform_source = &main[platform_start..];
+        let startup = platform_source
+            .find(".startup(super::startup_mode())")
+            .unwrap();
+        let window = platform_source.find("AppWindow::new()").unwrap();
+        assert!(
+            startup < window,
+            "{platform} constructs a window before Quick Hop"
+        );
+    }
+}
+
+#[test]
 fn windows_entry_point_wires_helper_client_and_untrusted_local_cache_only() {
     let main =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();

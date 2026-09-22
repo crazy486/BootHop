@@ -61,6 +61,18 @@ pub enum UiIntent {
     Configure(BootId, Os),
     Switch,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupMode {
+    QuickHop,
+    Setup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupDisposition {
+    Exit,
+    ShowWindow,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FailureNotice {
     PreHelloAuthorizationOrLaunch { raw_code: i32 },
@@ -170,6 +182,11 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
     pub fn cache_warning(&self) -> Option<&CacheError> {
         self.cache_warning.as_ref()
     }
+
+    pub fn set_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.wake = wake;
+    }
+
     fn inspect_only(&self) -> bool {
         if self.state == UiState::TargetChanged {
             return !self.inspected;
@@ -261,6 +278,56 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             }
         }
     }
+    /// Run the configured daily path before constructing or showing the UI.
+    /// The ordinary-user cache is only a routing hint: Switch itself reloads
+    /// and validates the protected record and live firmware in the helper.
+    pub fn startup(&mut self, mode: StartupMode) -> StartupDisposition {
+        if mode == StartupMode::Setup {
+            return StartupDisposition::ShowWindow;
+        }
+        if self.state == UiState::RebootRequested {
+            return StartupDisposition::Exit;
+        }
+        let UiState::CachedTarget(cached) = &self.state else {
+            return StartupDisposition::ShowWindow;
+        };
+        if cached.os != self.target_os {
+            self.fail(ClientError::Domain(Error::UnexpectedOs));
+            return StartupDisposition::ShowWindow;
+        }
+
+        let request = Request::Switch { os: self.target_os };
+        self.failure_notice = None;
+        self.pending_action = Some(RequestAction::Switch);
+        self.unknown_action = None;
+        self.reboot_rejected = false;
+        self.state = UiState::Busy;
+        self.selected = None;
+        self.confirmed = false;
+        self.diagnostic.clear();
+        self.cache_warning = None;
+
+        let result = {
+            let helper = self.helper.clone();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                helper
+                    .lock()
+                    .map_err(|_| ClientError::BeforeSend(TransportError::Launch))?
+                    .run(request)
+            }))
+            .unwrap_or(Err(ClientError::UnknownAfterSend(TransportError::Io)))
+        };
+        match result {
+            Ok(report) => self.success(request, report),
+            Err(error) => self.fail(error),
+        }
+        if self.state == UiState::RebootRequested {
+            StartupDisposition::Exit
+        } else {
+            StartupDisposition::ShowWindow
+        }
+    }
+
     pub fn handle(&mut self, intent: UiIntent) {
         if self.state == UiState::Busy || (self.inspect_only() && intent != UiIntent::Inspect) {
             return;
