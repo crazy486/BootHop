@@ -3,9 +3,7 @@ mod linux {
     use boothop_core::{BootId, Classification, Os};
     use boothop_gui::{
         cache::{Cache, LinuxCache, safe_description},
-        controller::{
-            Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent,
-        },
+        controller::{Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent},
         helper_client::{HelperClient, linux::SystemProcess},
         ui::{AppWindow, CandidateRow},
     };
@@ -210,9 +208,7 @@ mod windows {
     use boothop_core::{BootId, Classification, Os};
     use boothop_gui::{
         cache::{Cache, WindowsCache, safe_description},
-        controller::{
-            Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent,
-        },
+        controller::{Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent},
         helper_client::windows::WindowsClient,
         ui::{AppWindow, CandidateRow},
     };

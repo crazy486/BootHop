@@ -633,14 +633,8 @@ fn quick_hop_configured_sends_exactly_one_switch_and_exits_on_acceptance() {
         .unwrap()
         .push_back(Ok(switched(Stage::RebootAccepted)));
 
-    assert_eq!(
-        c.startup(StartupMode::QuickHop),
-        StartupDisposition::Exit
-    );
-    assert_eq!(
-        c.startup(StartupMode::QuickHop),
-        StartupDisposition::Exit
-    );
+    assert_eq!(c.startup(StartupMode::QuickHop), StartupDisposition::Exit);
+    assert_eq!(c.startup(StartupMode::QuickHop), StartupDisposition::Exit);
     assert_eq!(
         *h.calls.lock().unwrap(),
         vec![Request::Switch { os: Os::Windows }]
@@ -677,9 +671,7 @@ fn quick_hop_failure_or_wrong_os_shows_ui_without_retry() {
         .replies
         .lock()
         .unwrap()
-        .push_back(Err(ClientError::UnknownAfterSend(
-            TransportError::Timeout,
-        )));
+        .push_back(Err(ClientError::UnknownAfterSend(TransportError::Timeout)));
     assert_eq!(
         unknown.startup(StartupMode::QuickHop),
         StartupDisposition::ShowWindow
