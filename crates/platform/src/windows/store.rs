@@ -553,8 +553,6 @@ fn validate_root_security(security: SecurityDescriptor) -> Result<(), Error> {
     if !matches!(security.owner, Owner::System | Owner::Administrators)
         || !security.dacl.system_full_control
         || !security.dacl.administrators_full_control
-        || security.dacl.ordinary_user_mutation
-        || security.dacl.inherited_ordinary_user_mutation
     {
         return Err(policy(POLICY_ERROR));
     }
@@ -613,10 +611,13 @@ const FULL_CONTROL_MASK: u32 = 0x001f01ff;
 // absent: native ACE masks are expected to contain their mapped concrete bits.
 const ROOT_READ_ALLOWED_MASK: u32 = 0x0012_00a9;
 
-/// Reduce an already-parsed native descriptor to closed policy facts. Every
-/// ACE must be understood; no deny, inherited, unknown, duplicate, or extra
-/// right is silently ignored. `allow_root_read` exists only for the known
-/// ProgramData root, whose standard ACL may grant ordinary users read access.
+/// Reduce an already-parsed native descriptor to closed policy facts. The
+/// protected BootHop directory accepts only its exact non-inheriting SYSTEM
+/// and Administrators ACEs. The resolved ProgramData known-folder root is not
+/// itself BootHop's trust boundary: its standard ACL contains inheritable
+/// Creator Owner and Users write ACEs so installers can create protected
+/// children. For that root, require a trusted owner plus SYSTEM and
+/// Administrators full control, but record rather than reject other allow ACEs.
 fn reduce_security_descriptor(
     owner: Owner,
     dacl_present: bool,
@@ -624,22 +625,62 @@ fn reduce_security_descriptor(
     aces: &[AceFact],
     allow_root_read: bool,
 ) -> Result<SecurityDescriptor, i32> {
-    if !matches!(owner, Owner::System | Owner::Administrators)
-        || !dacl_present
-        || aces.is_empty()
-        || (!allow_root_read && !dacl_protected)
-    {
+    if !matches!(owner, Owner::System | Owner::Administrators) || !dacl_present || aces.is_empty() {
+        return Err(POLICY_ERROR);
+    }
+    if allow_root_read {
+        let mut system = false;
+        let mut administrators = false;
+        let mut ordinary_access = false;
+        let mut ordinary_mutation = false;
+        let mut inherited_ordinary_mutation = false;
+        for ace in aces {
+            if ace.kind != AceKind::Allow || ace.mask == 0 {
+                return Err(POLICY_ERROR);
+            }
+            match ace.principal {
+                AcePrincipal::System if ace.mask & FULL_CONTROL_MASK == FULL_CONTROL_MASK => {
+                    system = true;
+                }
+                AcePrincipal::Administrators
+                    if ace.mask & FULL_CONTROL_MASK == FULL_CONTROL_MASK =>
+                {
+                    administrators = true;
+                }
+                _ => {
+                    ordinary_access = true;
+                    let mutating = ace.mask & !ROOT_READ_ALLOWED_MASK != 0;
+                    ordinary_mutation |= mutating;
+                    inherited_ordinary_mutation |= mutating && ace.flags & 0x1f != 0;
+                }
+            }
+        }
+        if !system || !administrators {
+            return Err(POLICY_ERROR);
+        }
+        return Ok(SecurityDescriptor {
+            owner,
+            dacl: Dacl {
+                system_full_control: true,
+                administrators_full_control: true,
+                ordinary_user_access: ordinary_access,
+                ordinary_user_mutation: ordinary_mutation,
+                inherited_ordinary_user_mutation: inherited_ordinary_mutation,
+                explicit: dacl_protected,
+            },
+        });
+    }
+    if !dacl_protected {
         return Err(POLICY_ERROR);
     }
     let mut system = false;
     let mut administrators = false;
-    let mut ordinary = false;
     for ace in aces {
         // OBJECT_INHERIT (0x01), CONTAINER_INHERIT (0x02), NO_PROPAGATE
         // (0x04), INHERIT_ONLY (0x08), INHERITED (0x10), SUCCESS_AUDIT
         // (0x40), FAILURE_AUDIT (0x80), and every unknown combination are
-        // rejected. Protected store ACEs are explicit, non-propagating
-        // allow ACEs only; the root read exception uses the same exact set.
+        // rejected. Protected store ACEs are explicit, non-propagating allow
+        // ACEs only.
         if ace.flags != 0 || ace.kind != AceKind::Allow {
             return Err(POLICY_ERROR);
         }
@@ -647,11 +688,6 @@ fn reduce_security_descriptor(
             AcePrincipal::System if ace.mask == FULL_CONTROL_MASK && !system => system = true,
             AcePrincipal::Administrators if ace.mask == FULL_CONTROL_MASK && !administrators => {
                 administrators = true
-            }
-            AcePrincipal::Ordinary
-                if allow_root_read && ace.mask != 0 && ace.mask & !ROOT_READ_ALLOWED_MASK == 0 =>
-            {
-                ordinary = true
             }
             AcePrincipal::System
             | AcePrincipal::Administrators
@@ -666,14 +702,7 @@ fn reduce_security_descriptor(
     }
     Ok(SecurityDescriptor {
         owner,
-        dacl: if allow_root_read {
-            Dacl {
-                ordinary_user_access: ordinary,
-                ..Dacl::PROGRAM_DATA_ROOT
-            }
-        } else {
-            Dacl::PROTECTED
-        },
+        dacl: Dacl::PROTECTED,
     })
 }
 
@@ -1742,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_parser_rejects_extra_rights_and_allows_only_root_read_ace() {
+    fn protected_descriptor_rejects_extra_rights_and_known_root_records_mutation() {
         let mut extra = exact();
         extra[0].mask |= 0x8000_0000;
         assert!(reduce_security_descriptor(Owner::System, true, true, &extra, false).is_err());
@@ -1750,7 +1779,43 @@ mod tests {
         root.push(ace(AcePrincipal::Ordinary, ROOT_READ_ALLOWED_MASK));
         assert!(reduce_security_descriptor(Owner::System, true, false, &root, true).is_ok());
         root[2].mask |= 2;
-        assert!(reduce_security_descriptor(Owner::System, true, false, &root, true).is_err());
+        let descriptor =
+            reduce_security_descriptor(Owner::System, true, false, &root, true).unwrap();
+        assert!(descriptor.dacl.ordinary_user_mutation);
+    }
+
+    #[test]
+    fn known_program_data_root_accepts_standard_inheritable_creator_and_users_aces() {
+        let standard_root = vec![
+            AceFact {
+                principal: AcePrincipal::Unknown,
+                mask: 0x1000_0000,
+                flags: 0x0b,
+                ..ace(AcePrincipal::Unknown, 0)
+            },
+            AceFact {
+                flags: 0x03,
+                ..ace(AcePrincipal::System, FULL_CONTROL_MASK)
+            },
+            AceFact {
+                flags: 0x03,
+                ..ace(AcePrincipal::Administrators, FULL_CONTROL_MASK)
+            },
+            AceFact {
+                flags: 0x03,
+                ..ace(AcePrincipal::Ordinary, ROOT_READ_ALLOWED_MASK)
+            },
+            AceFact {
+                flags: 0x02,
+                ..ace(AcePrincipal::Ordinary, 0x0012_0116)
+            },
+        ];
+        assert!(
+            reduce_security_descriptor(Owner::System, true, true, &standard_root, true).is_ok()
+        );
+        assert!(
+            reduce_security_descriptor(Owner::System, true, true, &standard_root, false).is_err()
+        );
     }
 
     #[test]
@@ -1765,12 +1830,14 @@ mod tests {
     }
 
     #[test]
-    fn root_ordinary_access_accepts_only_positive_read_allowlist() {
+    fn known_root_accepts_nonzero_allow_rights_but_rejects_zero_and_deny() {
         let mut facts = exact();
         facts.push(ace(AcePrincipal::Ordinary, ROOT_READ_ALLOWED_MASK));
         assert!(reduce_security_descriptor(Owner::System, true, false, &facts, true).is_ok());
-        for forbidden in [
-            0,
+        let mut zero = exact();
+        zero.push(ace(AcePrincipal::Ordinary, 0));
+        assert!(reduce_security_descriptor(Owner::System, true, false, &zero, true).is_err());
+        for allowed in [
             0x0000_0002,
             0x0001_0000,
             0x0004_0000,
@@ -1779,13 +1846,19 @@ mod tests {
             0x2000_0000,
             ROOT_READ_ALLOWED_MASK | 0x0000_0002,
         ] {
-            let mut hostile = exact();
-            hostile.push(ace(AcePrincipal::Ordinary, forbidden));
+            let mut root = exact();
+            root.push(ace(AcePrincipal::Ordinary, allowed));
             assert!(
-                reduce_security_descriptor(Owner::System, true, false, &hostile, true).is_err(),
-                "mask {forbidden:#x} unexpectedly accepted"
+                reduce_security_descriptor(Owner::System, true, false, &root, true).is_ok(),
+                "mask {allowed:#x} unexpectedly rejected"
             );
         }
+        let mut denied = exact();
+        denied.push(AceFact {
+            kind: AceKind::Deny,
+            ..ace(AcePrincipal::Ordinary, ROOT_READ_ALLOWED_MASK)
+        });
+        assert!(reduce_security_descriptor(Owner::System, true, false, &denied, true).is_err());
     }
 
     #[test]
