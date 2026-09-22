@@ -61,3 +61,12 @@ The first recommended command after resume is:
 
 `git fetch origin --tags --prune`
 
+## Quota-pause update — 2026-09-22
+
+- Stop reason: five-hour Codex quota remaining reached 2%, below the authorized 10% graceful-pause threshold. Per the user's latest instruction, **do not shut down this computer**.
+- A fresh serialized (`-j1`) release build was attempted under the ignored private tree as a policy-compliant diagnostic. It progressed beyond the previously observed ICU build-script point but was still blocked by Smart App Control error 4551 at the `getrandom` build script. The blocked hash was not retried and no reputation/policy workaround was attempted.
+- Commit `9614a4aa12691bc7918055fd35bcffbe037f9293` preserves a failed `ShellExecuteExW` code as `BeforeSend: NativeIo { stage: HelperLaunch, raw_code: ... }` instead of collapsing it to `BeforeSend: Launch`. This retains 4551 for bounded diagnosis and does not retry or send a helper request.
+- Local verification for that commit: fmt PASS, GUI check PASS, strict GUI Clippy PASS, and all 48 controller tests PASS.
+- Exact-head GitHub Actions run `35744635424`: Linux PASS and Windows PASS, including release/package/capability/provenance gates.
+- The installed acceptance artifact remains the hash-verified `80f14ea` candidate. Do not install another unsigned artifact merely to seek a different SAC reputation outcome.
+- Current task after resume: obtain a normal trusted Authenticode signing path or a compliant acceptance host. Do not resume real-system Inspect until an exact candidate can start without weakening application-control policy.
