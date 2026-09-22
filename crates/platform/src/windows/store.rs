@@ -780,6 +780,9 @@ pub(crate) mod native {
     fn raw() -> i32 {
         unsafe { GetLastError() as i32 }
     }
+    fn desired_access(write: bool) -> u32 {
+        FILE_GENERIC_READ | if write { FILE_GENERIC_WRITE } else { 0 }
+    }
     fn handle(
         path: PathBuf,
         trusted_root: bool,
@@ -802,7 +805,7 @@ pub(crate) mod native {
         let raw_handle = unsafe {
             CreateFileW(
                 wide_path.as_ptr(),
-                FILE_GENERIC_READ | if write { FILE_GENERIC_WRITE } else { 0 },
+                desired_access(write),
                 share,
                 std::ptr::null(),
                 OPEN_EXISTING,
@@ -890,10 +893,15 @@ pub(crate) mod native {
             .eq_ignore_ascii_case(&parent_path.to_string_lossy()))
     }
 
-    fn open_child(parent: &NativeHandle, name: &str, directory: bool) -> Result<NativeHandle, i32> {
+    fn open_child(
+        parent: &NativeHandle,
+        name: &str,
+        directory: bool,
+        write: bool,
+    ) -> Result<NativeHandle, i32> {
         let parent_id = object_id(parent)?;
         let path = final_path(parent)?.join(name);
-        let child = handle(path, false, Some(parent_id), false, directory)?;
+        let child = handle(path, false, Some(parent_id), write, directory)?;
         if object_id(parent)? != parent_id || !is_direct_child(parent, &child)? {
             return Err(POLICY_ERROR);
         }
@@ -1256,10 +1264,14 @@ pub(crate) mod native {
             parent: &Self::Handle,
             name: &str,
         ) -> Result<Self::Handle, i32> {
-            open_child(parent, name, true)
+            // The store flushes this held directory handle after creating or
+            // replacing the record. Windows requires a write-capable handle
+            // for FlushFileBuffers; a read-only handle makes a successful,
+            // validated save end as ERROR_ACCESS_DENIED durability unknown.
+            open_child(parent, name, true, true)
         }
         fn open_file(&mut self, parent: &Self::Handle, name: &str) -> Result<Self::Handle, i32> {
-            open_child(parent, name, false)
+            open_child(parent, name, false, false)
         }
         fn metadata(&mut self, handle: &Self::Handle) -> Result<ObjectMetadata, i32> {
             use windows_sys::Win32::Storage::FileSystem::{
@@ -1400,8 +1412,8 @@ pub(crate) mod native {
             // Reopen both path operands with reparse-point-aware handles and
             // validate their held-handle containment immediately before the
             // unavoidable path-based ReplaceFileW call.
-            let target_handle = open_child(parent, record_name, false)?;
-            let replacement_handle = open_child(parent, temporary_name, false)?;
+            let target_handle = open_child(parent, record_name, false, false)?;
+            let replacement_handle = open_child(parent, temporary_name, false, false)?;
             let replacement_id = object_id(&replacement_handle)?;
             if !identity_matches(parent_id, Some(object_id(parent)?))
                 || object_id(&target_handle)? == replacement_id
@@ -1427,7 +1439,7 @@ pub(crate) mod native {
             let parent_unchanged = identity_matches(parent_id, object_id(parent).ok())
                 && final_path(parent).ok().as_deref() == Some(parent_path.as_path());
             let after = if parent_unchanged {
-                open_child(parent, record_name, false).and_then(|after_handle| {
+                open_child(parent, record_name, false, false).and_then(|after_handle| {
                     validate_child_file(self, parent, &after_handle)?;
                     if object_id(&after_handle)? != replacement_id {
                         return Err(NATIVE_AMBIGUITY);
@@ -1453,7 +1465,7 @@ pub(crate) mod native {
         fn remove_file(&mut self, parent: &Self::Handle, name: &str) -> Result<(), i32> {
             let parent_id = object_id(parent)?;
             let parent_path = final_path(parent)?;
-            let child = open_child(parent, name, false)?;
+            let child = open_child(parent, name, false, false)?;
             if !identity_matches(parent_id, Some(object_id(parent)?))
                 || final_path(parent)? != parent_path
             {
@@ -1468,6 +1480,17 @@ pub(crate) mod native {
                 return Err(NATIVE_AMBIGUITY);
             }
             result
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn durable_directory_access_includes_write_while_reads_remain_read_only() {
+            assert_eq!(desired_access(false), FILE_GENERIC_READ);
+            assert_eq!(desired_access(true), FILE_GENERIC_READ | FILE_GENERIC_WRITE);
         }
     }
 }
