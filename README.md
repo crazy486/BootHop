@@ -16,7 +16,9 @@ OS.
   the fake tests use only a temporary staging directory.
 - Install/upgrade never configure a target or overwrite an unknown record;
   uninstall retains the record and lock. The desktop entry is not privileged;
-  policy authentication is restricted to the fixed helper.
+  policy authorization is restricted to the fixed helper; an active local
+  desktop session may invoke it without authentication, while inactive or
+  other contexts still require administrator authentication.
 - Windows production source now has a deterministic, non-installing package
   stage under `packaging/windows`. It records fixed Program Files/ProgramData
   layout metadata, protocol-v2 binary hashes, execution-level manifests, and

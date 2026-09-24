@@ -59,10 +59,22 @@ paths = [node.text for node in actions[0].findall("annotate")
          if node.get("key") == "org.freedesktop.policykit.exec.path"]
 if paths != ["/usr/lib/boothop/boothop-helper"]:
     raise SystemExit("policy executable path is not the fixed helper")
+expected = {
+    "allow_any": "auth_admin",
+    "allow_inactive": "auth_admin",
+    "allow_active": "yes",
+}
+seen = set()
 for defaults in actions[0].find("defaults"):
     if defaults.text and "keep" in defaults.text:
-        raise SystemExit("policy must require fresh admin authentication")
-    if defaults.tag in {"allow_any", "allow_inactive", "allow_active"} and defaults.text != "auth_admin":
-        raise SystemExit("policy authorization must be auth_admin without keep")
+        raise SystemExit("policy must not keep authorization")
+    if defaults.tag in expected:
+        if defaults.text != expected[defaults.tag]:
+            raise SystemExit(
+                f"policy {defaults.tag} must be {expected[defaults.tag]}"
+            )
+        seen.add(defaults.tag)
+if seen != set(expected):
+    raise SystemExit("policy must declare all three authorization defaults")
 PY
 echo "Linux dependency and fake-fixture isolation checks passed"
