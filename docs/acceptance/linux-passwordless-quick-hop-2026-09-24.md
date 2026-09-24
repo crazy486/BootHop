@@ -53,3 +53,17 @@ Quick Hop. It records only `Started`, `BeforeSend`, `UnknownAfterSend`,
 controller diagnostic. It does not change authorization, Switch behavior,
 firmware access, reboot behavior, or retry policy. No second Quick Hop was
 performed while preparing this diagnostic patch.
+
+## Successful follow-up — 2026-09-24
+
+The later single authorized attempt used the exact `13dfe10de4b0acb4dcf7f11d677aadb91a2bb36a` release on the same Arch Linux + KDE Plasma + Wayland UEFI machine. The installed GUI, helper, and policy matched that release.
+
+- Active graphical session passwordless authorization: **PASS**; no polkit/admin password prompt appeared.
+- Launch path: ordinary `org.boothop.desktop` entry; no `--setup`, `--settings`, or direct helper invocation.
+- Normal main GUI appeared: **NO**.
+- Switch count: **exactly one**.
+- Windows target validation and BootNext write/read-back: **PASS** through the production Quick Hop path.
+- Normal reboot: **PASS**.
+- Actual Windows arrival: **PASS**; the user confirmed reaching Windows 11.
+
+**Linux passwordless Quick Hop real-machine acceptance: PASS.** This records only the observed Quick Hop path and does not claim that all firmware or cross-platform validation is complete.

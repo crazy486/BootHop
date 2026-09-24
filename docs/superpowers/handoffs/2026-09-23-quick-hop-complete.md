@@ -5,6 +5,19 @@ Branch: `boothop-simple`
 Implementation HEAD: `f5c6d4fab850ad907fcdef3890a9302599ac7d9d`  
 GitHub Actions: run `35753623045`, successful for the exact implementation HEAD
 
+## Later acceptance update — 2026-09-24
+
+The current branch subsequently completed one real Linux → Windows passwordless Quick Hop on the Arch Linux + KDE Plasma + Wayland UEFI machine. The exact release was `13dfe10de4b0acb4dcf7f11d677aadb91a2bb36a`; the ordinary desktop entry was activated once, no polkit password prompt or normal main GUI appeared, the production Switch path set and read back the Windows BootNext, rebooted normally, and the user confirmed arrival at Windows 11.
+
+Current status:
+
+- Completed: Arch → Windows Quick Hop real-machine acceptance.
+- Completed: active Linux graphical-session passwordless authorization for the fixed BootHop helper.
+- Still pending: Windows → Linux symmetric switching acceptance.
+- Still pending: Windows UAC/no-prompt work and final cross-platform MVP acceptance.
+
+This update does not claim that all firmware validation is complete and does not replace the earlier historical records below.
+
 ## Completed
 
 - Preserved `boothop-sdd` at `4fc07695ea231b75642da7697276b58b35da727d` as the prior SDD/acceptance baseline.
