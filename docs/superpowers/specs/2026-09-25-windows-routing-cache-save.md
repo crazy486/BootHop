@@ -30,6 +30,7 @@ The cache remains an untrusted routing/display hint. Protected records and live 
 ## Implementation outcome
 
 - `CacheError` now preserves a closed `WindowsCacheStage` and optional raw Win32 code. The existing GUI warning displays only that fixed stage and number; it excludes paths, cache payloads, IDs, names, and localized error text.
+- The stage constructor and Windows-native imports are compiled only for Windows; Linux keeps the existing generic cache-error path without dead code or unused imports.
 - `SetFileInformationByHandle(FileDispositionInfoEx)` now sets `FILE_DISPOSITION_FLAG_DELETE` without `FILE_DISPOSITION_FLAG_ON_CLOSE`. Cleanup errors retain their own bounded stage/code rather than replacing all failures with `Unavailable`.
 - The native Windows regression holds `cache-v1.json` without delete sharing, invokes the real save path, and checks the rename stage and raw conflict code, preservation/reload of the old cache, and removal of the owned temporary file. The Windows temp-root success test still exercises native create, save, replace, reload, and one-file cleanup.
 - Production failure stage/code remains unknown until a diagnostic build is used for a later ordinary Inspect. No Inspect was run during this implementation.

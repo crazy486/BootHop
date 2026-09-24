@@ -58,6 +58,7 @@ impl WindowsCacheStage {
 }
 
 impl CacheError {
+    #[cfg(windows)]
     pub(crate) fn windows_native(stage: WindowsCacheStage, raw_win32_code: Option<u32>) -> Self {
         Self::WindowsNative {
             stage,
@@ -65,6 +66,7 @@ impl CacheError {
         }
     }
 
+    #[cfg(windows)]
     pub(crate) fn at_windows_stage(self, stage: WindowsCacheStage) -> Self {
         match self {
             Self::Unavailable => Self::windows_native(stage, None),
@@ -153,7 +155,7 @@ pub use linux::{LinuxCache, resolve_cache_path};
 mod windows;
 pub use windows::{WindowsCache, resolve_windows_cache_path};
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod diagnostic_tests {
     use super::*;
 

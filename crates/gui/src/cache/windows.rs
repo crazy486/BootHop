@@ -4,7 +4,9 @@
 //! contains only bounded display state and is never consulted to authorize a
 //! Configure or Switch request.
 
-use super::{Cache, CacheError, CachedTarget, WindowsCacheStage, sanitized_description};
+#[cfg(windows)]
+use super::WindowsCacheStage;
+use super::{Cache, CacheError, CachedTarget, sanitized_description};
 use boothop_core::{BootId, Os};
 use serde::{Deserialize, Serialize};
 #[cfg(not(windows))]
