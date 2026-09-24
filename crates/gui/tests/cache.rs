@@ -2,7 +2,8 @@
 mod linux_tests {
     use boothop_core::{BootId, Os};
     use boothop_gui::cache::{
-        Cache, CachedTarget, LinuxCache, resolve_cache_path, safe_description,
+        Cache, CachedTarget, LinuxCache, StartupDiagnostic, StartupPhase, resolve_cache_path,
+        safe_description,
     };
     use std::{
         ffi::OsStr,
@@ -105,6 +106,39 @@ mod linux_tests {
         huge.description_utf16 = Some(vec![65535; 65536]);
         assert!(temp.cache().save(&huge).is_err());
         assert_eq!(fs::metadata(temp.file()).unwrap().len(), 65537);
+    }
+
+    #[test]
+    fn startup_diagnostic_is_atomic_bounded_and_non_sensitive() {
+        let temp = Temp::new();
+        let cache = temp.cache();
+        cache
+            .save_startup_diagnostic(&StartupDiagnostic {
+                phase: StartupPhase::UnknownAfterSend,
+                detail: "UnknownAfterSend: Timeout".into(),
+            })
+            .unwrap();
+        let path = temp.file().with_file_name("startup-v1.json");
+        let json = fs::read_to_string(path).unwrap();
+        assert!(json.contains("unknown_after_send"));
+        assert!(json.contains("UnknownAfterSend: Timeout"));
+        for forbidden in [
+            "identity",
+            "digest",
+            "optional_data",
+            "device_path",
+            "command",
+        ] {
+            assert!(!json.contains(forbidden));
+        }
+        assert!(
+            cache
+                .save_startup_diagnostic(&StartupDiagnostic {
+                    phase: StartupPhase::Domain,
+                    detail: "x".repeat(4097),
+                })
+                .is_err()
+        );
     }
     #[test]
     fn symlink_files_and_directories_are_never_followed_or_replaced() {

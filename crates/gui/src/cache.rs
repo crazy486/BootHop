@@ -10,6 +10,34 @@ pub struct CachedTarget {
 pub enum CacheError {
     Unavailable,
 }
+
+/// Non-sensitive status written around the ordinary Linux Quick Hop startup.
+/// This is diagnostic evidence only; it never authorizes an operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupPhase {
+    Started,
+    BeforeSend,
+    UnknownAfterSend,
+    Domain,
+    RebootRequested,
+    ShowWindow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupDiagnostic {
+    pub phase: StartupPhase,
+    pub detail: String,
+}
+
+impl StartupDiagnostic {
+    pub fn started() -> Self {
+        Self {
+            phase: StartupPhase::Started,
+            detail: String::new(),
+        }
+    }
+}
+
 pub trait Cache {
     fn load(&self) -> Result<Option<CachedTarget>, CacheError>;
     fn save(&self, target: &CachedTarget) -> Result<(), CacheError>;

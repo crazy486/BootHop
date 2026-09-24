@@ -82,7 +82,8 @@ fn entry_point_runs_quick_hop_before_constructing_the_window() {
         let platform_start = main.find(platform).unwrap();
         let platform_source = &main[platform_start..];
         let startup = platform_source
-            .find(".startup(super::startup_mode())")
+            .find("controller.startup(mode)")
+            .or_else(|| platform_source.find(".startup(super::startup_mode())"))
             .unwrap();
         let window = platform_source.find("AppWindow::new()").unwrap();
         assert!(

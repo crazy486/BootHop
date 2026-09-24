@@ -3,7 +3,7 @@ use boothop_core::{
     Request, ResidualAssessment, RollbackAssessment, Stage,
 };
 use boothop_gui::{
-    cache::{Cache, CacheError, CachedTarget},
+    cache::{Cache, CacheError, CachedTarget, StartupPhase},
     controller::{
         Controller, Executor, Helper, Job, ScheduleError, StartupDisposition, StartupMode,
         UiIntent, UiState,
@@ -694,6 +694,43 @@ fn quick_hop_failure_or_wrong_os_shows_ui_without_retry() {
     assert!(wrong_os.diagnostic().contains("UnexpectedOs"));
     assert!(helper.calls.lock().unwrap().is_empty());
     assert!(executor.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quick_hop_startup_diagnostic_classifies_terminal_phase_without_retry() {
+    let cases = [
+        (
+            Err(ClientError::BeforeSend(TransportError::Io)),
+            StartupPhase::BeforeSend,
+        ),
+        (
+            Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+            StartupPhase::UnknownAfterSend,
+        ),
+        (
+            Err(ClientError::Domain(Error::BootNextConflict)),
+            StartupPhase::Domain,
+        ),
+        (
+            Ok(switched(Stage::RebootAccepted)),
+            StartupPhase::RebootRequested,
+        ),
+    ];
+    for (result, expected_phase) in cases {
+        let (mut controller, helper, executor, _) = setup(cached(Os::Windows));
+        helper.replies.lock().unwrap().push_back(result);
+        assert_eq!(
+            controller.startup(StartupMode::QuickHop),
+            if expected_phase == StartupPhase::RebootRequested {
+                StartupDisposition::Exit
+            } else {
+                StartupDisposition::ShowWindow
+            }
+        );
+        assert_eq!(controller.startup_diagnostic().phase, expected_phase);
+        assert_eq!(helper.calls.lock().unwrap().len(), 1);
+        assert!(executor.0.lock().unwrap().is_empty());
+    }
 }
 
 #[test]

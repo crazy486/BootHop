@@ -1,6 +1,6 @@
 //! UI state machine. Only explicit intents submit work; cached display data never authorizes it.
 use crate::{
-    cache::{Cache, CacheError, CachedTarget},
+    cache::{Cache, CacheError, CachedTarget, StartupDiagnostic, StartupPhase},
     helper_client::{Boundary, ClientError, HelperClient, TransportError},
 };
 use boothop_core::{
@@ -178,6 +178,30 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
     }
     pub fn diagnostic(&self) -> &str {
         &self.diagnostic
+    }
+
+    /// A bounded, non-sensitive classification for the ordinary startup
+    /// diagnostic. It is evidence only and is never used to authorize work.
+    pub fn startup_diagnostic(&self) -> StartupDiagnostic {
+        let phase = match self.state {
+            UiState::RebootRequested => StartupPhase::RebootRequested,
+            UiState::UnknownResult => StartupPhase::UnknownAfterSend,
+            UiState::Failed => {
+                if self.diagnostic.starts_with("BeforeSend")
+                    || self.diagnostic.starts_with("AuthorizationOrLaunchFailed")
+                    || self.diagnostic == "Cancelled"
+                {
+                    StartupPhase::BeforeSend
+                } else {
+                    StartupPhase::Domain
+                }
+            }
+            _ => StartupPhase::ShowWindow,
+        };
+        StartupDiagnostic {
+            phase,
+            detail: bounded(self.diagnostic.clone(), 4096),
+        }
     }
     pub fn cache_warning(&self) -> Option<&CacheError> {
         self.cache_warning.as_ref()

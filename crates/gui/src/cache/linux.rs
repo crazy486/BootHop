@@ -1,5 +1,5 @@
 //! Untrusted per-user display cache. Descriptor-relative traversal rejects symlinks at every level.
-use super::{Cache, CacheError, CachedTarget};
+use super::{Cache, CacheError, CachedTarget, StartupDiagnostic, StartupPhase};
 use boothop_core::{BootId, Os};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,6 +11,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 const LIMIT: usize = 64 * 1024;
+const STARTUP_DETAIL_LIMIT: usize = 4096;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 pub fn resolve_cache_path(
@@ -45,6 +46,40 @@ impl LinuxCache {
             path: resolve_cache_path(xdg_state, home),
         }
     }
+
+    /// Record only bounded, non-sensitive startup state for diagnosing a
+    /// detached desktop launch. Failure is deliberately independent of the
+    /// Quick Hop result and never changes its control flow.
+    pub fn save_startup_diagnostic(
+        &self,
+        diagnostic: &StartupDiagnostic,
+    ) -> Result<(), CacheError> {
+        if diagnostic.detail.len() > STARTUP_DETAIL_LIMIT {
+            return Err(CacheError::Unavailable);
+        }
+        let path = self
+            .path
+            .as_ref()
+            .map_err(Clone::clone)?
+            .with_file_name("startup-v1.json");
+        let data = WireStartup {
+            version: 1,
+            phase: match diagnostic.phase {
+                StartupPhase::Started => WireStartupPhase::Started,
+                StartupPhase::BeforeSend => WireStartupPhase::BeforeSend,
+                StartupPhase::UnknownAfterSend => WireStartupPhase::UnknownAfterSend,
+                StartupPhase::Domain => WireStartupPhase::Domain,
+                StartupPhase::RebootRequested => WireStartupPhase::RebootRequested,
+                StartupPhase::ShowWindow => WireStartupPhase::ShowWindow,
+            },
+            detail: diagnostic.detail.clone(),
+        };
+        let bytes = serde_json::to_vec(&data).map_err(|_| CacheError::Unavailable)?;
+        if bytes.len() > LIMIT {
+            return Err(CacheError::Unavailable);
+        }
+        write_atomic(&path, &bytes)
+    }
 }
 fn validate(path: &Path) -> Result<(), CacheError> {
     if !path.is_absolute()
@@ -70,6 +105,24 @@ struct WireCache {
 enum WireOs {
     Windows,
     Linux,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WireStartupPhase {
+    Started,
+    BeforeSend,
+    UnknownAfterSend,
+    Domain,
+    RebootRequested,
+    ShowWindow,
+}
+
+#[derive(Serialize)]
+struct WireStartup {
+    version: u8,
+    phase: WireStartupPhase,
+    detail: String,
 }
 impl Cache for LinuxCache {
     fn load(&self) -> Result<Option<CachedTarget>, CacheError> {
@@ -135,59 +188,62 @@ impl Cache for LinuxCache {
             return Err(CacheError::Unavailable);
         }
         let path = self.path.as_ref().map_err(Clone::clone)?;
-        let parent = parent_dir(path, true)?.ok_or(CacheError::Unavailable)?;
-        let name = cstring(path.file_name().ok_or(CacheError::Unavailable)?)?;
-        // Reject existing nonregular objects without following or blocking on them.
-        if let Some(file) = open_at(
-            parent.as_raw_fd(),
-            &name,
-            libc::O_RDONLY | libc::O_NONBLOCK,
-            false,
-        )? && !file
-            .metadata()
-            .map_err(|_| CacheError::Unavailable)?
-            .is_file()
+        write_atomic(path, &bytes)
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+    let parent = parent_dir(path, true)?.ok_or(CacheError::Unavailable)?;
+    let name = cstring(path.file_name().ok_or(CacheError::Unavailable)?)?;
+    // Reject existing nonregular objects without following or blocking on them.
+    if let Some(file) = open_at(
+        parent.as_raw_fd(),
+        &name,
+        libc::O_RDONLY | libc::O_NONBLOCK,
+        false,
+    )? && !file
+        .metadata()
+        .map_err(|_| CacheError::Unavailable)?
+        .is_file()
+    {
+        return Err(CacheError::Unavailable);
+    }
+    let temp = CString::new(format!(
+        ".cache-v1-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .map_err(|_| CacheError::Unavailable)?;
+    let mut file = open_at(
+        parent.as_raw_fd(),
+        &temp,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        true,
+    )?
+    .ok_or(CacheError::Unavailable)?;
+    let result = (|| {
+        file.write_all(bytes).map_err(|_| CacheError::Unavailable)?;
+        file.sync_all().map_err(|_| CacheError::Unavailable)?;
+        // renameat never follows a destination symlink. Pinned directory descriptors prevent ancestor races.
+        if unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                temp.as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+            )
+        } != 0
         {
             return Err(CacheError::Unavailable);
         }
-        let temp = CString::new(format!(
-            ".cache-v1-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
-        .map_err(|_| CacheError::Unavailable)?;
-        let mut file = open_at(
-            parent.as_raw_fd(),
-            &temp,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            true,
-        )?
-        .ok_or(CacheError::Unavailable)?;
-        let result = (|| {
-            file.write_all(&bytes)
-                .map_err(|_| CacheError::Unavailable)?;
-            file.sync_all().map_err(|_| CacheError::Unavailable)?;
-            // renameat never follows a destination symlink. Pinned directory descriptors prevent ancestor races.
-            if unsafe {
-                libc::renameat(
-                    parent.as_raw_fd(),
-                    temp.as_ptr(),
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                )
-            } != 0
-            {
-                return Err(CacheError::Unavailable);
-            }
-            parent.sync_all().map_err(|_| CacheError::Unavailable)
-        })();
-        if result.is_err() {
-            unsafe {
-                libc::unlinkat(parent.as_raw_fd(), temp.as_ptr(), 0);
-            }
+        parent.sync_all().map_err(|_| CacheError::Unavailable)
+    })();
+    if result.is_err() {
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), temp.as_ptr(), 0);
         }
-        result
     }
+    result
 }
 fn cstring(value: &OsStr) -> Result<CString, CacheError> {
     CString::new(value.as_encoded_bytes()).map_err(|_| CacheError::Unavailable)

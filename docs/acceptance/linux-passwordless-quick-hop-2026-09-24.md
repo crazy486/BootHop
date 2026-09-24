@@ -35,3 +35,21 @@ This record is intentionally conservative: a desktop-launcher exit code is
 not treated as a helper result, and absence of a post-attempt `BootNext` does
 not establish which pre-reboot stage failed. Do not retry Quick Hop from this
 state without a separately authorized diagnostic plan.
+
+## Diagnostic follow-up
+
+The available journal and process evidence does not identify whether the
+desktop launcher failed to start `boothop-gui`, whether `pkexec`/the helper
+was launched, or whether `Request::Switch` reached the helper. The controller
+contract still requires a failed Switch to show the normal window; only a
+validated `RebootAccepted` result exits without a window. Therefore the
+observed “no window, no reboot” outcome remains an unresolved startup/launch
+failure rather than evidence of a firmware or helper stage.
+
+A minimal diagnostic-only patch now records a bounded, non-sensitive
+`startup-v1.json` beside the existing user cache during a future ordinary
+Quick Hop. It records only `Started`, `BeforeSend`, `UnknownAfterSend`,
+`Domain`, `RebootRequested`, or `ShowWindow` plus the existing bounded
+controller diagnostic. It does not change authorization, Switch behavior,
+firmware access, reboot behavior, or retry policy. No second Quick Hop was
+performed while preparing this diagnostic patch.

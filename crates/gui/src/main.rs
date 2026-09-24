@@ -90,6 +90,10 @@ mod linux {
             std::env::var_os("XDG_STATE_HOME").as_deref(),
             std::env::var_os("HOME").as_deref(),
         );
+        let startup_diagnostics = LinuxCache::from_environment(
+            std::env::var_os("XDG_STATE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        );
         // The ordinary launch gets one synchronous Switch attempt before any
         // window exists. Setup mode and every non-accepted outcome fall back
         // to the existing UI with the controller state and diagnostics intact.
@@ -100,7 +104,16 @@ mod linux {
             Arc::new(|| {}),
             Os::Windows,
         );
-        if controller.startup(super::startup_mode()) == StartupDisposition::Exit {
+        let mode = super::startup_mode();
+        if mode == boothop_gui::controller::StartupMode::QuickHop {
+            let _ = startup_diagnostics
+                .save_startup_diagnostic(&boothop_gui::cache::StartupDiagnostic::started());
+        }
+        let disposition = controller.startup(mode);
+        if mode == boothop_gui::controller::StartupMode::QuickHop {
+            let _ = startup_diagnostics.save_startup_diagnostic(&controller.startup_diagnostic());
+        }
+        if disposition == StartupDisposition::Exit {
             return Ok(());
         }
 
