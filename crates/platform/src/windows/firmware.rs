@@ -222,11 +222,12 @@ fn read_bounded<C: WindowsCalls>(
 
 fn map_control_read_failure(failure: ReadFailure) -> Error {
     match failure {
-        ReadFailure::Missing(outcome) | ReadFailure::Error(outcome) => {
-            Error::FirmwareReadFailed {
-                raw_code: outcome.last_error,
-            }
-        }
+        ReadFailure::Missing(outcome) => Error::FirmwareReadFailed {
+            raw_code: outcome.last_error,
+        },
+        ReadFailure::Error(outcome) => Error::FirmwareReadFailed {
+            raw_code: outcome.last_error,
+        },
         ReadFailure::ResourceLimit => Error::ResourceLimit,
     }
 }
