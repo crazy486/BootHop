@@ -16,6 +16,7 @@ pub const BOOT_ATTRIBUTES: u32 = 0x7;
 pub const BOOT_CURRENT_ATTRIBUTES: u32 = 0x6;
 /// The UEFI global-variable GUID used by every production firmware call.
 pub const GLOBAL_VARIABLE_GUID: &str = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
+#[cfg(any(windows, test))]
 const ERROR_ENVVAR_NOT_FOUND: i32 = 203;
 
 /// Validate a caller-provided native read size before it reaches the Win32
@@ -232,6 +233,7 @@ fn map_control_read_failure(failure: ReadFailure) -> Error {
     }
 }
 
+#[cfg(any(windows, test))]
 fn map_native_read_error(variable: VariableName, raw_code: i32) -> ReadOutcome {
     if raw_code == ERROR_ENVVAR_NOT_FOUND
         && matches!(variable, VariableName::BootNext | VariableName::Boot(_))
