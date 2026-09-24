@@ -436,6 +436,9 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
             ValidatedReport::Inspected | ValidatedReport::InspectedChanged => {
                 // Inspect exposes no identity evidence that can clear an earlier mismatch.
                 let previously_changed = self.recovery_state == Some(UiState::TargetChanged);
+                let restore_routing_cache = !previously_changed
+                    && matches!(&outcome, ValidatedReport::Inspected)
+                    && matches!(&report.record, RecordDiagnostic::Ready { .. });
                 if previously_changed && self.diagnostic.is_empty() {
                     self.diagnostic = previous_diagnostic;
                 }
@@ -451,6 +454,11 @@ impl<H: Helper, E: Executor, C: Cache> Controller<H, E, C> {
                         }
                     };
                 self.candidates = report.candidates;
+                if restore_routing_cache && let Some(target) = &self.target {
+                    // This is an untrusted startup routing hint only. Switch still
+                    // reloads and validates the protected record through the helper.
+                    self.cache_warning = self.cache.save(target).err();
+                }
             }
             ValidatedReport::Configured => {
                 self.recovery_state = None;

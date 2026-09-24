@@ -48,6 +48,7 @@ impl Manual {
 struct FakeCache {
     loaded: Result<Option<CachedTarget>, CacheError>,
     writes: Arc<Mutex<Vec<CachedTarget>>>,
+    persisted: Arc<Mutex<Option<CachedTarget>>>,
     fail_write: bool,
 }
 impl Default for FakeCache {
@@ -55,19 +56,25 @@ impl Default for FakeCache {
         Self {
             loaded: Ok(None),
             writes: Default::default(),
+            persisted: Default::default(),
             fail_write: false,
         }
     }
 }
 impl Cache for FakeCache {
     fn load(&self) -> Result<Option<CachedTarget>, CacheError> {
-        self.loaded.clone()
+        if let Some(target) = self.persisted.lock().unwrap().clone() {
+            Ok(Some(target))
+        } else {
+            self.loaded.clone()
+        }
     }
     fn save(&self, target: &CachedTarget) -> Result<(), CacheError> {
         self.writes.lock().unwrap().push(target.clone());
         if self.fail_write {
             Err(CacheError::Unavailable)
         } else {
+            *self.persisted.lock().unwrap() = Some(target.clone());
             Ok(())
         }
     }
@@ -937,8 +944,13 @@ fn invalid_configure_does_not_clear_prehello_127_notice_or_schedule_work() {
     assert!(cache.writes.lock().unwrap().is_empty());
 }
 #[test]
-fn inspect_record_is_display_only_and_does_not_update_cache() {
+fn successful_ready_inspect_restores_cache_for_a_fresh_controller() {
     let (mut c, h, e, cache) = setup(FakeCache::default());
+    let expected = CachedTarget {
+        boot_id: BootId(7),
+        os: Os::Windows,
+        description_utf16: Some("Windows GRUB".encode_utf16().collect()),
+    };
     let mut r = report();
     r.record = RecordDiagnostic::Ready {
         boot_id: BootId(7),
@@ -947,6 +959,35 @@ fn inspect_record_is_display_only_and_does_not_update_cache() {
     inspect(&mut c, &h, &e, r);
     assert_eq!(c.state(), &UiState::Configured);
     assert!(c.status().contains("未验证启动链"));
+    assert_eq!(*cache.writes.lock().unwrap(), vec![expected.clone()]);
+
+    let (fresh, fresh_helper, fresh_executor, _) = setup(cache);
+    assert_eq!(fresh.state(), &UiState::CachedTarget(expected));
+    assert!(fresh_helper.calls.lock().unwrap().is_empty());
+    assert!(fresh_executor.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn missing_inspect_does_not_save_a_target_cache() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    inspect(&mut c, &h, &e, report());
+    assert_eq!(c.state(), &UiState::Unconfigured);
+    assert!(cache.writes.lock().unwrap().is_empty());
+    let (fresh, _, _, _) = setup(cache);
+    assert_eq!(fresh.state(), &UiState::Unconfigured);
+}
+
+#[test]
+fn inspect_failure_does_not_save_a_target_cache() {
+    let (mut c, h, e, cache) = setup(FakeCache::default());
+    c.handle(UiIntent::Inspect);
+    finish(
+        &mut c,
+        &h,
+        &e,
+        Err(ClientError::Domain(Error::IdentityMismatch)),
+    );
+    assert_eq!(c.state(), &UiState::TargetChanged);
     assert!(cache.writes.lock().unwrap().is_empty());
 }
 #[test]
@@ -1399,6 +1440,7 @@ fn inspect_changed_target_allows_fresh_explicit_reselection_but_never_switch() {
         }
         inspect(&mut c, &h, &e, r);
         assert_eq!(c.state(), &UiState::TargetChanged);
+        assert!(cache.writes.lock().unwrap().is_empty());
         assert!(c.configuration_visible());
         assert!(!c.can_switch());
         assert!(!c.can_configure());
