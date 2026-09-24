@@ -42,13 +42,45 @@ fn read_options_does_not_scan_or_read_boot_next() {
 }
 
 #[test]
-fn read_next_rejects_unavailable_203_instead_of_treating_it_as_absent() {
+fn read_next_treats_only_a_native_missing_observation_as_absent() {
     let mut calls = FakeWindowsCalls::uefi();
     calls.set(VariableName::BootNext, ReadOutcome::missing(203));
+    assert_eq!(read_next(&mut calls), Ok(None));
+    assert_eq!(calls.read_count(VariableName::BootNext), 1);
+}
+
+#[test]
+fn read_next_returns_existing_bootnext() {
+    let mut calls = FakeWindowsCalls::uefi();
+    calls.set(VariableName::BootNext, success(7, id(0x1234)));
+    assert_eq!(read_next(&mut calls), Ok(Some(BootId(0x1234))));
+}
+
+#[test]
+fn missing_bootorder_or_bootcurrent_remains_a_firmware_error() {
+    let mut calls = FakeWindowsCalls::uefi();
+    install_inventory(&mut calls, &[7]);
+    calls.set(VariableName::BootOrder, ReadOutcome::missing(203));
     assert_eq!(
-        read_next(&mut calls),
-        Err(Error::BootNextUnavailable { raw_code: 203 })
+        read_options(&mut calls),
+        Err(Error::FirmwareReadFailed { raw_code: 203 })
     );
+
+    let mut calls = FakeWindowsCalls::uefi();
+    install_inventory(&mut calls, &[7]);
+    calls.set(VariableName::BootCurrent, ReadOutcome::missing(203));
+    assert_eq!(
+        read_options(&mut calls),
+        Err(Error::FirmwareReadFailed { raw_code: 203 })
+    );
+}
+
+#[test]
+fn missing_referenced_boot_entry_remains_target_missing() {
+    let mut calls = FakeWindowsCalls::uefi();
+    install_inventory(&mut calls, &[7]);
+    calls.set(VariableName::Boot(BootId(7)), ReadOutcome::missing(203));
+    assert_eq!(read_options(&mut calls), Err(Error::TargetMissing));
 }
 
 #[test]
@@ -148,6 +180,12 @@ fn raw_firmware_errors_are_immediate_and_preserve_codes() {
     assert_eq!(
         read_next(&mut calls),
         Err(Error::FirmwareReadFailed { raw_code: 203 })
+    );
+    let mut calls = FakeWindowsCalls::uefi();
+    calls.set(VariableName::BootNext, error(5));
+    assert_eq!(
+        read_next(&mut calls),
+        Err(Error::FirmwareReadFailed { raw_code: 5 })
     );
     let mut calls = FakeWindowsCalls::uefi();
     calls.firmware = Err(boothop_platform::windows::CallError::new(55));

@@ -16,6 +16,7 @@ pub const BOOT_ATTRIBUTES: u32 = 0x7;
 pub const BOOT_CURRENT_ATTRIBUTES: u32 = 0x6;
 /// The UEFI global-variable GUID used by every production firmware call.
 pub const GLOBAL_VARIABLE_GUID: &str = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}";
+const ERROR_ENVVAR_NOT_FOUND: i32 = 203;
 
 /// Validate a caller-provided native read size before it reaches the Win32
 /// boundary. The policy limit also makes the usize-to-u32 conversion explicit.
@@ -219,13 +220,24 @@ fn read_bounded<C: WindowsCalls>(
     }
 }
 
-fn map_read_failure(failure: ReadFailure) -> Error {
+fn map_control_read_failure(failure: ReadFailure) -> Error {
     match failure {
-        ReadFailure::Missing(_outcome) => Error::TargetMissing,
-        ReadFailure::Error(outcome) => Error::FirmwareReadFailed {
-            raw_code: outcome.last_error,
-        },
+        ReadFailure::Missing(outcome) | ReadFailure::Error(outcome) => {
+            Error::FirmwareReadFailed {
+                raw_code: outcome.last_error,
+            }
+        }
         ReadFailure::ResourceLimit => Error::ResourceLimit,
+    }
+}
+
+fn map_native_read_error(variable: VariableName, raw_code: i32) -> ReadOutcome {
+    if raw_code == ERROR_ENVVAR_NOT_FOUND
+        && matches!(variable, VariableName::BootNext | VariableName::Boot(_))
+    {
+        ReadOutcome::missing(raw_code)
+    } else {
+        ReadOutcome::failure(0, raw_code)
     }
 }
 
@@ -245,11 +257,7 @@ pub fn read_next<C: WindowsCalls>(calls: &mut C) -> Result<Option<BootId>, Error
     let mut total = 0;
     let outcome = match read_bounded(calls, VariableName::BootNext, &mut total) {
         Ok(outcome) => outcome,
-        Err(ReadFailure::Missing(outcome)) => {
-            return Err(Error::BootNextUnavailable {
-                raw_code: outcome.last_error,
-            });
-        }
+        Err(ReadFailure::Missing(_outcome)) => return Ok(None),
         Err(ReadFailure::Error(outcome)) => {
             return Err(Error::FirmwareReadFailed {
                 raw_code: outcome.last_error,
@@ -264,7 +272,7 @@ pub fn read_options<C: WindowsCalls>(calls: &mut C) -> Result<OptionInventory, E
     let mut total = 0;
     let order = match read_bounded(calls, VariableName::BootOrder, &mut total) {
         Ok(outcome) => outcome,
-        Err(error) => return Err(map_read_failure(error)),
+        Err(error) => return Err(map_control_read_failure(error)),
     };
     let order = payload(&order, BOOT_ATTRIBUTES)?;
     if order.is_empty() || !order.len().is_multiple_of(2) {
@@ -290,7 +298,7 @@ pub fn read_options<C: WindowsCalls>(calls: &mut C) -> Result<OptionInventory, E
 
     let current = match read_bounded(calls, VariableName::BootCurrent, &mut total) {
         Ok(outcome) => outcome,
-        Err(error) => return Err(map_read_failure(error)),
+        Err(error) => return Err(map_control_read_failure(error)),
     };
     let current = decode_id(payload(&current, BOOT_CURRENT_ATTRIBUTES)?)?;
     if !referenced[usize::from(current.0)] {
@@ -417,7 +425,7 @@ pub(crate) mod native {
                     };
                     return Ok(ReadOutcome::buffer_too_small(required_size, attributes));
                 }
-                return Ok(ReadOutcome::failure(0, last_error));
+                return Ok(map_native_read_error(variable, last_error));
             }
             Ok(successful_native_read(
                 returned,
@@ -521,6 +529,25 @@ pub(crate) mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_203_is_missing_only_for_bootnext_and_boot_entries() {
+        for variable in [VariableName::BootNext, VariableName::Boot(BootId(3))] {
+            let outcome = map_native_read_error(variable, ERROR_ENVVAR_NOT_FOUND);
+            assert_eq!(outcome.status, ReadStatus::Missing);
+            assert_eq!(outcome.last_error, ERROR_ENVVAR_NOT_FOUND);
+        }
+        for variable in [VariableName::BootOrder, VariableName::BootCurrent] {
+            let outcome = map_native_read_error(variable, ERROR_ENVVAR_NOT_FOUND);
+            assert_eq!(outcome.status, ReadStatus::Error);
+            assert_eq!(outcome.last_error, ERROR_ENVVAR_NOT_FOUND);
+        }
+        for variable in [VariableName::BootNext, VariableName::Boot(BootId(3))] {
+            let outcome = map_native_read_error(variable, 5);
+            assert_eq!(outcome.status, ReadStatus::Error);
+            assert_eq!(outcome.last_error, 5);
+        }
+    }
 
     struct Writer {
         calls: Vec<(VariableName, Vec<u8>, u32)>,

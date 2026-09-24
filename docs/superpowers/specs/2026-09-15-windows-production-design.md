@@ -214,12 +214,20 @@ result, up to 1 MiB per variable and 1 MiB total raw inventory data across all
 controls and referenced options. Cumulative accounting charges each successful
 variable's returned payload byte count plus its four-byte attributes value.
 Exceeding either bound fails the whole inventory without returning a partial
-result. Zero means failure and `GetLastError` is
-captured immediately. No native error, including observed Win32 203, is
-silently converted to absence in the initial production policy. Consequently,
-absence-sensitive `BootNext` operations fail closed until an explicitly
-approved native absence mapping exists. This limitation is visible in errors,
-tests, acceptance, and release notes.
+result. Zero means failure and `GetLastError` is captured immediately. The
+narrow `ERROR_ENVVAR_NOT_FOUND` (203) result is mapped to `Missing` only when
+reading `BootNext` or a referenced `Boot####`: `read_next` returns `None` for
+that exact BootNext result, while a missing referenced entry becomes
+`TargetMissing`. A 203 result for `BootOrder` or `BootCurrent`, and every other
+native read error for every variable, remains an error with its raw code. This
+mapping follows Microsoft's [firmware read API contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfirmwareenvironmentvariableexw)
+and [system error 203 definition](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-),
+together with the Windows read-only observations of BootNext 203. The firmware
+API documentation specifies zero-return/`GetLastError` behavior but does not
+enumerate 203 as an API-specific missing-variable guarantee; therefore this is
+a narrow project interpretation, not a general error-to-absence rule. The
+Windows1W research collector remains unchanged and continues to record raw 203
+without inferring absence.
 
 Attributes and payload shapes are exact:
 
