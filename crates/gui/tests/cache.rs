@@ -208,10 +208,10 @@ mod windows_tests {
             Self(path)
         }
         fn cache(&self) -> WindowsCache {
-            WindowsCache::at(self.0.join("BootHop/cache-v1.json"))
+            WindowsCache::at(resolve_windows_cache_path(self.0.as_os_str()).unwrap())
         }
         fn file(&self) -> PathBuf {
-            self.0.join("BootHop/cache-v1.json")
+            resolve_windows_cache_path(self.0.as_os_str()).unwrap()
         }
         fn write(&self, bytes: &[u8]) {
             fs::create_dir_all(self.file().parent().unwrap()).unwrap();

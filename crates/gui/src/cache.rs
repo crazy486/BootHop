@@ -9,6 +9,82 @@ pub struct CachedTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheError {
     Unavailable,
+    WindowsNative {
+        stage: WindowsCacheStage,
+        raw_win32_code: Option<u32>,
+    },
+}
+
+/// Closed set of Windows cache stages safe to show in a bounded diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsCacheStage {
+    ResolveLocalAppData,
+    OpenRoot,
+    CreateParent,
+    OpenParent,
+    OpenCache,
+    ReadCache,
+    ValidateTarget,
+    CreateTemp,
+    ValidateTemp,
+    WriteTemp,
+    FlushTemp,
+    Rename,
+    FlushRenamed,
+    Revalidate,
+    Cleanup,
+}
+
+impl WindowsCacheStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResolveLocalAppData => "ResolveLocalAppData",
+            Self::OpenRoot => "OpenRoot",
+            Self::CreateParent => "CreateParent",
+            Self::OpenParent => "OpenParent",
+            Self::OpenCache => "OpenCache",
+            Self::ReadCache => "ReadCache",
+            Self::ValidateTarget => "ValidateTarget",
+            Self::CreateTemp => "CreateTemp",
+            Self::ValidateTemp => "ValidateTemp",
+            Self::WriteTemp => "WriteTemp",
+            Self::FlushTemp => "FlushTemp",
+            Self::Rename => "Rename",
+            Self::FlushRenamed => "FlushRenamed",
+            Self::Revalidate => "Revalidate",
+            Self::Cleanup => "Cleanup",
+        }
+    }
+}
+
+impl CacheError {
+    pub(crate) fn windows_native(stage: WindowsCacheStage, raw_win32_code: Option<u32>) -> Self {
+        Self::WindowsNative {
+            stage,
+            raw_win32_code,
+        }
+    }
+
+    pub(crate) fn at_windows_stage(self, stage: WindowsCacheStage) -> Self {
+        match self {
+            Self::Unavailable => Self::windows_native(stage, None),
+            error @ Self::WindowsNative { .. } => error,
+        }
+    }
+
+    /// Returns only fixed-stage and numeric OS-error data; never a path or payload.
+    pub fn diagnostic(&self) -> Option<String> {
+        match self {
+            Self::Unavailable => None,
+            Self::WindowsNative {
+                stage,
+                raw_win32_code,
+            } => Some(match raw_win32_code {
+                Some(code) => format!("{} / raw_code={code}", stage.as_str()),
+                None => stage.as_str().to_owned(),
+            }),
+        }
+    }
 }
 
 /// Non-sensitive status written around the ordinary Linux Quick Hop startup.
@@ -76,3 +152,15 @@ pub use linux::{LinuxCache, resolve_cache_path};
 
 mod windows;
 pub use windows::{WindowsCache, resolve_windows_cache_path};
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn windows_diagnostic_contains_only_fixed_stage_and_numeric_code() {
+        let error = CacheError::windows_native(WindowsCacheStage::Rename, Some(32));
+        assert_eq!(error.diagnostic().as_deref(), Some("Rename / raw_code=32"));
+        assert_eq!(CacheError::Unavailable.diagnostic(), None);
+    }
+}

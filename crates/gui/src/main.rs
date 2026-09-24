@@ -1,3 +1,15 @@
+fn cache_warning_text(error: Option<&boothop_gui::cache::CacheError>) -> String {
+    let Some(error) = error else {
+        return String::new();
+    };
+    match error.diagnostic() {
+        Some(diagnostic) => {
+            format!("展示缓存读写失败；{diagnostic}；不会自动重复配置。")
+        }
+        None => "展示缓存读写失败；不会自动重复配置。".to_owned(),
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use boothop_core::{BootId, Classification, Os};
@@ -41,14 +53,7 @@ mod linux {
             )
             .into(),
         );
-        ui.set_cache_warning(
-            if c.cache_warning().is_some() {
-                "展示缓存读写失败；不会自动重复配置。"
-            } else {
-                ""
-            }
-            .into(),
-        );
+        ui.set_cache_warning(super::cache_warning_text(c.cache_warning()).into());
         ui.set_inspect_enabled(c.can_inspect());
         ui.set_switch_enabled(c.can_switch());
         ui.set_configuration_visible(c.configuration_visible());
@@ -258,14 +263,7 @@ mod windows {
             )
             .into(),
         );
-        ui.set_cache_warning(
-            if c.cache_warning().is_some() {
-                "展示缓存读写失败；不会自动重复配置。"
-            } else {
-                ""
-            }
-            .into(),
-        );
+        ui.set_cache_warning(super::cache_warning_text(c.cache_warning()).into());
         ui.set_inspect_enabled(c.can_inspect());
         ui.set_switch_enabled(c.can_switch());
         ui.set_configuration_visible(c.configuration_visible());
