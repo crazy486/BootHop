@@ -923,6 +923,22 @@ pub(crate) mod native {
         validate_security(calls.security(child)?).map_err(|_| POLICY_ERROR)
     }
 
+    fn replace_file_w(target: &Path, replacement: &Path) -> Result<(), i32> {
+        let target = wide(target);
+        let replacement = wide(replacement);
+        let ok = unsafe {
+            ReplaceFileW(
+                target.as_ptr(),
+                replacement.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 { Err(raw()) } else { Ok(()) }
+    }
+
     fn secured_create(path: &Path) -> Result<File, i32> {
         let sddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
         let sddl = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
@@ -1423,19 +1439,19 @@ pub(crate) mod native {
             }
             validate_child_file(self, parent, &target_handle)?;
             validate_child_file(self, parent, &replacement_handle)?;
-            let target = wide(&parent_path.join(record_name));
-            let replacement = wide(&parent_path.join(temporary_name));
-            let ok = unsafe {
-                ReplaceFileW(
-                    target.as_ptr(),
-                    replacement.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            let replace_error = if ok == 0 { Some(raw()) } else { None };
+            // ReplaceFileW opens its replacement operand without a sharing
+            // mode. Keeping our own read handle to that same file alive here
+            // makes the API reject our call with ERROR_SHARING_VIOLATION.
+            // We have already validated both child handles and captured the
+            // replacement identity; close them before the path-based call,
+            // then verify the resulting file identity below.
+            drop(target_handle);
+            drop(replacement_handle);
+            let replace_error = replace_file_w(
+                &parent_path.join(record_name),
+                &parent_path.join(temporary_name),
+            )
+            .err();
             let parent_unchanged = identity_matches(parent_id, object_id(parent).ok())
                 && final_path(parent).ok().as_deref() == Some(parent_path.as_path());
             let after = if parent_unchanged {
@@ -1486,11 +1502,56 @@ pub(crate) mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::fs;
+
+        struct TestDirectory(PathBuf);
+
+        impl TestDirectory {
+            fn create() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "boothop-replacefile-{}-{}",
+                    std::process::id(),
+                    TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+                fs::create_dir(&path).expect("create isolated ReplaceFileW test directory");
+                Self(path)
+            }
+        }
+
+        impl Drop for TestDirectory {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
 
         #[test]
         fn durable_directory_access_includes_write_while_reads_remain_read_only() {
             assert_eq!(desired_access(false), FILE_GENERIC_READ);
             assert_eq!(desired_access(true), FILE_GENERIC_READ | FILE_GENERIC_WRITE);
+        }
+
+        #[test]
+        fn replace_file_closes_its_own_child_handles_before_native_replace() {
+            let directory = TestDirectory::create();
+            let target = directory.0.join("targets.json");
+            let replacement = directory.0.join(".targets-test.tmp");
+            fs::write(&target, b"old record").expect("write target fixture");
+            fs::write(&replacement, b"new record").expect("write replacement fixture");
+
+            // These are the same share flags and read access used by
+            // open_child. ReplaceFileW's replacement open is exclusive, so
+            // its documented contract reproduces the prior self-conflict.
+            let target_handle = handle(target.clone(), false, None, false, false)
+                .expect("open target with production child share flags");
+            let replacement_handle = handle(replacement.clone(), false, None, false, false)
+                .expect("open replacement with production child share flags");
+            assert_eq!(replace_file_w(&target, &replacement), Err(32));
+            drop(target_handle);
+            drop(replacement_handle);
+
+            assert_eq!(replace_file_w(&target, &replacement), Ok(()));
+            assert_eq!(fs::read(&target).unwrap(), b"new record");
+            assert!(!replacement.exists());
         }
     }
 }
