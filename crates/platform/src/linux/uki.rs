@@ -1,5 +1,8 @@
 use std::fmt;
 
+use boothop_core::{ArchProvisionState, OwnedArchEntry, PublishMetadata};
+use sha2::{Digest, Sha256};
+
 pub const FINAL_UKI_PATH: &str = "EFI/BootHop/arch.efi";
 pub const STAGED_UKI_PATH: &str = "EFI/BootHop/arch.efi.staging";
 
@@ -528,32 +531,127 @@ pub trait UkiBuildBackend {
     ) -> Result<(), UkiBuildError>;
 }
 
-/// Injected publication boundary. `write_stage` must target the plan's sibling staging file;
-/// `rename_stage_over_final` must perform a same-filesystem atomic replace and leave `final`
-/// untouched on error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UkiFinalPathState {
+    Absent,
+    /// Metadata for a non-symlink regular file, measured from its exact file contents.
+    Regular(PublishMetadata),
+    /// Directories, symlinks (including dangling symlinks), and other objects.
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UkiPublicationAuthority {
+    /// Initial provisioning is authorized only while the fixed stable path is absent.
+    Provisioning,
+    /// Updates are authorized only while the stable file still matches this journaled identity.
+    Ready(PublishMetadata),
+}
+
+/// Injected publication boundary. `final_path_state` must not follow symlinks and must report a
+/// regular file's exact SHA-256 and byte size. `write_stage` must target the plan's sibling
+/// staging file. `rename_stage_over_final` must re-enforce the supplied authority at the
+/// publication boundary, perform a same-filesystem atomic replace, and leave `final` untouched
+/// on error. A production adapter must obtain the authority only from a successfully decoded,
+/// root-owned provisioning journal; caller-provided paths or standalone ownership markers are
+/// not sufficient.
 pub trait UkiPublishFs {
+    fn final_path_state(&mut self, path: &str) -> Result<UkiFinalPathState, UkiBuildError>;
     fn write_stage(&mut self, path: &str, contents: &[u8]) -> Result<(), UkiBuildError>;
     fn rename_stage_over_final(
         &mut self,
         stage_path: &str,
         final_path: &str,
+        authority: &UkiPublicationAuthority,
     ) -> Result<(), UkiBuildError>;
 }
 
 pub fn build_and_publish_uki(
     plan: &UkiBuildPlan,
+    journal_state: &ArchProvisionState,
     builder: &mut impl UkiBuildBackend,
     publisher: &mut impl UkiPublishFs,
-) -> Result<(), UkiBuildError> {
+) -> Result<PublishMetadata, UkiBuildError> {
     if plan.final_uki_path != FINAL_UKI_PATH || plan.staged_uki_path != STAGED_UKI_PATH {
         return Err(UkiBuildError::Publish(
             "UKI publication paths must match the fixed BootHop paths".into(),
         ));
     }
+    let authority = publication_authority(journal_state)?;
+    verify_publication_authority(publisher, &plan.final_uki_path, &authority)?;
+
     let mut artifact = builder.build(plan)?;
     builder.validate(&artifact, plan)?;
     builder.sign_if_required(&mut artifact, plan)?;
     builder.validate(&artifact, plan)?;
+    let published_metadata = PublishMetadata {
+        sha256: Sha256::digest(&artifact).into(),
+        size: artifact.len() as u64,
+    };
+
+    // Recheck before staging so a file that appeared or changed during the build is not touched.
+    verify_publication_authority(publisher, &plan.final_uki_path, &authority)?;
     publisher.write_stage(&plan.staged_uki_path, &artifact)?;
-    publisher.rename_stage_over_final(&plan.staged_uki_path, &plan.final_uki_path)
+
+    // The filesystem adapter must enforce the authority again as part of its atomic publish
+    // operation, closing the gap between this observation and rename.
+    verify_publication_authority(publisher, &plan.final_uki_path, &authority)?;
+    publisher.rename_stage_over_final(&plan.staged_uki_path, &plan.final_uki_path, &authority)?;
+    Ok(published_metadata)
+}
+
+fn publication_authority(
+    journal_state: &ArchProvisionState,
+) -> Result<UkiPublicationAuthority, UkiBuildError> {
+    match journal_state {
+        ArchProvisionState::Provisioning(record) => {
+            ensure_fixed_owned_path(&record.owned_entry)?;
+            Ok(UkiPublicationAuthority::Provisioning)
+        }
+        ArchProvisionState::Ready(entry) => {
+            ensure_fixed_owned_path(entry)?;
+            if entry.publish.size == 0 {
+                return Err(UkiBuildError::Publish(
+                    "journaled UKI ownership metadata is incomplete".into(),
+                ));
+            }
+            Ok(UkiPublicationAuthority::Ready(entry.publish.clone()))
+        }
+        ArchProvisionState::Unprovisioned | ArchProvisionState::Uninstalling(_) => {
+            Err(UkiBuildError::Publish(
+                "a valid Provisioning or Ready ownership journal is required".into(),
+            ))
+        }
+    }
+}
+
+fn ensure_fixed_owned_path(entry: &OwnedArchEntry) -> Result<(), UkiBuildError> {
+    if entry.uki_path != FINAL_UKI_PATH {
+        return Err(UkiBuildError::Publish(
+            "journaled UKI path does not match the fixed BootHop path".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_publication_authority(
+    publisher: &mut impl UkiPublishFs,
+    final_path: &str,
+    authority: &UkiPublicationAuthority,
+) -> Result<(), UkiBuildError> {
+    let state = publisher.final_path_state(final_path)?;
+    match (authority, state) {
+        (UkiPublicationAuthority::Provisioning, UkiFinalPathState::Absent) => Ok(()),
+        (UkiPublicationAuthority::Ready(expected), UkiFinalPathState::Regular(actual))
+            if expected == &actual =>
+        {
+            Ok(())
+        }
+        (UkiPublicationAuthority::Provisioning, _) => Err(UkiBuildError::Publish(
+            "initial provisioning requires an absent stable UKI path".into(),
+        )),
+        (UkiPublicationAuthority::Ready(_), _) => Err(UkiBuildError::Publish(
+            "stable UKI does not match journaled ownership metadata".into(),
+        )),
+    }
 }

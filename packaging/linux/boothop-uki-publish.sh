@@ -54,6 +54,49 @@ final_uki="$directory/arch.efi"
 }
 [[ -f "$staged_uki" ]] || { echo "staged BootHop UKI is missing" >&2; exit 1; }
 
+# These values are trusted only when supplied by a Phase 5 read-only verifier of the root-owned
+# journal. Do not install or wire this hook until that verifier/update path exists; a state marker
+# by itself never proves ownership.
+journal_state=${BOOT_HOP_JOURNAL_STATE-}
+case "$journal_state" in
+    Provisioning)
+        if [[ -e "$final_uki" || -L "$final_uki" ]]; then
+            echo "initial provisioning requires an absent stable UKI path" >&2
+            exit 1
+        fi
+        ;;
+    Ready)
+        expected_sha256=${BOOT_HOP_JOURNAL_UKI_SHA256-}
+        expected_size=${BOOT_HOP_JOURNAL_UKI_SIZE-}
+        if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ \
+            || ! "$expected_size" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Ready journal ownership metadata is missing or malformed" >&2
+            exit 1
+        fi
+        if [[ ! -f "$final_uki" || -L "$final_uki" ]]; then
+            echo "Ready journal requires an existing regular stable UKI" >&2
+            exit 1
+        fi
+        digest_line=$(sha256sum -- "$final_uki") || {
+            echo "could not hash the existing stable UKI" >&2
+            exit 1
+        }
+        actual_sha256=${digest_line%% *}
+        actual_size=$(stat --format='%s' -- "$final_uki") || {
+            echo "could not read the existing stable UKI size" >&2
+            exit 1
+        }
+        if [[ "$actual_sha256" != "$expected_sha256" || "$actual_size" != "$expected_size" ]]; then
+            echo "stable UKI does not match journaled ownership metadata" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "a trusted Provisioning or Ready journal state is required" >&2
+        exit 1
+        ;;
+esac
+
 validate_uki() {
     local image=$1 format properties sections name
     format=$(objdump -f -- "$image") || return 1
@@ -101,13 +144,34 @@ if [[ "$secure_boot_required" == 1 ]]; then
     mv -f -- "$signed_uki" "$staged_uki"
 fi
 
-# Do not let `mv` reinterpret an existing directory as a destination container, or replace a
-# symlink/other object at the fixed stable path. A regular file is the expected update target.
+# Repeat the ownership check immediately before publication. The caller supplies these values
+# only from the validated journal; a production adapter must make this decision under its update
+# serialization boundary as well.
 if [[ -e "$final_uki" || -L "$final_uki" ]]; then
     if [[ ! -f "$final_uki" || -L "$final_uki" ]]; then
         echo "existing stable UKI path is not a non-symlink regular file" >&2
         exit 1
     fi
+    if [[ "$journal_state" != Ready ]]; then
+        echo "initial provisioning cannot replace an existing stable UKI" >&2
+        exit 1
+    fi
+    digest_line=$(sha256sum -- "$final_uki") || {
+        echo "could not hash the existing stable UKI before publication" >&2
+        exit 1
+    }
+    actual_sha256=${digest_line%% *}
+    actual_size=$(stat --format='%s' -- "$final_uki") || {
+        echo "could not read the stable UKI size before publication" >&2
+        exit 1
+    }
+    if [[ "$actual_sha256" != "$expected_sha256" || "$actual_size" != "$expected_size" ]]; then
+        echo "stable UKI ownership changed before publication" >&2
+        exit 1
+    fi
+elif [[ "$journal_state" == Ready ]]; then
+    echo "Ready journal stable UKI disappeared before publication" >&2
+    exit 1
 fi
 
 # Both files share this directory, so mv uses a same-filesystem atomic rename. The stable file

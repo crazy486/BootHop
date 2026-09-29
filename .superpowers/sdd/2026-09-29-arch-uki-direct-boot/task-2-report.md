@@ -116,3 +116,25 @@ Verification:
 - `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` — remains blocked by the two known unrelated Phase 1 clippy diagnostics in `crates/core/src/arch_provision.rs` lines 365 and 369 (`manual_is_multiple_of` and `chunks_exact_to_as_chunks`).
 - All new tests use in-memory or temporary fixtures. No host EFI, presets, ESP, or NVRAM were accessed.
+
+## Final ownership review fix round
+
+The final review found that fixed paths and regular-file type alone did not prove the stable UKI belonged to BootHop. Publication now requires an explicit typed journal state:
+
+- `build_and_publish_uki` accepts a decoded `ArchProvisionState`. Only `Provisioning` and `Ready` are eligible; missing (`Unprovisioned`), uninstalling/unknown lifecycle state, or a non-fixed journaled UKI path fails before the builder runs.
+- `Provisioning` authority permits publication only when the final path is absent. `Ready` authority carries the journaled SHA-256 and size and permits updates only when the existing stable path is a regular file with exact matching metadata. The fakeable `UkiPublishFs::final_path_state` contract is lstat-style (does not follow symlinks) and returns exact content hash/size. `build_and_publish_uki` checks before building, before staging, and before rename; `rename_stage_over_final` receives and must atomically re-enforce that authority. The function returns the new artifact's SHA-256 and size so the caller can persist complete journal metadata before any EFI-variable mutation.
+- The shell post-hook requires `BOOT_HOP_JOURNAL_STATE`. `Provisioning` requires an absent stable path; `Ready` additionally requires well-formed `BOOT_HOP_JOURNAL_UKI_SHA256` and `BOOT_HOP_JOURNAL_UKI_SIZE` that match the current non-symlink regular file. Unknown/missing/malformed state, digest, or size fails before rename. Ownership is checked again immediately before final publication. The hook does not treat a standalone marker as proof: Phase 5 must source these inputs only from the trusted root-owned journal verifier.
+- Phase 5 and Phase 7 plan text now gates hook installation on the trusted verifier/update path. It requires missing/corrupt journal states to block updates, initial Provisioning to refuse any existing fixed UKI, Ready updates to match exact journal metadata, successful publication metadata to be durably recorded before EFI writes, and serialization across the final ownership check and atomic rename.
+
+TDD evidence: the Rust authority tests first failed to compile because the API was absent. The shell regression first failed because a missing journal state was accepted. Added cases cover unowned initial-path refusal, absent-path initial success, exact Ready update success, hash and size mismatch with stable preservation, missing/unknown journal state, malformed/missing shell inputs, and valid shell Ready update. Fake Rust publication rechecks authority inside its rename operation.
+
+Verification:
+
+- `cargo test -p boothop-platform --test uki_publish` — passed (6 tests).
+- `packaging/linux/tests/boothop-uki-publish-test.sh` — passed using temporary files and stubbed tools.
+- `bash -n packaging/linux/boothop-uki-publish.sh packaging/linux/tests/boothop-uki-publish-test.sh` — passed.
+- `cargo test --workspace --all-targets --quiet` — passed all targets.
+- `cargo fmt --check` — passed.
+- `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — remains blocked by the same unrelated Phase 1 clippy diagnostics in `crates/core/src/arch_provision.rs` lines 365 and 369 (`manual_is_multiple_of` and `chunks_exact_to_as_chunks`).
+- No host EFI, presets, ESP, or NVRAM were accessed. There is no production adapter/verifier wired yet; its required interface is the typed verified journal state plus final-path inspection and an authority-enforcing atomic rename, with returned publication metadata durably saved before EFI-variable writes. Phase 5/7 now explicitly blocks hook installation and real provisioning until this boundary is implemented and tested.

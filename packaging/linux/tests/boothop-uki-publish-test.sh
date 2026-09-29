@@ -79,6 +79,10 @@ final="$BOOT_HOP_ESP_MOUNT/EFI/BootHop/arch.efi"
 prepare() {
     printf 'old stable\n' >"$final"
     printf 'PE32+\nstaged uki\n' >"$stage"
+    BOOT_HOP_JOURNAL_STATE=Ready
+    BOOT_HOP_JOURNAL_UKI_SHA256=$(sha256sum -- "$final" | awk '{print $1}')
+    BOOT_HOP_JOURNAL_UKI_SIZE=$(stat --format='%s' -- "$final")
+    export BOOT_HOP_JOURNAL_STATE BOOT_HOP_JOURNAL_UKI_SHA256 BOOT_HOP_JOURNAL_UKI_SIZE
     rm -f -- "$BOOT_HOP_TEST_SIGN_LOG"
 }
 assert_old_stable() {
@@ -116,6 +120,57 @@ printf 'PE32\nstaged uki\n' >"$stage"
 "$publisher" /dev/null /tmp/initramfs "$stage"
 [[ $(<"$final") == $'PE32\nstaged uki' ]]
 [[ ! -e "$stage" && ! -e "$BOOT_HOP_TEST_SIGN_LOG" ]]
+
+expect_ownership_failure() {
+    scenario=$1
+    prepare
+    case "$scenario" in
+        missing-state) unset BOOT_HOP_JOURNAL_STATE ;;
+        malformed-state) BOOT_HOP_JOURNAL_STATE=Unknown ;;
+        missing-digest) unset BOOT_HOP_JOURNAL_UKI_SHA256 ;;
+        malformed-digest) BOOT_HOP_JOURNAL_UKI_SHA256=not-a-digest ;;
+        missing-size) unset BOOT_HOP_JOURNAL_UKI_SIZE ;;
+        malformed-size) BOOT_HOP_JOURNAL_UKI_SIZE=01x ;;
+        hash-mismatch) BOOT_HOP_JOURNAL_UKI_SHA256=$(printf '0%.0s' {1..64}) ;;
+        size-mismatch) BOOT_HOP_JOURNAL_UKI_SIZE=1 ;;
+        provisioning-existing) BOOT_HOP_JOURNAL_STATE=Provisioning ;;
+        ready-absent)
+            rm -f -- "$final"
+            ;;
+    esac
+    export BOOT_HOP_JOURNAL_STATE BOOT_HOP_JOURNAL_UKI_SHA256 BOOT_HOP_JOURNAL_UKI_SIZE || true
+    stage_before=$(<"$stage")
+    if "$publisher" /dev/null /tmp/initramfs "$stage"; then
+        echo "publisher unexpectedly accepted ownership scenario: $scenario" >&2
+        exit 1
+    fi
+    [[ $(<"$stage") == "$stage_before" ]]
+    if [[ "$scenario" == ready-absent ]]; then
+        [[ ! -e "$final" && ! -L "$final" ]]
+    else
+        assert_old_stable
+    fi
+}
+
+for ownership_failure in missing-state malformed-state missing-digest malformed-digest \
+    missing-size malformed-size hash-mismatch size-mismatch provisioning-existing ready-absent; do
+    expect_ownership_failure "$ownership_failure"
+done
+
+prepare
+BOOT_HOP_JOURNAL_STATE=Provisioning
+export BOOT_HOP_JOURNAL_STATE
+rm -f -- "$final"
+"$publisher" /dev/null /tmp/initramfs "$stage"
+[[ $(<"$final") == $'PE32+\nstaged uki' ]]
+[[ ! -e "$stage" ]]
+
+prepare
+BOOT_HOP_JOURNAL_STATE=Ready
+export BOOT_HOP_JOURNAL_STATE
+"$publisher" /dev/null /tmp/initramfs "$stage"
+[[ $(<"$final") == $'PE32+\nstaged uki' ]]
+[[ ! -e "$stage" ]]
 
 BOOT_HOP_SECURE_BOOT_REQUIRED=1
 export BOOT_HOP_SECURE_BOOT_REQUIRED

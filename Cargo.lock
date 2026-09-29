@@ -525,6 +525,7 @@ dependencies = [
  "boothop-core",
  "roxmltree",
  "rustix 1.1.4",
+ "sha2",
  "windows-sys 0.61.2",
  "zbus",
 ]
