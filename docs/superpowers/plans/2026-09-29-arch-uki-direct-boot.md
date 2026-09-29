@@ -46,11 +46,11 @@
 
 **Files:** `crates/core/src/arch_provision.rs`、`crates/core/src/lib.rs`、`crates/platform/src/linux/arch_provision_store.rs`、`crates/platform/src/linux/store.rs`、`crates/platform/tests/arch_provision_store.rs`、`crates/core/tests/arch_provision_record.rs`。
 
-**Interface:** `ArchProvisionState::{Unprovisioned, Provisioning(ProvisioningRecord), Ready(OwnedArchEntry), Uninstalling(UninstallingRecord)}`；缺少 journal 映射到 `Unprovisioned`。`OwnedArchEntry` 保存 owned `BootId`、当前 canonical load-option identity/版本、固定 UKI 路径及 build/publish metadata。中间状态保存 operation/version、预期 identity、当前生命周期步骤和已知 residual。未知版本、损坏记录或身份不完整均为错误，不得折叠为 `Unprovisioned`。
+**Interface:** `ArchProvisionState::{Unprovisioned, Provisioning(ProvisioningRecord), Ready(OwnedArchEntry), Uninstalling(UninstallingRecord)}`；缺少 journal 映射到 `Unprovisioned`。`OwnedArchEntry` 保存 owned/reserved `BootId`、当前 canonical load-option identity/版本、固定 UKI 路径及 build/publish metadata。`ProvisioningRecord` 和 `UninstallingRecord` 在其生命周期结束前都保留完整 `OwnedArchEntry`，另存各自的 operation/version、状态专属 lifecycle step 和已知 residual。Steps 区分 Boot#### create/readback、BootOrder append/readback，以及 uninstall 的 BootOrder、Boot####、UKI removal/readback 边界；这些 checkpoint/residual 只记录状态和不确定性，不授权自动 retry 或 cleanup。未知版本、损坏记录或身份不完整均为错误，不得折叠为 `Unprovisioned`。
 
-- [ ] 增加 codec/state 测试：`unprovisioned_is_only_absent_journal`、`lifecycle_records_roundtrip`、`unknown_or_corrupt_record_fails_closed`、`owned_entry_requires_supported_identity_and_fixed_path`。
-- [ ] 在独立 fake filesystem 上测试原子保存、短写、文件同步/目录同步失败、未知记录不被覆盖；使用现有 `LockedStore` 保护目录和互斥锁。
-- [ ] 运行 `cargo test -p boothop-core --test arch_provision_record` 与 `cargo test -p boothop-platform --test arch_provision_store`；本阶段不打开 efivarfs。
+- [x] 增加 codec/state 测试：`unprovisioned_is_only_absent_journal`、`lifecycle_records_roundtrip`、`unknown_or_corrupt_record_fails_closed`、`owned_entry_requires_supported_identity_and_fixed_path`。
+- [x] 在独立 fake filesystem 上测试原子保存、短写、文件同步/目录同步失败、未知记录不被覆盖；使用现有 `LockedStore` 保护目录和互斥锁。
+- [x] 运行 `cargo test -p boothop-core --test arch_provision_record` 与 `cargo test -p boothop-platform --test arch_provision_store`；本阶段不打开 efivarfs。
 
 ## Task 2 — Phase 2 — UKI discovery/build abstraction
 
