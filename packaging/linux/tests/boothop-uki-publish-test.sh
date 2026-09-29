@@ -133,7 +133,9 @@ expect_ownership_failure() {
         malformed-size) BOOT_HOP_JOURNAL_UKI_SIZE=01x ;;
         hash-mismatch) BOOT_HOP_JOURNAL_UKI_SHA256=$(printf '0%.0s' {1..64}) ;;
         size-mismatch) BOOT_HOP_JOURNAL_UKI_SIZE=1 ;;
-        provisioning-existing) BOOT_HOP_JOURNAL_STATE=Provisioning ;;
+        provisioning-pending) BOOT_HOP_JOURNAL_STATE=Provisioning/UkiPublicationPending ;;
+        provisioning-attempted) BOOT_HOP_JOURNAL_STATE=Provisioning/UkiPublicationAttempted ;;
+        provisioning-other) BOOT_HOP_JOURNAL_STATE=Provisioning/BootEntryCreated ;;
         ready-absent)
             rm -f -- "$final"
             ;;
@@ -153,17 +155,10 @@ expect_ownership_failure() {
 }
 
 for ownership_failure in missing-state malformed-state missing-digest malformed-digest \
-    missing-size malformed-size hash-mismatch size-mismatch provisioning-existing ready-absent; do
+    missing-size malformed-size hash-mismatch size-mismatch provisioning-pending \
+    provisioning-attempted provisioning-other ready-absent; do
     expect_ownership_failure "$ownership_failure"
 done
-
-prepare
-BOOT_HOP_JOURNAL_STATE=Provisioning
-export BOOT_HOP_JOURNAL_STATE
-rm -f -- "$final"
-"$publisher" /dev/null /tmp/initramfs "$stage"
-[[ $(<"$final") == $'PE32+\nstaged uki' ]]
-[[ ! -e "$stage" ]]
 
 prepare
 BOOT_HOP_JOURNAL_STATE=Ready

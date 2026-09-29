@@ -54,17 +54,13 @@ final_uki="$directory/arch.efi"
 }
 [[ -f "$staged_uki" ]] || { echo "staged BootHop UKI is missing" >&2; exit 1; }
 
+# This post-hook is for kernel updates only, after BootHop is already Ready. Initial provisioning
+# publishes through the Rust coordinator's Attempted-before-ESP-write transaction; mkinitcpio's
+# post-hook staging behavior cannot prove that initial checkpoint ordering.
 # These values are trusted only when supplied by a Phase 5 read-only verifier of the root-owned
-# journal. Do not install or wire this hook until that verifier/update path exists; a state marker
-# by itself never proves ownership.
+# journal. A state marker by itself never proves ownership.
 journal_state=${BOOT_HOP_JOURNAL_STATE-}
 case "$journal_state" in
-    Provisioning)
-        if [[ -e "$final_uki" || -L "$final_uki" ]]; then
-            echo "initial provisioning requires an absent stable UKI path" >&2
-            exit 1
-        fi
-        ;;
     Ready)
         expected_sha256=${BOOT_HOP_JOURNAL_UKI_SHA256-}
         expected_size=${BOOT_HOP_JOURNAL_UKI_SIZE-}
@@ -92,7 +88,7 @@ case "$journal_state" in
         fi
         ;;
     *)
-        echo "a trusted Provisioning or Ready journal state is required" >&2
+        echo "the mkinitcpio post-hook supports only a trusted Ready update" >&2
         exit 1
         ;;
 esac
@@ -152,10 +148,6 @@ if [[ -e "$final_uki" || -L "$final_uki" ]]; then
         echo "existing stable UKI path is not a non-symlink regular file" >&2
         exit 1
     fi
-    if [[ "$journal_state" != Ready ]]; then
-        echo "initial provisioning cannot replace an existing stable UKI" >&2
-        exit 1
-    fi
     digest_line=$(sha256sum -- "$final_uki") || {
         echo "could not hash the existing stable UKI before publication" >&2
         exit 1
@@ -169,7 +161,7 @@ if [[ -e "$final_uki" || -L "$final_uki" ]]; then
         echo "stable UKI ownership changed before publication" >&2
         exit 1
     fi
-elif [[ "$journal_state" == Ready ]]; then
+else
     echo "Ready journal stable UKI disappeared before publication" >&2
     exit 1
 fi
