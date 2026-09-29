@@ -1,6 +1,6 @@
 # Windows → BootHop → Arch：保留普通 GRUB 菜单的一次性直达设计
 
-日期：2026-09-29。状态：研究完成、设计提案待用户审阅；不是实现批准，不授权任何 EFI/GRUB/系统修改、固件写入或重启。
+日期：2026-09-29。状态：方案 C 已获用户批准；实施计划阶段。本规格批准不授权真实 EFI/GRUB/系统修改、固件写入或重启。
 
 ## Problem
 
@@ -15,9 +15,9 @@
 - 研究代理只读观察到当前 Secure Boot 关闭。该事实仅适用于本次研究时的这台主机；未来 setup 必须实时检测，不能假设其他机器相同。
 - 不在本规格中记录私有设备路径、EFI 原始数据或 UUID。
 
-普通 BootHop 日常切换到 Windows 已通过实机验收；本文仅讨论反向路径的 GRUB 菜单体验。
+以下原有路径已实机验证：Windows → BootHop Quick Hop → BootNext 指向原 Linux/GRUB entry → reboot → GRUB 菜单 → 用户手动选择 Arch → Arch 正常启动。本文解决的是在保留普通 GRUB 菜单的前提下，新增 Windows → BootHop → 专用 UKI → Arch 的直达路径；不把原有 Windows→Arch 路径描述为不可用。
 
-本文只提出当前 Arch + GRUB 实机的可选集成，不扩大 BootHop 对其他 Linux 发行版或 bootloader 的支持承诺。未来 Windows production line 仍未完成；此文不表示 Windows → Arch 已可用。
+本文只规定当前 Arch + GRUB 实机的可选集成，不扩大 BootHop 对其他 Linux 发行版或 bootloader 的支持承诺。当前已验证的 Windows→原 GRUB→手动 Arch 路径仍成立；尚未实现和验收的是“专用 UKI 绕过 GRUB 菜单”路径。
 
 ## Candidate designs
 
@@ -60,7 +60,7 @@ GRUB 有 one-shot `next_entry` 语义，但它是 GRUB 自身状态，不是 UEF
 - 新增明确、仅 Linux setup 使用的特权 `ProvisionArchEntry` 操作；不把固件创建隐式塞进现有 `Configure`，更不能放入日常 `Switch`。现有固定 helper、信任边界和最小参数原则保留，不增 daemon/service/executable。它会扩展同一个 helper 的固件写白名单，必须独立复审；不能将日常免认证授权解释为允许 GUI 指定任意变量、路径或启动项。
 - Provisioner 必须从本机真实 Arch 配置建立固定 UKI 路径及命令行，不接受 GUI 任意路径、Boot ID、EFI payload 或 canonical identity 作为可信输入。
 - 增加 root 保护的 entry ownership 元数据：被分配的 Boot ID、结构身份、受控创建时的完整记录摘要/版本，以及 UKI 路径/构建状态。普通 per-OS target record 仍按 Windows/Linux 分开保存。
-- 未来 Windows production implementation 通过 Inspect/Configure/Switch 使用已 provision 且列入 BootOrder 的 Arch 项；`Switch` 仍只接受 `Os::Linux` 意图，并基于受保护目标重新验证身份与 BootNext。Windows 平台生产实现尚未完成。
+- Windows 侧的专用 UKI 路径仍通过 Inspect/Configure/Switch 使用已 provision 且列入 BootOrder 的 Arch 项；`Switch` 仍只接受 `Os::Linux` 意图，并基于受保护目标重新验证身份与 BootNext。已通过原 GRUB entry 的 Windows→Arch 实机路径不等同于本功能已实现。
 - 现有核心语义需明确例外：日常 Switch 保持“只写 BootNext”；显式 provision/uninstall 会创建/删除受所有权记录约束的 Boot####，并在首次 setup/uninstall 时更新 BootOrder。
 
 ## Linux / GRUB changes required
@@ -121,12 +121,12 @@ Windows 普通 BootHop 启动 → 无主 GUI → helper 从 Windows 受保护记
 
 在正式启用前保留当前原始启动项和 BootOrder 记录，并确认可访问固件启动选择/现有 GRUB 恢复路径。失败时不清理未知变量、不覆盖外部更新。只有所有权/identity 精确匹配且当前 BootNext 未指向该入口时才显式卸载：从 BootOrder 删除专用 ID、验证顺序保留，再删除对应 Boot#### 与 UKI。任何一步状态未知则停止并报告人工恢复所需的准确对象；不声称 BootHop 可保证 firmware NVRAM 回滚事务。
 
-## 研究依据与未决审批
+## 研究依据与实施边界
 
 - UEFI 2.11 定义 BootNext 优先尝试一次、移交前删除、之后恢复普通 BootOrder；其自动维护说明没有保证长期保留未被 BootOrder/BootNext 引用的 Boot####。来源：[UEFI Boot Manager §3](https://uefi.org/specs/UEFI/2.11/03_Boot_Manager.html)。因此 UEFI 可理解“BootNext 指向一个现存 Boot####”，但不能据此保证精确不变的 BootOrder 与 orphan entry 长期共存。
 - GRUB `next_entry` 是另一个 one-shot 状态，environment block 有文件系统/写入限制；`saved_entry` 是持久默认。来源：[GRUB next_entry](https://www.gnu.org/software/grub/manual/grub/html_node/next_005fentry.html)、[GRUB environment block](https://www.gnu.org/software/grub/manual/grub/html_node/Environment-block.html)、[saved_entry](https://www.gnu.org/software/grub/manual/grub/html_node/saved_005fentry.html)。
 - Linux EFI stub 可作为 EFI 应用运行，`initrd=` 路径相对 ESP 根且必须为 EFI 路径；mkinitcpio 官方手册支持在 preset 中配置固定 `_uki` 输出路径。来源：[Linux EFI Boot Stub](https://docs.kernel.org/admin-guide/efi-stub.html)、[Arch mkinitcpio(8)](https://man.archlinux.org/man/mkinitcpio.8)、[systemd-stub(7)](https://man.archlinux.org/man/systemd-stub.7.en)。
-- 与现有批准设计的差异：新增 UEFI entry 创建/删除、一次性 BootOrder append/removal、Arch UKI preset 与 ownership state；不符合“BootHop 永不创建/修改 Boot####、永不修改 BootOrder”的现行规则。实现前必须由用户明确批准这个例外，或要求研究替代方案。当前没有获准的 Windows↔Arch 专用 entry 生产实现。
+- 与既有基线设计的差异：本方案获批新增专用 UEFI entry 创建/删除、一次性 BootOrder append/removal、Arch UKI preset 与 ownership state。当前批准覆盖方案方向和实施计划；真实 mkinitcpio/UKI/NVRAM provision 及 Windows→UKI reboot 验收仍须在对应阶段重新取得用户授权。专用 UKI 直达路径尚未实现；已验证的 Windows→原 GRUB→手动选择 Arch 路径仍可用。
 
 ### Review checklist
 
@@ -135,6 +135,6 @@ Windows 普通 BootHop 启动 → 无主 GUI → helper 从 Windows 受保护记
 - 日常只写 BootNext：是。
 - 是否新增 Boot####：是，显式 setup 创建一个固定专用项；不在 Switch 中创建/修复。
 - BootOrder：首次 setup 追加一次，uninstall 显式移除；日常切换不写。严格“永不改变 BootOrder”与此可移植设计不兼容。
-- 是否改 Rust：是，新增受限 provision 请求、Linux UEFI Boot####/BootOrder adapter、ownership state 与测试；日常共享 Switch 状态机应尽量不变。未来 Windows production line 可沿用既有候选发现/Configure/Switch 契约，但尚未实现。
+- 是否改 Rust：是，新增受限 provision 请求、Linux UEFI Boot####/BootOrder adapter、ownership state 与测试；日常共享 Switch 状态机应尽量不变。专用 UKI 目标接入 Windows Inspect/Configure/Switch 是待实施内容；现有 Quick Hop 到原 GRUB 并手动选择 Arch 的路径已实机验证。
 - 最大风险：固件变量创建/BootOrder 更新不是事务；安全 BootNext 行为和真实链路需分阶段验收，不能用模拟代替。
-- Ready for implementation：**NO**，等待用户审阅本提案，尤其确认是否接受首次 setup/uninstall 对 BootOrder 的一次性修改，以及 UKI/update-hook 这一 Arch 集成范围。
+- 方案 C 已获批准，可制定并审阅实施计划；后续实现必须遵循该计划，真实 setup/EFI write/reboot 仍需独立授权。UKI/update-hook 的具体 preset 接入以实施前只读审查当前配置为准，不得猜测。
