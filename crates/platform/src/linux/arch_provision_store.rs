@@ -22,8 +22,8 @@ impl<F: Filesystem> ArchProvisionStore<F> {
         self.locked.save_arch_provision_state(state)
     }
 
-    /// Final uninstall operation: the journal can disappear only after exact owned cleanup.
-    pub fn remove_after_cleanup(&mut self, state: &ArchProvisionState) -> Result<(), Error> {
-        self.locked.remove_arch_provision_state(state)
+    /// Final uninstall operation: replace the completed record with an owned tombstone.
+    pub fn complete_uninstall(&mut self, state: &ArchProvisionState) -> Result<(), Error> {
+        self.locked.complete_arch_uninstall(state)
     }
 }

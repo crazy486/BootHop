@@ -5,7 +5,7 @@ use crate::{
     encode_record,
 };
 
-const RECORD_VERSION: u64 = 3;
+const RECORD_VERSION: u64 = 4;
 const IDENTITY_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1_048_576;
 const FIXED_IDENTITY_PATH: &str = "\\EFI\\BootHop\\arch.efi";
@@ -17,6 +17,9 @@ pub enum ArchProvisionState {
     Provisioning(ProvisioningRecord),
     Ready(OwnedArchEntry),
     Uninstalling(UninstallingRecord),
+    /// Terminal ownership tombstone. The owned metadata remains until a later explicit
+    /// provisioning operation replaces this record.
+    Uninstalled(UninstalledRecord),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +66,13 @@ pub struct UninstallingRecord {
     pub residual: Vec<Residual>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UninstalledRecord {
+    pub operation_id: String,
+    pub operation_version: u64,
+    pub owned_entry: OwnedArchEntry,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Journal checkpoints only; a step never authorizes repeating an EFI mutation.
@@ -74,6 +84,7 @@ pub enum ProvisioningStep {
     BootEntryCreated,
     BootEntryReadBackVerified,
     BootOrderAppendAttempted,
+    BootOrderAppendWriteCompleted,
     BootOrderAppended,
     BootOrderReadBackVerified,
 }
@@ -84,12 +95,15 @@ pub enum ProvisioningStep {
 pub enum UninstallingStep {
     Started,
     BootOrderRemovalAttempted,
+    BootOrderRemovalWriteCompleted,
     BootOrderRemoved,
     BootOrderRemovalReadBackVerified,
     BootEntryRemovalAttempted,
+    BootEntryDeleteCompleted,
     BootEntryRemoved,
     BootEntryRemovalReadBackVerified,
     UkiRemovalAttempted,
+    UkiDeleteCompleted,
     UkiRemoved,
 }
 
@@ -134,6 +148,11 @@ enum WireState {
         owned_entry: WireOwnedArchEntry,
         step: UninstallingStep,
         residual: Vec<Residual>,
+    },
+    Uninstalled {
+        operation_id: String,
+        operation_version: u64,
+        owned_entry: WireOwnedArchEntry,
     },
 }
 
@@ -221,6 +240,20 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
                 residual,
             }))
         }
+        WireState::Uninstalled {
+            operation_id,
+            operation_version,
+            owned_entry,
+        } => {
+            validate_operation(&operation_id, operation_version)?;
+            let owned_entry = decode_owned_entry(owned_entry)?;
+            require_publish_metadata(&owned_entry)?;
+            Ok(ArchProvisionState::Uninstalled(UninstalledRecord {
+                operation_id,
+                operation_version,
+                owned_entry,
+            }))
+        }
     }
 }
 
@@ -253,6 +286,15 @@ pub fn encode_arch_provision_state(state: &ArchProvisionState) -> Result<Vec<u8>
                 owned_entry: encode_owned_entry(&record.owned_entry)?,
                 step: record.step,
                 residual: record.residual.clone(),
+            }
+        }
+        ArchProvisionState::Uninstalled(record) => {
+            validate_operation(&record.operation_id, record.operation_version)?;
+            require_publish_metadata(&record.owned_entry)?;
+            WireState::Uninstalled {
+                operation_id: record.operation_id.clone(),
+                operation_version: record.operation_version,
+                owned_entry: encode_owned_entry(&record.owned_entry)?,
             }
         }
     };

@@ -17,7 +17,12 @@ pub enum OwnedUkiState {
 /// or delete anything except the fixed path selected by this module.
 pub trait OwnedUkiIo {
     fn inspect_fixed(&mut self, path: &str) -> Result<OwnedUkiState, Error>;
-    fn remove_fixed(&mut self, path: &str) -> Result<(), Error>;
+    fn remove_fixed_if_expected(
+        &mut self,
+        path: &str,
+        sha256: [u8; 32],
+        size: u64,
+    ) -> Result<(), Error>;
 }
 
 /// Delete the journal-owned UKI only when its fixed path is a regular file with the exact
@@ -46,22 +51,41 @@ pub fn remove_owned_uki<I: OwnedUkiIo>(
         OwnedUkiState::Regular { .. } => return Err(Error::IdentityMismatch),
         OwnedUkiState::Symlink | OwnedUkiState::Other => return Err(Error::IdentityMismatch),
     }
-    io.remove_fixed(FIXED_UKI_PATH)?;
-    // Crossing this checkpoint forbids a second delete after a crash.  A failed readback keeps
-    // the residual marker, so the journal cannot be removed until an explicit recovery observes
-    // the file as absent.
+    io.remove_fixed_if_expected(FIXED_UKI_PATH, expected.0, expected.1)?;
     if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::UkiRemoved;
+        record.step = UninstallingStep::UkiDeleteCompleted;
     }
     if io.inspect_fixed(FIXED_UKI_PATH)? != OwnedUkiState::Missing {
         return Err(Error::ReadbackFailed);
     }
     if let ArchProvisionState::Uninstalling(record) = state {
+        record.step = UninstallingStep::UkiRemoved;
         record
             .residual
             .retain(|residual| *residual != Residual::UkiMayRemain);
     }
     Ok(())
+}
+
+/// Reconcile an interrupted UKI removal read-only. The returned state is evidence only and
+/// never authorizes another deletion.
+pub fn observe_uki_removal<I: OwnedUkiIo>(
+    io: &mut I,
+    state: &ArchProvisionState,
+) -> Result<OwnedUkiState, Error> {
+    match state {
+        ArchProvisionState::Uninstalling(record)
+            if matches!(
+                record.step,
+                UninstallingStep::UkiRemovalAttempted
+                    | UninstallingStep::UkiDeleteCompleted
+                    | UninstallingStep::UkiRemoved
+            ) =>
+        {
+            io.inspect_fixed(FIXED_UKI_PATH)
+        }
+        _ => Err(Error::NotConfigured),
+    }
 }
 
 /// Helper for isolated fakes: calculate the same ownership tuple used by the journal.

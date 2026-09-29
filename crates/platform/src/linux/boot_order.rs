@@ -83,7 +83,7 @@ pub trait BootOrderIo {
 /// The separate, exact owned-entry deletion boundary.
 pub trait OwnedBootEntryIo {
     fn read_boot_entry(&mut self, id: BootId) -> Result<Option<Vec<u8>>, Error>;
-    fn delete_boot_entry(&mut self, id: BootId) -> Result<(), Error>;
+    fn delete_boot_entry_if_exact(&mut self, id: BootId, expected: &[u8]) -> Result<(), Error>;
 }
 
 /// Starts uninstall in memory.  The caller must durably save this result while holding the
@@ -141,7 +141,7 @@ pub fn append_owned_entry<I: BootOrderIo>(
     let expected = latest.appended(id)?;
     io.write_boot_order(&expected)?;
     if let ArchProvisionState::Provisioning(record) = state {
-        record.step = ProvisioningStep::BootOrderAppended;
+        record.step = ProvisioningStep::BootOrderAppendWriteCompleted;
     }
     let actual = io.read_boot_order()?;
     actual.validate()?;
@@ -165,6 +165,31 @@ pub fn observe_append_only<I: BootOrderIo>(io: &mut I, id: BootId) -> Result<boo
     Ok(order.ids.contains(&id))
 }
 
+/// Reconcile an interrupted BootOrder removal without writing or inferring who changed it.
+/// `true` means the owned ID is absent from the current valid order.
+pub fn observe_order_removal<I: BootOrderIo>(
+    io: &mut I,
+    state: &ArchProvisionState,
+) -> Result<bool, Error> {
+    let id = match state {
+        ArchProvisionState::Uninstalling(record)
+            if matches!(
+                record.step,
+                UninstallingStep::BootOrderRemovalAttempted
+                    | UninstallingStep::BootOrderRemovalWriteCompleted
+                    | UninstallingStep::BootOrderRemoved
+                    | UninstallingStep::BootOrderRemovalReadBackVerified
+            ) =>
+        {
+            record.owned_entry.boot_id
+        }
+        _ => return Err(Error::NotConfigured),
+    };
+    let order = io.read_boot_order()?;
+    order.validate()?;
+    Ok(!order.ids.contains(&id))
+}
+
 /// Remove the owned ID from the latest valid order.  The caller must save
 /// `BootOrderRemovalAttempted` before this call.
 pub fn remove_owned_from_order<I: BootOrderIo>(
@@ -185,7 +210,7 @@ pub fn remove_owned_from_order<I: BootOrderIo>(
     let expected = latest.without(id)?;
     io.write_boot_order(&expected)?;
     if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::BootOrderRemoved;
+        record.step = UninstallingStep::BootOrderRemovalWriteCompleted;
     }
     let actual = io.read_boot_order()?;
     actual.validate()?;
@@ -257,9 +282,26 @@ pub fn remove_owned_entry<I: OwnedBootEntryIo, B: BootOrderIo>(
     if boot.read_boot_next()?.is_some_and(|next| next == entry_id) {
         return Err(Error::Busy);
     }
-    io.delete_boot_entry(entry_id)?;
+    let order = boot.read_boot_order()?;
+    order.validate()?;
+    if order.ids.contains(&entry_id) {
+        return Err(Error::Busy);
+    }
+    let boundary = io.read_boot_entry(entry_id)?.ok_or(Error::TargetMissing)?;
+    if boundary != expected {
+        return Err(Error::IdentityMismatch);
+    }
+    if boot.read_boot_next()?.is_some_and(|next| next == entry_id) {
+        return Err(Error::Busy);
+    }
+    let final_order = boot.read_boot_order()?;
+    final_order.validate()?;
+    if final_order.ids.contains(&entry_id) {
+        return Err(Error::Busy);
+    }
+    io.delete_boot_entry_if_exact(entry_id, &expected)?;
     if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::BootEntryRemoved;
+        record.step = UninstallingStep::BootEntryDeleteCompleted;
     }
     if io.read_boot_entry(entry_id)?.is_some() {
         return Err(Error::ReadbackFailed);
@@ -271,6 +313,28 @@ pub fn remove_owned_entry<I: OwnedBootEntryIo, B: BootOrderIo>(
             .retain(|residual| *residual != Residual::BootEntryMayExist);
     }
     Ok(())
+}
+
+/// Reconcile an interrupted Boot#### removal without deleting or retrying it.
+pub fn observe_entry_removal<I: OwnedBootEntryIo>(
+    io: &mut I,
+    state: &ArchProvisionState,
+) -> Result<bool, Error> {
+    let id = match state {
+        ArchProvisionState::Uninstalling(record)
+            if matches!(
+                record.step,
+                UninstallingStep::BootEntryRemovalAttempted
+                    | UninstallingStep::BootEntryDeleteCompleted
+                    | UninstallingStep::BootEntryRemoved
+                    | UninstallingStep::BootEntryRemovalReadBackVerified
+            ) =>
+        {
+            record.owned_entry.boot_id
+        }
+        _ => return Err(Error::NotConfigured),
+    };
+    Ok(io.read_boot_entry(id)?.is_none())
 }
 
 pub fn owned_entry_bytes(identity: &CanonicalIdentity) -> Result<Vec<u8>, Error> {

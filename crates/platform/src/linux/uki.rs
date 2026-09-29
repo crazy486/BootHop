@@ -627,11 +627,11 @@ pub fn build_and_publish_uki(
         ArchProvisionState::Ready(_) => Err(UkiBuildError::Publish(
             "journaled UKI path does not match the fixed BootHop path".into(),
         )),
-        ArchProvisionState::Unprovisioned | ArchProvisionState::Uninstalling(_) => {
-            Err(UkiBuildError::Publish(
-                "a valid Provisioning or Ready ownership journal is required".into(),
-            ))
-        }
+        ArchProvisionState::Unprovisioned
+        | ArchProvisionState::Uninstalling(_)
+        | ArchProvisionState::Uninstalled(_) => Err(UkiBuildError::Publish(
+            "a valid Provisioning or Ready ownership journal is required".into(),
+        )),
     }
 }
 

@@ -9,10 +9,12 @@ use boothop_platform::linux::{
     arch_provision_store::ArchProvisionStore,
     boot_order::{
         BootOrderIo, BootOrderValue, OwnedBootEntryIo, append_owned_entry, begin_uninstall,
-        owned_entry_bytes, remove_owned_entry, remove_owned_from_order,
-        verify_order_absent_before_entry_delete,
+        observe_append_only, observe_entry_removal, observe_order_removal, owned_entry_bytes,
+        remove_owned_entry, remove_owned_from_order, verify_order_absent_before_entry_delete,
     },
-    owned_uki::{OwnedUkiIo, OwnedUkiState, digest_and_size, remove_owned_uki},
+    owned_uki::{
+        OwnedUkiIo, OwnedUkiState, digest_and_size, observe_uki_removal, remove_owned_uki,
+    },
 };
 
 fn entry() -> OwnedArchEntry {
@@ -51,6 +53,9 @@ struct FakeFirmware {
     order: BootOrderValue,
     writes: usize,
     mutate_on_write: bool,
+    fail_write: bool,
+    order_reads: usize,
+    readd_on_second_order_read: bool,
 }
 
 impl Default for FakeFirmware {
@@ -60,6 +65,9 @@ impl Default for FakeFirmware {
             order: BootOrderValue::new(7, Vec::new()).unwrap(),
             writes: 0,
             mutate_on_write: false,
+            fail_write: false,
+            order_reads: 0,
+            readd_on_second_order_read: false,
         }
     }
 }
@@ -79,11 +87,22 @@ impl BootOrderIo for FakeFirmware {
     }
 
     fn read_boot_order(&mut self) -> Result<BootOrderValue, boothop_core::Error> {
+        self.order_reads += 1;
+        if self.readd_on_second_order_read && self.order_reads == 2 {
+            self.order.ids.push(BootId(0x1234));
+        }
         Ok(self.order.clone())
     }
 
     fn write_boot_order(&mut self, value: &BootOrderValue) -> Result<(), boothop_core::Error> {
         self.writes += 1;
+        if self.fail_write {
+            self.order = value.clone();
+            return Err(boothop_core::Error::PlatformIo {
+                operation: boothop_core::PlatformOperation::Write,
+                raw_code: 5,
+            });
+        }
         self.order = value.clone();
         if self.mutate_on_write {
             self.order.ids.push(BootId(0xeeee));
@@ -146,7 +165,26 @@ fn append_readback_mismatch_is_residual_and_is_never_retried() {
     );
     assert_eq!(firmware.writes, 1);
     assert!(
-        matches!(state, ArchProvisionState::Provisioning(ref record) if record.step == ProvisioningStep::BootOrderAppended)
+        matches!(state, ArchProvisionState::Provisioning(ref record) if record.step == ProvisioningStep::BootOrderAppendWriteCompleted)
+    );
+}
+
+#[test]
+fn uncertain_append_and_order_removal_keep_attempted_checkpoint() {
+    let mut firmware = FakeFirmware::with_order(&[1, 2]);
+    firmware.fail_write = true;
+    let mut append_state = provisioning(ProvisioningStep::BootOrderAppendAttempted);
+    assert!(append_owned_entry(&mut firmware, &mut append_state).is_err());
+    assert!(
+        matches!(append_state, ArchProvisionState::Provisioning(ref record) if record.step == ProvisioningStep::BootOrderAppendAttempted)
+    );
+
+    let mut removal_firmware = FakeFirmware::with_order(&[9, 0x1234]);
+    removal_firmware.fail_write = true;
+    let mut removal_state = uninstall(UninstallingStep::BootOrderRemovalAttempted);
+    assert!(remove_owned_from_order(&mut removal_firmware, &mut removal_state).is_err());
+    assert!(
+        matches!(removal_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::BootOrderRemovalAttempted)
     );
 }
 
@@ -177,11 +215,29 @@ fn uninstall_removes_only_owned_id_and_rechecks_before_entry_delete() {
     assert_eq!(blocked.writes, 0);
 }
 
+#[test]
+fn entry_delete_rechecks_boot_order_at_the_final_boundary() {
+    let owned = owned_entry_bytes(&entry().identity).unwrap();
+    let mut entry_io = FakeEntry {
+        bytes: Some(owned),
+        ..Default::default()
+    };
+    let mut firmware = FakeFirmware::with_order(&[9]);
+    firmware.readd_on_second_order_read = true;
+    let mut state = uninstall(UninstallingStep::BootEntryRemovalAttempted);
+    assert_eq!(
+        remove_owned_entry(&mut entry_io, &mut firmware, &mut state),
+        Err(boothop_core::Error::Busy)
+    );
+    assert_eq!(entry_io.deletes, 0);
+}
+
 #[derive(Default)]
 struct FakeEntry {
     bytes: Option<Vec<u8>>,
     deletes: usize,
     retain_after_delete: bool,
+    fail_delete: bool,
 }
 
 impl OwnedBootEntryIo for FakeEntry {
@@ -189,8 +245,21 @@ impl OwnedBootEntryIo for FakeEntry {
         Ok(self.bytes.clone())
     }
 
-    fn delete_boot_entry(&mut self, _id: BootId) -> Result<(), boothop_core::Error> {
+    fn delete_boot_entry_if_exact(
+        &mut self,
+        _id: BootId,
+        expected: &[u8],
+    ) -> Result<(), boothop_core::Error> {
         self.deletes += 1;
+        if self.bytes.as_deref() != Some(expected) {
+            return Err(boothop_core::Error::IdentityMismatch);
+        }
+        if self.fail_delete {
+            return Err(boothop_core::Error::PlatformIo {
+                operation: boothop_core::PlatformOperation::Write,
+                raw_code: 5,
+            });
+        }
         if !self.retain_after_delete {
             self.bytes = None;
         }
@@ -235,12 +304,59 @@ fn entry_delete_requires_exact_owned_bytes_and_exact_readback() {
         Err(boothop_core::Error::ReadbackFailed)
     );
     assert_eq!(retained.deletes, 1);
+    assert!(
+        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::BootEntryDeleteCompleted)
+    );
+    assert_eq!(
+        remove_owned_entry(&mut retained, &mut firmware, &mut retained_state),
+        Err(boothop_core::Error::NotConfigured)
+    );
+    assert_eq!(retained.deletes, 1);
+
+    let mut failed = FakeEntry {
+        bytes: Some(owned_entry_bytes(&entry().identity).unwrap()),
+        fail_delete: true,
+        ..Default::default()
+    };
+    let mut failed_state = uninstall(UninstallingStep::BootEntryRemovalAttempted);
+    assert!(remove_owned_entry(&mut failed, &mut firmware, &mut failed_state).is_err());
+    assert!(
+        matches!(failed_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::BootEntryRemovalAttempted)
+    );
+}
+
+#[test]
+fn reconciliation_paths_are_read_only_and_never_retry_mutations() {
+    let mut firmware = FakeFirmware::with_order(&[1, 2]);
+    assert!(!observe_append_only(&mut firmware, BootId(0x1234)).unwrap());
+    assert_eq!(firmware.writes, 0);
+
+    let order_state = uninstall(UninstallingStep::BootOrderRemovalWriteCompleted);
+    assert!(observe_order_removal(&mut firmware, &order_state).unwrap());
+    assert_eq!(firmware.writes, 0);
+
+    let mut entry_io = FakeEntry {
+        bytes: None,
+        ..Default::default()
+    };
+    let entry_state = uninstall(UninstallingStep::BootEntryDeleteCompleted);
+    assert!(observe_entry_removal(&mut entry_io, &entry_state).unwrap());
+    assert_eq!(entry_io.deletes, 0);
+
+    let mut uki = FakeUki::default();
+    let uki_state = uninstall(UninstallingStep::UkiDeleteCompleted);
+    assert_eq!(
+        observe_uki_removal(&mut uki, &uki_state).unwrap(),
+        OwnedUkiState::Missing
+    );
+    assert_eq!(uki.removes, 0);
 }
 
 struct FakeUki {
     state: OwnedUkiState,
     removes: usize,
     retain_after_remove: bool,
+    fail_remove: bool,
 }
 
 impl Default for FakeUki {
@@ -249,6 +365,7 @@ impl Default for FakeUki {
             state: OwnedUkiState::Missing,
             removes: 0,
             retain_after_remove: false,
+            fail_remove: false,
         }
     }
 }
@@ -258,9 +375,23 @@ impl OwnedUkiIo for FakeUki {
         assert_eq!(path, "EFI/BootHop/arch.efi");
         Ok(self.state.clone())
     }
-    fn remove_fixed(&mut self, path: &str) -> Result<(), boothop_core::Error> {
+    fn remove_fixed_if_expected(
+        &mut self,
+        path: &str,
+        sha256: [u8; 32],
+        size: u64,
+    ) -> Result<(), boothop_core::Error> {
         assert_eq!(path, "EFI/BootHop/arch.efi");
         self.removes += 1;
+        if self.fail_remove {
+            return Err(boothop_core::Error::PlatformIo {
+                operation: boothop_core::PlatformOperation::Write,
+                raw_code: 5,
+            });
+        }
+        if self.state != (OwnedUkiState::Regular { sha256, size }) {
+            return Err(boothop_core::Error::IdentityMismatch);
+        }
         if !self.retain_after_remove {
             self.state = OwnedUkiState::Missing;
         }
@@ -312,13 +443,27 @@ fn uki_delete_requires_regular_exact_hash_and_size() {
     );
     assert_eq!(retained.removes, 1);
     assert!(
-        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::UkiRemoved)
+        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::UkiDeleteCompleted)
     );
     assert_eq!(
         remove_owned_uki(&mut retained, &mut retained_state),
         Err(boothop_core::Error::NotConfigured)
     );
     assert_eq!(retained.removes, 1);
+
+    let mut failed = FakeUki {
+        state: OwnedUkiState::Regular { sha256, size },
+        fail_remove: true,
+        ..Default::default()
+    };
+    let mut failed_state = uninstall(UninstallingStep::UkiRemovalAttempted);
+    if let ArchProvisionState::Uninstalling(record) = &mut failed_state {
+        record.owned_entry.publish = Some(PublishMetadata { sha256, size });
+    }
+    assert!(remove_owned_uki(&mut failed, &mut failed_state).is_err());
+    assert!(
+        matches!(failed_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::UkiRemovalAttempted)
+    );
 }
 
 #[test]
@@ -330,6 +475,29 @@ fn journal_is_removed_only_after_the_final_uki_checkpoint() {
         record.residual.clear();
     }
     store.save(&complete).unwrap();
-    store.remove_after_cleanup(&complete).unwrap();
-    assert!(fs.journal().is_none());
+    store.complete_uninstall(&complete).unwrap();
+    assert!(matches!(
+        store.load(),
+        Ok(ArchProvisionState::Uninstalled(_))
+    ));
+}
+
+#[test]
+fn tombstone_survives_directory_sync_uncertainty() {
+    let fs = support::FakeFs::installed();
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let mut complete = uninstall(UninstallingStep::UkiRemoved);
+    if let ArchProvisionState::Uninstalling(record) = &mut complete {
+        record.residual.clear();
+    }
+    store.save(&complete).unwrap();
+    fs.0.borrow_mut().fail = Some(("dir_fsync", 5));
+    assert_eq!(
+        store.complete_uninstall(&complete),
+        Err(boothop_core::Error::StoreDurabilityUnknown { raw_code: 5 })
+    );
+    assert!(matches!(
+        store.load(),
+        Ok(ArchProvisionState::Uninstalled(_))
+    ));
 }

@@ -1,7 +1,8 @@
 use boothop_core::{
     ArchProvisionState, BootId, BuildMetadata, CanonicalDevicePathNode, CanonicalIdentity,
     OwnedArchEntry, ProvisioningRecord, ProvisioningStep, PublishMetadata, Residual,
-    UninstallingRecord, UninstallingStep, decode_arch_provision_state, encode_arch_provision_state,
+    UninstalledRecord, UninstallingRecord, UninstallingStep, decode_arch_provision_state,
+    encode_arch_provision_state,
 };
 
 fn identity(path: &str) -> CanonicalIdentity {
@@ -78,6 +79,11 @@ fn lifecycle_records_roundtrip() {
             step: UninstallingStep::UkiRemoved,
             residual: vec![Residual::BootEntryMayExist],
         }),
+        ArchProvisionState::Uninstalled(UninstalledRecord {
+            operation_id: "op-3".into(),
+            operation_version: 1,
+            owned_entry: ready(),
+        }),
     ];
     for state in states {
         let bytes = encode_arch_provision_state(&state).unwrap();
@@ -113,6 +119,7 @@ fn state_specific_steps_and_complete_ownership_survive_roundtrip() {
         match decoded {
             ArchProvisionState::Provisioning(record) => assert_eq!(record.owned_entry, entry),
             ArchProvisionState::Uninstalling(record) => assert_eq!(record.owned_entry, entry),
+            ArchProvisionState::Uninstalled(record) => assert_eq!(record.owned_entry, entry),
             _ => unreachable!(),
         }
     }
@@ -128,6 +135,7 @@ fn every_provisioning_and_uninstall_step_roundtrips() {
         ProvisioningStep::BootEntryCreated,
         ProvisioningStep::BootEntryReadBackVerified,
         ProvisioningStep::BootOrderAppendAttempted,
+        ProvisioningStep::BootOrderAppendWriteCompleted,
         ProvisioningStep::BootOrderAppended,
         ProvisioningStep::BootOrderReadBackVerified,
     ];
@@ -150,12 +158,15 @@ fn every_provisioning_and_uninstall_step_roundtrips() {
     let uninstall_steps = [
         UninstallingStep::Started,
         UninstallingStep::BootOrderRemovalAttempted,
+        UninstallingStep::BootOrderRemovalWriteCompleted,
         UninstallingStep::BootOrderRemoved,
         UninstallingStep::BootOrderRemovalReadBackVerified,
         UninstallingStep::BootEntryRemovalAttempted,
+        UninstallingStep::BootEntryDeleteCompleted,
         UninstallingStep::BootEntryRemoved,
         UninstallingStep::BootEntryRemovalReadBackVerified,
         UninstallingStep::UkiRemovalAttempted,
+        UninstallingStep::UkiDeleteCompleted,
         UninstallingStep::UkiRemoved,
     ];
     for step in uninstall_steps {

@@ -110,12 +110,9 @@ impl<F: Filesystem> LockedStore<F> {
         self.atomic_replace(ARCH_RECORD, ".arch-provision", &bytes)
     }
 
-    /// Remove only the Arch journal after every owned cleanup has been read back exactly.
-    /// This is intentionally a named operation rather than a generic record/path deletion.
-    pub fn remove_arch_provision_state(
-        &mut self,
-        expected: &ArchProvisionState,
-    ) -> Result<(), Error> {
+    /// Replace the completed uninstall record with a terminal ownership tombstone. The
+    /// journaled metadata remains available if directory durability becomes uncertain.
+    pub fn complete_arch_uninstall(&mut self, expected: &ArchProvisionState) -> Result<(), Error> {
         let current = self.load_arch_provision_state()?;
         if &current != expected
             || !matches!(
@@ -127,12 +124,16 @@ impl<F: Filesystem> LockedStore<F> {
         {
             return Err(Error::NotConfigured);
         }
-        self.fs
-            .unlink(&self.dir, ARCH_RECORD)
-            .map_err(|raw_code| io(PlatformOperation::Replace, raw_code))?;
-        self.fs
-            .sync(&self.dir)
-            .map_err(|raw_code| Error::StoreDurabilityUnknown { raw_code })
+        let ArchProvisionState::Uninstalling(record) = current else {
+            unreachable!("validated terminal uninstall state");
+        };
+        let tombstone = ArchProvisionState::Uninstalled(boothop_core::UninstalledRecord {
+            operation_id: record.operation_id,
+            operation_version: record.operation_version,
+            owned_entry: record.owned_entry,
+        });
+        let bytes = encode_arch_provision_state(&tombstone)?;
+        self.atomic_replace(ARCH_RECORD, ".arch-uninstalled", &bytes)
     }
 
     fn read_named_record(&self, record: &str) -> Result<Option<Vec<u8>>, Error> {
