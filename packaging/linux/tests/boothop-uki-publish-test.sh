@@ -139,6 +139,58 @@ if compgen -G "$BOOT_HOP_ESP_MOUNT/EFI/BootHop/.boothop-uki.*" >/dev/null; then
     exit 1
 fi
 
+expect_unsafe_final_object_rejected() {
+    object_kind=$1
+    prepare
+    rm -f -- "$final"
+    case "$object_kind" in
+        directory)
+            mkdir -- "$final"
+            printf 'old stable marker\n' >"$final/stable-marker"
+            ;;
+        symlink)
+            target="$work/final-symlink-target"
+            printf 'old stable\n' >"$target"
+            ln -s -- "$target" "$final"
+            ;;
+        dangling-symlink)
+            ln -s -- "$work/missing-final-target" "$final"
+            ;;
+        fifo)
+            mkfifo -- "$final"
+            ;;
+    esac
+    stage_before=$(<"$stage")
+    if "$publisher" /dev/null /tmp/initramfs "$stage"; then
+        echo "publisher unexpectedly accepted final $object_kind" >&2
+        exit 1
+    fi
+    [[ $(<"$stage") == "$stage_before" ]]
+    case "$object_kind" in
+        directory)
+            [[ -d "$final" && $(<"$final/stable-marker") == 'old stable marker' ]]
+            [[ ! -e "$final/arch.efi.staging" ]]
+            ;;
+        symlink)
+            [[ -L "$final" && $(<"$target") == 'old stable' ]]
+            ;;
+        dangling-symlink)
+            [[ -L "$final" ]]
+            ;;
+        fifo)
+            [[ -p "$final" ]]
+            ;;
+    esac
+    rm -rf -- "$final"
+    [[ "$object_kind" != symlink ]] || rm -f -- "$target"
+}
+
+BOOT_HOP_SECURE_BOOT_REQUIRED=0
+export BOOT_HOP_SECURE_BOOT_REQUIRED
+for final_object_kind in directory symlink dangling-symlink fifo; do
+    expect_unsafe_final_object_rejected "$final_object_kind"
+done
+
 expect_failure_preserves_stable_unset_esp() {
     prepare
     unset BOOT_HOP_ESP_MOUNT

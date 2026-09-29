@@ -95,3 +95,24 @@ Verification after the round:
 - `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` — remains blocked only by the existing unrelated Phase 1 diagnostics in `crates/core/src/arch_provision.rs` (manual `is_multiple_of` at line 365 and `chunks_exact_to_as_chunks` at line 369).
 - No real presets, `/boot`, ESP, EFI variables, or NVRAM were accessed; all added behavior was exercised with fake or temporary fixtures.
+
+## Fourth review fix round
+
+Both findings are fixed with focused regressions:
+
+- Persistent cmdline validation now requires exactly one `root=` token. It accepts only nonempty `UUID=` or `PARTUUID=` identifiers containing hexadecimal digits and single internal hyphens, with at least one hex digit. It rejects empty, non-hex, path-like, leading/trailing/repeated-hyphen identifiers, and duplicate/conflicting roots. Tests include standard GUID and DOS partition suffix forms, plus uppercase hex.
+- Immediately before final publication, the shell publisher checks an existing `EFI/BootHop/arch.efi`: only a non-symlink regular file is accepted. Directories, valid and dangling symlinks, and FIFOs fail before `mv`. The directory fixture uses a valid staged image and proves failure preserves staging bytes and its stable marker without creating a nested `arch.efi.staging`. Existing regular-file replacement remains covered by the explicit Secure Boot disabled success case.
+
+TDD evidence: before implementation, the empty `root=UUID=` case was accepted, and the shell test showed that publishing to an existing final directory returned success. The stricter follow-up regression also first showed `root=UUID=not-a-uuid` was accepted. All focused regressions pass after the changes.
+
+Verification:
+
+- `cargo test -p boothop-platform --test uki_discovery` — passed, 12 tests.
+- `cargo test -p boothop-platform --test uki_publish` — passed, 3 tests.
+- `packaging/linux/tests/boothop-uki-publish-test.sh` — passed with temporary fixtures and stubbed tools.
+- `bash -n packaging/linux/boothop-uki-publish.sh packaging/linux/tests/boothop-uki-publish-test.sh` — passed.
+- `cargo test --workspace --all-targets --quiet` — passed all targets.
+- `cargo fmt --check` — passed.
+- `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — remains blocked by the two known unrelated Phase 1 clippy diagnostics in `crates/core/src/arch_provision.rs` lines 365 and 369 (`manual_is_multiple_of` and `chunks_exact_to_as_chunks`).
+- All new tests use in-memory or temporary fixtures. No host EFI, presets, ESP, or NVRAM were accessed.

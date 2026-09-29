@@ -101,6 +101,15 @@ if [[ "$secure_boot_required" == 1 ]]; then
     mv -f -- "$signed_uki" "$staged_uki"
 fi
 
+# Do not let `mv` reinterpret an existing directory as a destination container, or replace a
+# symlink/other object at the fixed stable path. A regular file is the expected update target.
+if [[ -e "$final_uki" || -L "$final_uki" ]]; then
+    if [[ ! -f "$final_uki" || -L "$final_uki" ]]; then
+        echo "existing stable UKI path is not a non-symlink regular file" >&2
+        exit 1
+    fi
+fi
+
 # Both files share this directory, so mv uses a same-filesystem atomic rename. The stable file
 # is untouched until every build, validation, and optional signing step has succeeded.
 mv -f -- "$staged_uki" "$final_uki"

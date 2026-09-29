@@ -453,9 +453,33 @@ fn validate_cmdline(command_line: &str) -> Result<(), UkiDiscoveryError> {
             "crypt/LUKS root configuration is unsupported by this UKI plan".into(),
         ));
     }
-    let root = tokens.iter().find_map(|token| token.strip_prefix("root="));
+    let mut roots = tokens
+        .iter()
+        .filter_map(|token| token.strip_prefix("root="));
+    let root = roots.next();
+    if roots.next().is_some() {
+        return Err(UkiDiscoveryError::UnsupportedRoot(
+            "persistent command line must identify exactly one root= device".into(),
+        ));
+    }
     match root {
-        Some(root) if root.starts_with("UUID=") || root.starts_with("PARTUUID=") => Ok(()),
+        Some(root) if root.starts_with("UUID=") || root.starts_with("PARTUUID=") => {
+            let (_, identifier) = root.split_once('=').expect("prefix has equals");
+            if identifier.is_empty()
+                || !identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+                || !identifier.bytes().any(|byte| byte.is_ascii_hexdigit())
+                || identifier.starts_with('-')
+                || identifier.ends_with('-')
+                || identifier.contains("--")
+            {
+                return Err(UkiDiscoveryError::UnsupportedRoot(
+                    "root UUID= or PARTUUID= identifier is empty or malformed".into(),
+                ));
+            }
+            Ok(())
+        }
         Some(root) => Err(UkiDiscoveryError::UnsupportedRoot(format!(
             "root={root} is unsupported; use a persistent UUID= or PARTUUID= root"
         ))),

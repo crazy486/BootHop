@@ -255,7 +255,7 @@ fn rejects_unsupported_preset_layout_and_unmounted_or_unsafe_esp_paths() {
 #[test]
 fn preset_cmdline_precedes_static_file_and_proc_only_fallback_is_rejected() {
     let mut fs = FixtureFs::arch();
-    fs.insert("/etc/kernel/cmdline", "root=UUID=file quiet");
+    fs.insert("/etc/kernel/cmdline", "root=UUID=deadbeef quiet");
     fs.insert("/proc/cmdline", "root=UUID=proc");
     assert_eq!(
         discover_uki_plan(&fs, &policy()).unwrap().command_line,
@@ -267,12 +267,12 @@ fn preset_cmdline_precedes_static_file_and_proc_only_fallback_is_rejected() {
         "/etc/mkinitcpio.d/linux.preset",
         "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\n",
     );
-    no_preset_cmdline.insert("/etc/kernel/cmdline", "root=UUID=file quiet");
+    no_preset_cmdline.insert("/etc/kernel/cmdline", "root=UUID=deadbeef quiet");
     assert_eq!(
         discover_uki_plan(&no_preset_cmdline, &policy())
             .unwrap()
             .command_line,
-        "root=UUID=file quiet"
+        "root=UUID=deadbeef quiet"
     );
 
     no_preset_cmdline.remove("/etc/kernel/cmdline");
@@ -358,5 +358,45 @@ fn rejects_unsupported_root_and_crypt_configuration() {
         );
         fs.insert("/etc/boothop/cmdline", cmdline);
         assert!(discover_uki_plan(&fs, &policy()).is_err(), "{cmdline}");
+    }
+}
+
+#[test]
+fn root_identifier_must_be_unique_nonempty_and_conservatively_valid() {
+    for cmdline in [
+        "root=UUID= rw",
+        "root=PARTUUID= rw",
+        "root=UUID=abc root=UUID=def rw",
+        "root=UUID=abc root=PARTUUID=def rw",
+        "root=UUID=abc/def rw",
+        "root=PARTUUID=abc:def rw",
+        "root=UUID=not-a-uuid rw",
+        "root=UUID=--- rw",
+        "root=UUID=-abc rw",
+        "root=UUID=abc- rw",
+        "root=UUID=ab--cd rw",
+    ] {
+        let mut fs = FixtureFs::arch();
+        fs.insert(
+            "/etc/mkinitcpio.d/linux.preset",
+            "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
+        );
+        fs.insert("/etc/boothop/cmdline", cmdline);
+        assert!(discover_uki_plan(&fs, &policy()).is_err(), "{cmdline}");
+    }
+
+    for cmdline in [
+        "root=UUID=123e4567-e89b-12d3-a456-426614174000 rw",
+        "root=UUID=ABCDEF12-3456-7890-ABCD-EF1234567890 rw",
+        "root=PARTUUID=123e4567-e89b-12d3-a456-426614174000 rw",
+        "root=PARTUUID=12345678-01 rw",
+    ] {
+        let mut fs = FixtureFs::arch();
+        fs.insert(
+            "/etc/mkinitcpio.d/linux.preset",
+            "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
+        );
+        fs.insert("/etc/boothop/cmdline", cmdline);
+        assert!(discover_uki_plan(&fs, &policy()).is_ok(), "{cmdline}");
     }
 }
