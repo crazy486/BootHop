@@ -8,7 +8,9 @@ fn identity(path: &str) -> CanonicalIdentity {
     let bytes: Vec<_> = include_str!("../../../fixtures/uefi/synthetic/task1-shape.hex")
         .trim()
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
     let mut identity =

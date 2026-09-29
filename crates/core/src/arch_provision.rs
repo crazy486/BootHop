@@ -406,11 +406,11 @@ fn decode_hex<const N: usize>(encoded: &str) -> Result<[u8; N], Error> {
     bytes.try_into().map_err(|_| Error::CorruptRecord)
 }
 fn decode_hex_vec(encoded: &str) -> Result<Vec<u8>, Error> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err(Error::CorruptRecord);
     }
     let mut bytes = Vec::with_capacity(encoded.len() / 2);
-    for pair in encoded.as_bytes().chunks_exact(2) {
+    for pair in encoded.as_bytes().as_chunks::<2>().0 {
         let high = decode_nibble(pair[0])?;
         let low = decode_nibble(pair[1])?;
         bytes.push(high * 16 + low);
