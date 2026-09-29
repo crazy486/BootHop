@@ -46,10 +46,10 @@ pub fn ready_state() -> ArchProvisionState {
             kernel_release: "6.12.1-zen1-1-zen".into(),
             initramfs_sha256: [0x11; 32],
         },
-        publish: PublishMetadata {
+        publish: Some(PublishMetadata {
             sha256: [0x22; 32],
             size: 42,
-        },
+        }),
     })
 }
 

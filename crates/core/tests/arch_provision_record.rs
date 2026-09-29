@@ -39,10 +39,10 @@ fn ready() -> OwnedArchEntry {
             kernel_release: "6.12.1-zen1-1-zen".into(),
             initramfs_sha256: [0x11; 32],
         },
-        publish: PublishMetadata {
+        publish: Some(PublishMetadata {
             sha256: [0x22; 32],
             size: 42,
-        },
+        }),
     }
 }
 
@@ -119,6 +119,8 @@ fn state_specific_steps_and_complete_ownership_survive_roundtrip() {
 #[test]
 fn every_provisioning_and_uninstall_step_roundtrips() {
     let provisioning_steps = [
+        ProvisioningStep::UkiPublicationPending,
+        ProvisioningStep::UkiPublicationAttempted,
         ProvisioningStep::UkiPublished,
         ProvisioningStep::BootEntryCreateAttempted,
         ProvisioningStep::BootEntryCreated,
@@ -128,10 +130,14 @@ fn every_provisioning_and_uninstall_step_roundtrips() {
         ProvisioningStep::BootOrderReadBackVerified,
     ];
     for step in provisioning_steps {
+        let mut owned_entry = ready();
+        if step == ProvisioningStep::UkiPublicationPending {
+            owned_entry.publish = None;
+        }
         let state = ArchProvisionState::Provisioning(ProvisioningRecord {
             operation_id: "op-provision".into(),
             operation_version: 1,
-            owned_entry: ready(),
+            owned_entry,
             step,
             residual: vec![Residual::BootOrderMayContainEntry],
         });
@@ -179,11 +185,11 @@ fn unknown_or_corrupt_record_fails_closed() {
     );
     assert_eq!(
         decode_arch_provision_state(Some(br#"{"version":2,"state":"Ready","entry":{}}"#)),
-        Err(boothop_core::Error::CorruptRecord)
+        Err(boothop_core::Error::UnsupportedRecordVersion { found: 2 })
     );
     assert_eq!(
         decode_arch_provision_state(Some(br#"{"version":2,"state":{"kind":"FutureState"}}"#,)),
-        Err(boothop_core::Error::CorruptRecord)
+        Err(boothop_core::Error::UnsupportedRecordVersion { found: 2 })
     );
 
     let valid =
@@ -231,7 +237,7 @@ fn owned_entry_requires_supported_identity_and_fixed_path() {
 #[test]
 fn intermediate_states_require_complete_owned_metadata() {
     let mut entry = ready();
-    entry.publish.size = 0;
+    entry.publish.as_mut().unwrap().size = 0;
     let provisioning = ArchProvisionState::Provisioning(ProvisioningRecord {
         operation_id: "op-1".into(),
         operation_version: 1,
@@ -252,6 +258,50 @@ fn intermediate_states_require_complete_owned_metadata() {
     );
     assert_eq!(
         encode_arch_provision_state(&uninstalling),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+}
+
+#[test]
+fn uki_publication_pending_has_no_fabricated_publish_metadata() {
+    let mut entry = ready();
+    entry.publish = None;
+    let pending = ArchProvisionState::Provisioning(ProvisioningRecord {
+        operation_id: "before-uki-build".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: ProvisioningStep::UkiPublicationPending,
+        residual: vec![],
+    });
+    let bytes = encode_arch_provision_state(&pending).unwrap();
+    assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(pending));
+}
+
+#[test]
+fn publication_checkpoints_require_metadata_at_the_correct_boundary() {
+    let mut pending_with_metadata = ready();
+    let pending = ArchProvisionState::Provisioning(ProvisioningRecord {
+        operation_id: "pending-with-metadata".into(),
+        operation_version: 1,
+        owned_entry: pending_with_metadata.clone(),
+        step: ProvisioningStep::UkiPublicationPending,
+        residual: vec![],
+    });
+    assert_eq!(
+        encode_arch_provision_state(&pending),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+
+    pending_with_metadata.publish = None;
+    let attempted = ArchProvisionState::Provisioning(ProvisioningRecord {
+        operation_id: "attempt-without-metadata".into(),
+        operation_version: 1,
+        owned_entry: pending_with_metadata,
+        step: ProvisioningStep::UkiPublicationAttempted,
+        residual: vec![],
+    });
+    assert_eq!(
+        encode_arch_provision_state(&attempted),
         Err(boothop_core::Error::CorruptRecord)
     );
 }

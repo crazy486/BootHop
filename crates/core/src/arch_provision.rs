@@ -5,7 +5,7 @@ use crate::{
     encode_record,
 };
 
-const RECORD_VERSION: u64 = 2;
+const RECORD_VERSION: u64 = 3;
 const IDENTITY_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1_048_576;
 const FIXED_IDENTITY_PATH: &str = "\\EFI\\BootHop\\arch.efi";
@@ -26,7 +26,8 @@ pub struct OwnedArchEntry {
     pub identity_version: u64,
     pub uki_path: String,
     pub build: BuildMetadata,
-    pub publish: PublishMetadata,
+    /// Absent only while the journal is at `UkiPublicationPending` and no output exists yet.
+    pub publish: Option<PublishMetadata>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,6 +67,8 @@ pub struct UninstallingRecord {
 #[serde(rename_all = "snake_case")]
 /// Journal checkpoints only; a step never authorizes repeating an EFI mutation.
 pub enum ProvisioningStep {
+    UkiPublicationPending,
+    UkiPublicationAttempted,
     UkiPublished,
     BootEntryCreateAttempted,
     BootEntryCreated,
@@ -142,7 +145,7 @@ struct WireOwnedArchEntry {
     identity_version: u64,
     uki_path: String,
     build: WireBuildMetadata,
-    publish: WirePublishMetadata,
+    publish: Option<WirePublishMetadata>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,15 +188,21 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
             residual,
         } => {
             validate_operation(&operation_id, operation_version)?;
+            let owned_entry = decode_owned_entry(owned_entry)?;
+            validate_provisioning_publish_checkpoint(&owned_entry, step)?;
             Ok(ArchProvisionState::Provisioning(ProvisioningRecord {
                 operation_id,
                 operation_version,
-                owned_entry: decode_owned_entry(owned_entry)?,
+                owned_entry,
                 step,
                 residual,
             }))
         }
-        WireState::Ready { entry } => Ok(ArchProvisionState::Ready(decode_owned_entry(entry)?)),
+        WireState::Ready { entry } => {
+            let entry = decode_owned_entry(entry)?;
+            require_publish_metadata(&entry)?;
+            Ok(ArchProvisionState::Ready(entry))
+        }
         WireState::Uninstalling {
             operation_id,
             operation_version,
@@ -202,10 +211,12 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
             residual,
         } => {
             validate_operation(&operation_id, operation_version)?;
+            let owned_entry = decode_owned_entry(owned_entry)?;
+            require_publish_metadata(&owned_entry)?;
             Ok(ArchProvisionState::Uninstalling(UninstallingRecord {
                 operation_id,
                 operation_version,
-                owned_entry: decode_owned_entry(owned_entry)?,
+                owned_entry,
                 step,
                 residual,
             }))
@@ -218,6 +229,7 @@ pub fn encode_arch_provision_state(state: &ArchProvisionState) -> Result<Vec<u8>
         ArchProvisionState::Unprovisioned => return Err(Error::CorruptRecord),
         ArchProvisionState::Provisioning(record) => {
             validate_operation(&record.operation_id, record.operation_version)?;
+            validate_provisioning_publish_checkpoint(&record.owned_entry, record.step)?;
             WireState::Provisioning {
                 operation_id: record.operation_id.clone(),
                 operation_version: record.operation_version,
@@ -226,11 +238,15 @@ pub fn encode_arch_provision_state(state: &ArchProvisionState) -> Result<Vec<u8>
                 residual: record.residual.clone(),
             }
         }
-        ArchProvisionState::Ready(entry) => WireState::Ready {
-            entry: encode_owned_entry(entry)?,
-        },
+        ArchProvisionState::Ready(entry) => {
+            require_publish_metadata(entry)?;
+            WireState::Ready {
+                entry: encode_owned_entry(entry)?,
+            }
+        }
         ArchProvisionState::Uninstalling(record) => {
             validate_operation(&record.operation_id, record.operation_version)?;
+            require_publish_metadata(&record.owned_entry)?;
             WireState::Uninstalling {
                 operation_id: record.operation_id.clone(),
                 operation_version: record.operation_version,
@@ -268,11 +284,34 @@ fn validate_owned_entry(entry: &OwnedArchEntry) -> Result<(), Error> {
     if entry.uki_path != FIXED_UKI_PATH
         || entry.build.kernel.is_empty()
         || entry.build.kernel_release.is_empty()
-        || entry.publish.size == 0
+        || entry
+            .publish
+            .as_ref()
+            .is_some_and(|metadata| metadata.size == 0)
     {
         return Err(Error::CorruptRecord);
     }
     validate_fixed_identity(&entry.identity)
+}
+
+fn require_publish_metadata(entry: &OwnedArchEntry) -> Result<(), Error> {
+    if entry.publish.is_none() {
+        return Err(Error::CorruptRecord);
+    }
+    validate_owned_entry(entry)
+}
+
+fn validate_provisioning_publish_checkpoint(
+    entry: &OwnedArchEntry,
+    step: ProvisioningStep,
+) -> Result<(), Error> {
+    validate_owned_entry(entry)?;
+    match (step, entry.publish.as_ref()) {
+        (ProvisioningStep::UkiPublicationPending, None) => Ok(()),
+        (ProvisioningStep::UkiPublicationPending, Some(_)) => Err(Error::CorruptRecord),
+        (_, Some(metadata)) if metadata.size > 0 => Ok(()),
+        _ => Err(Error::CorruptRecord),
+    }
 }
 
 fn validate_fixed_identity(identity: &CanonicalIdentity) -> Result<(), Error> {
@@ -308,10 +347,10 @@ fn encode_owned_entry(entry: &OwnedArchEntry) -> Result<WireOwnedArchEntry, Erro
             kernel_release: entry.build.kernel_release.clone(),
             initramfs_sha256: encode_hex(entry.build.initramfs_sha256),
         },
-        publish: WirePublishMetadata {
-            sha256: encode_hex(entry.publish.sha256),
-            size: entry.publish.size,
-        },
+        publish: entry.publish.as_ref().map(|metadata| WirePublishMetadata {
+            sha256: encode_hex(metadata.sha256),
+            size: metadata.size,
+        }),
     })
 }
 
@@ -326,10 +365,15 @@ fn decode_owned_entry(wire: WireOwnedArchEntry) -> Result<OwnedArchEntry, Error>
             kernel_release: wire.build.kernel_release,
             initramfs_sha256: decode_hex::<32>(&wire.build.initramfs_sha256)?,
         },
-        publish: PublishMetadata {
-            sha256: decode_hex::<32>(&wire.publish.sha256)?,
-            size: wire.publish.size,
-        },
+        publish: wire
+            .publish
+            .map(|metadata| {
+                Ok(PublishMetadata {
+                    sha256: decode_hex::<32>(&metadata.sha256)?,
+                    size: metadata.size,
+                })
+            })
+            .transpose()?,
     };
     validate_owned_entry(&entry)?;
     Ok(entry)

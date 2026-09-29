@@ -138,3 +138,26 @@ Verification:
 - `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` — remains blocked by the same unrelated Phase 1 clippy diagnostics in `crates/core/src/arch_provision.rs` lines 365 and 369 (`manual_is_multiple_of` and `chunks_exact_to_as_chunks`).
 - No host EFI, presets, ESP, or NVRAM were accessed. There is no production adapter/verifier wired yet; its required interface is the typed verified journal state plus final-path inspection and an authority-enforcing atomic rename, with returned publication metadata durably saved before EFI-variable writes. Phase 5/7 now explicitly blocks hook installation and real provisioning until this boundary is implemented and tested.
+
+## Publication lifecycle checkpoint review fix
+
+The follow-up lifecycle review found that `Provisioning` did not distinguish the pre-publication checkpoint, and the API could report `UkiPublished` without exposing a durable journal-save boundary. The journal model and injected publisher contract now make that boundary explicit:
+
+- `ProvisioningStep::UkiPublicationPending` has no `PublishMetadata`. The serialized record version is now 3; version 2 is rejected because its `UkiPublished` checkpoint may have been written before stable-file readback. Pending is serializable without fabricated metadata.
+- Initial publication order is durable Attempted(expected SHA-256/size) → staging write → atomic rename → exact stable-file readback → durable UkiPublished. Attempted is persisted before any ESP write. Any Attempted restart is reconciliation-only: exact file readback can be presented for explicit recovery, while absent/mismatched bytes fail closed and are never rebuilt, retried, or deleted.
+- `UkiPublishJournal` is an injected durable-checkpoint interface. The coordinator must hold the same exclusive journal lock from verified state load through authority checks, rename, readback, and durable checkpoint save. The platform function reports success only after the injected callback reports durable completion. Ready updates likewise save new hash/size only after readback; if rename succeeds and that save fails or has uncertain outcome, the old checkpoint cannot authorize another update because its exact old hash/size no longer matches the file.
+- Phase 7 plan text now specifies the durable record serialization and crash behavior; Phase 5/7 hook gates remain unchanged. No hook was installed or wired.
+
+TDD evidence: before the implementation, the lifecycle regressions failed to compile because the journal checkpoint interface and reconciliation helper were absent. A subsequent schema test exposed that the existing all-step roundtrip fixture put publish metadata on Pending; the fixture was corrected to encode Pending without metadata, and the model rejects Pending with stale metadata. Dedicated tests verify Attempted is recorded before the staging write and that a failed Attempted save causes no staging or rename. Injected tests cover interruption after rename, final readback mismatch, failure saving UkiPublished, reconciliation-only retry, and Ready update journal-save failure. The fake journal refuses UkiPublished unless the exact Attempted metadata matches.
+
+Verification for this round:
+
+- `cargo test -p boothop-core --test arch_provision_record` — passed, 9 tests.
+- `cargo test -p boothop-platform --test uki_publish` — passed, 11 tests.
+- `cargo test -p boothop-platform --test uki_discovery` — passed, 12 tests.
+- `packaging/linux/tests/boothop-uki-publish-test.sh` and `bash -n packaging/linux/boothop-uki-publish.sh packaging/linux/tests/boothop-uki-publish-test.sh` — passed.
+- `cargo test --workspace --all-targets --quiet` — passed all targets.
+- `cargo fmt --check` — passed.
+- `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — blocked by the same two pre-existing Phase 1 diagnostics in `crates/core/src/arch_provision.rs` (`manual_is_multiple_of` and `chunks_exact_to_as_chunks`); those are outside this bounded fix.
+- All lifecycle tests use in-memory fakes. No host EFI, presets, ESP, or NVRAM were accessed.
