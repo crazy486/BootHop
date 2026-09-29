@@ -9,7 +9,7 @@ mod record;
 
 pub use arch_provision::{
     ArchProvisionState, BuildMetadata, OwnedArchEntry, ProvisioningRecord, ProvisioningStep,
-    PublishMetadata, Residual, UninstallingRecord, decode_arch_provision_state,
+    PublishMetadata, Residual, UninstallingRecord, UninstallingStep, decode_arch_provision_state,
     encode_arch_provision_state,
 };
 pub use device_path::parse_device_path;

@@ -107,7 +107,7 @@ impl<F: Filesystem> LockedStore<F> {
     pub fn save_arch_provision_state(&mut self, state: &ArchProvisionState) -> Result<(), Error> {
         self.load_arch_provision_state()?;
         let bytes = encode_arch_provision_state(state)?;
-        self.replace_named_record(ARCH_RECORD, ".arch-provision", &bytes)
+        self.atomic_replace(ARCH_RECORD, ".arch-provision", &bytes)
     }
 
     fn read_named_record(&self, record: &str) -> Result<Option<Vec<u8>>, Error> {
@@ -153,7 +153,7 @@ impl<F: Filesystem> LockedStore<F> {
         Ok(Some(bytes))
     }
 
-    fn replace_named_record(&self, record: &str, prefix: &str, bytes: &[u8]) -> Result<(), Error> {
+    fn atomic_replace(&self, record: &str, prefix: &str, bytes: &[u8]) -> Result<(), Error> {
         let name = format!(
             "{prefix}-{}-{}.tmp",
             std::process::id(),
@@ -242,46 +242,7 @@ impl<F: Filesystem> ProtectedStore for LockedStore<F> {
     fn save(&mut self, target: &TargetRecord) -> Result<(), Error> {
         self.load()?;
         let bytes = encode_record(target)?;
-        let name = format!(
-            ".targets-{}-{}.tmp",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        );
-        let mut file = self
-            .fs
-            .open(&self.dir, &name, OpenKind::ExclusiveTemp)
-            .map_err(|e| io(PlatformOperation::Open, e))?;
-        let result = (|| {
-            validate_file(
-                self.fs
-                    .metadata(&file)
-                    .map_err(|e| io(PlatformOperation::Metadata, e))?,
-            )?;
-            let mut written = 0;
-            while written < bytes.len() {
-                let count = self
-                    .fs
-                    .write(&mut file, &bytes[written..])
-                    .map_err(|e| io(PlatformOperation::Write, e))?;
-                if count == 0 || count > bytes.len() - written {
-                    return Err(io(PlatformOperation::Write, 5));
-                }
-                written += count;
-            }
-            self.fs
-                .sync(&file)
-                .map_err(|e| io(PlatformOperation::Flush, e))?;
-            self.fs
-                .rename(&self.dir, &name, RECORD)
-                .map_err(|e| io(PlatformOperation::Replace, e))
-        })();
-        if let Err(error) = result {
-            self.cleanup_temp(&file, &name);
-            return Err(error);
-        }
-        self.fs
-            .sync(&self.dir)
-            .map_err(|raw_code| Error::StoreDurabilityUnknown { raw_code })
+        self.atomic_replace(RECORD, ".targets", &bytes)
     }
 }
 

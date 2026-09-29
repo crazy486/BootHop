@@ -1,7 +1,7 @@
 use boothop_core::{
     ArchProvisionState, BootId, BuildMetadata, CanonicalDevicePathNode, CanonicalIdentity,
     OwnedArchEntry, ProvisioningRecord, ProvisioningStep, PublishMetadata, Residual,
-    UninstallingRecord, decode_arch_provision_state, encode_arch_provision_state,
+    UninstallingRecord, UninstallingStep, decode_arch_provision_state, encode_arch_provision_state,
 };
 
 fn identity(path: &str) -> CanonicalIdentity {
@@ -64,20 +64,100 @@ fn lifecycle_records_roundtrip() {
         ArchProvisionState::Provisioning(ProvisioningRecord {
             operation_id: "op-1".into(),
             operation_version: 1,
-            expected_identity: identity("\\EFI\\BootHop\\arch.efi"),
-            step: ProvisioningStep::UkiPublished,
-            residual: vec![Residual::BootEntryMayExist],
+            owned_entry: ready(),
+            step: ProvisioningStep::BootOrderReadBackVerified,
+            residual: vec![Residual::BootOrderMayContainEntry],
         }),
         ArchProvisionState::Ready(ready()),
         ArchProvisionState::Uninstalling(UninstallingRecord {
             operation_id: "op-2".into(),
             operation_version: 1,
-            expected_identity: identity("\\EFI\\BootHop\\arch.efi"),
-            step: ProvisioningStep::BootEntryRemoved,
-            residual: vec![Residual::UkiMayRemain],
+            owned_entry: ready(),
+            step: UninstallingStep::UkiRemoved,
+            residual: vec![Residual::BootEntryMayExist],
         }),
     ];
     for state in states {
+        let bytes = encode_arch_provision_state(&state).unwrap();
+        assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(state));
+    }
+}
+
+#[test]
+fn state_specific_steps_and_complete_ownership_survive_roundtrip() {
+    let entry = ready();
+    let provisioning = ArchProvisionState::Provisioning(ProvisioningRecord {
+        operation_id: "before-efi-write".into(),
+        operation_version: 1,
+        owned_entry: entry.clone(),
+        step: ProvisioningStep::BootEntryCreateAttempted,
+        residual: vec![
+            Residual::BootEntryMayExist,
+            Residual::BootOrderMayContainEntry,
+        ],
+    });
+    let uninstalling = ArchProvisionState::Uninstalling(UninstallingRecord {
+        operation_id: "remove-owned-entry".into(),
+        operation_version: 1,
+        owned_entry: entry.clone(),
+        step: UninstallingStep::BootOrderRemovalReadBackVerified,
+        residual: vec![Residual::UkiMayRemain],
+    });
+
+    for state in [provisioning, uninstalling] {
+        let bytes = encode_arch_provision_state(&state).unwrap();
+        let decoded = decode_arch_provision_state(Some(&bytes)).unwrap();
+        assert_eq!(decoded, state);
+        match decoded {
+            ArchProvisionState::Provisioning(record) => assert_eq!(record.owned_entry, entry),
+            ArchProvisionState::Uninstalling(record) => assert_eq!(record.owned_entry, entry),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn every_provisioning_and_uninstall_step_roundtrips() {
+    let provisioning_steps = [
+        ProvisioningStep::UkiPublished,
+        ProvisioningStep::BootEntryCreateAttempted,
+        ProvisioningStep::BootEntryCreated,
+        ProvisioningStep::BootEntryReadBackVerified,
+        ProvisioningStep::BootOrderAppendAttempted,
+        ProvisioningStep::BootOrderAppended,
+        ProvisioningStep::BootOrderReadBackVerified,
+    ];
+    for step in provisioning_steps {
+        let state = ArchProvisionState::Provisioning(ProvisioningRecord {
+            operation_id: "op-provision".into(),
+            operation_version: 1,
+            owned_entry: ready(),
+            step,
+            residual: vec![Residual::BootOrderMayContainEntry],
+        });
+        let bytes = encode_arch_provision_state(&state).unwrap();
+        assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(state));
+    }
+
+    let uninstall_steps = [
+        UninstallingStep::Started,
+        UninstallingStep::BootOrderRemovalAttempted,
+        UninstallingStep::BootOrderRemoved,
+        UninstallingStep::BootOrderRemovalReadBackVerified,
+        UninstallingStep::BootEntryRemovalAttempted,
+        UninstallingStep::BootEntryRemoved,
+        UninstallingStep::BootEntryRemovalReadBackVerified,
+        UninstallingStep::UkiRemovalAttempted,
+        UninstallingStep::UkiRemoved,
+    ];
+    for step in uninstall_steps {
+        let state = ArchProvisionState::Uninstalling(UninstallingRecord {
+            operation_id: "op-uninstall".into(),
+            operation_version: 1,
+            owned_entry: ready(),
+            step,
+            residual: vec![Residual::BootEntryMayExist, Residual::UkiMayRemain],
+        });
         let bytes = encode_arch_provision_state(&state).unwrap();
         assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(state));
     }
@@ -90,11 +170,36 @@ fn unknown_or_corrupt_record_fails_closed() {
         Err(boothop_core::Error::UnsupportedRecordVersion { found: 999 })
     ));
     assert_eq!(
+        decode_arch_provision_state(Some(br#"{"version":1,"state":{"kind":"Ready"}}"#)),
+        Err(boothop_core::Error::UnsupportedRecordVersion { found: 1 })
+    );
+    assert_eq!(
         decode_arch_provision_state(Some(b"not json")),
         Err(boothop_core::Error::CorruptRecord)
     );
     assert_eq!(
-        decode_arch_provision_state(Some(br#"{"version":1,"state":"Ready","entry":{}}"#)),
+        decode_arch_provision_state(Some(br#"{"version":2,"state":"Ready","entry":{}}"#)),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+    assert_eq!(
+        decode_arch_provision_state(Some(br#"{"version":2,"state":{"kind":"FutureState"}}"#,)),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+
+    let valid =
+        encode_arch_provision_state(&ArchProvisionState::Provisioning(ProvisioningRecord {
+            operation_id: "op-1".into(),
+            operation_version: 1,
+            owned_entry: ready(),
+            step: ProvisioningStep::BootEntryCreateAttempted,
+            residual: vec![],
+        }))
+        .unwrap();
+    let unknown_step = String::from_utf8(valid)
+        .unwrap()
+        .replace("boot_entry_create_attempted", "future_step");
+    assert_eq!(
+        decode_arch_provision_state(Some(unknown_step.as_bytes())),
         Err(boothop_core::Error::CorruptRecord)
     );
 }
@@ -119,6 +224,34 @@ fn owned_entry_requires_supported_identity_and_fixed_path() {
     entry.identity = identity("\\EFI\\BOOT\\BOOTX64.EFI");
     assert_eq!(
         encode_arch_provision_state(&ArchProvisionState::Ready(entry)),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+}
+
+#[test]
+fn intermediate_states_require_complete_owned_metadata() {
+    let mut entry = ready();
+    entry.publish.size = 0;
+    let provisioning = ArchProvisionState::Provisioning(ProvisioningRecord {
+        operation_id: "op-1".into(),
+        operation_version: 1,
+        owned_entry: entry.clone(),
+        step: ProvisioningStep::BootEntryCreateAttempted,
+        residual: vec![],
+    });
+    let uninstalling = ArchProvisionState::Uninstalling(UninstallingRecord {
+        operation_id: "op-2".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: UninstallingStep::UkiRemovalAttempted,
+        residual: vec![],
+    });
+    assert_eq!(
+        encode_arch_provision_state(&provisioning),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+    assert_eq!(
+        encode_arch_provision_state(&uninstalling),
         Err(boothop_core::Error::CorruptRecord)
     );
 }

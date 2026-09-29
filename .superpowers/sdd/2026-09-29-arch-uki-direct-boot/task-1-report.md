@@ -47,3 +47,28 @@ All store tests used the existing in-memory fake filesystem. No EFI variables, e
 - The journal and target record filenames remain separate while using the same protected directory and lock inode.
 - Canonical identity is serialized by reusing the existing target-record codec and embedded as lowercase hex in the journal. This reuses existing identity validation and keeps the schema fail-closed, at the cost of a larger representation; the one-MiB journal limit bounds it.
 - No known blocking concerns for Phase 1. Later phases should continue to use `ArchProvisionStore` and the fixed paths/versions defined here rather than writing the journal or UKI directly.
+
+## Fix round 1
+
+Addressed the independent review findings in this fix-round commit:
+
+- `ProvisioningRecord` and `UninstallingRecord` now persist a complete `OwnedArchEntry`, including the reserved BootId, canonical identity/version, fixed UKI path, build metadata, and publish metadata. The provisioning checkpoints begin at `UkiPublished`, so complete publish metadata is present before the first EFI-variable mutation. Uninstall retains the same entry through its final cleanup checkpoint.
+- Replaced the shared step enum with distinct provisioning and uninstall step enums. They record attempted writes, completed writes, readback verification, BootOrder append/removal, Boot#### creation/removal, and UKI removal. Added `BootOrderMayContainEntry`. Step and residual documentation explicitly treats them as uncertainty/history evidence, not permission to retry a mutation or cleanup.
+- Bumped the journal schema to version 2 and made target and journal saves call the same `atomic_replace` helper for exclusive temp creation, complete write loops, file sync, atomic rename, directory sync, and safe temp cleanup. Record names and the shared protected lock remain separate/same as before.
+- Expanded the codec tests to round-trip all lifecycle steps and complete intermediate ownership, and to reject incomplete metadata, unknown steps, malformed records, and old/unknown schema versions.
+
+### Fix-round TDD and verification
+
+RED: after adding the new core expectations, `cargo test -p boothop-core --test arch_provision_record` failed to compile because `UninstallingStep`, `owned_entry`, the requested state-specific step variants, and the BootOrder residual were not yet implemented (`E0432`, `E0560`, `E0599`, `E0609`).
+
+GREEN and final checks:
+
+- `cargo test -p boothop-core --test arch_provision_record` — passed, 7 tests.
+- `cargo test -p boothop-platform --test arch_provision_store` — passed, 4 tests.
+- `cargo test -p boothop-platform --test store` — passed, 27 regression tests after factoring the helper.
+- `cargo test --workspace --all-targets` — passed, all workspace targets completed with zero failures.
+- `cargo fmt --check` — passed.
+
+Fix-round self-review: intermediate records retain the same complete metadata throughout uncertain EFI and cleanup operations; codec version 1 journals now fail with `UnsupportedRecordVersion` and cannot be mistaken for absence or overwritten. All filesystem verification still runs on the fake filesystem; no host EFI, efivarfs, GRUB, ESP, Windows boot state, or reboot path was touched.
+
+Fix-round concern: schema version 1 journal bytes are rejected rather than migrated, preserving fail-closed behavior. No migration was requested, and this branch has no deployed v1 provisioning journal.

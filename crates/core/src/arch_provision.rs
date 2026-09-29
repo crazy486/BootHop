@@ -5,7 +5,7 @@ use crate::{
     encode_record,
 };
 
-const RECORD_VERSION: u64 = 1;
+const RECORD_VERSION: u64 = 2;
 const IDENTITY_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1_048_576;
 const FIXED_IDENTITY_PATH: &str = "\\EFI\\BootHop\\arch.efi";
@@ -46,7 +46,8 @@ pub struct PublishMetadata {
 pub struct ProvisioningRecord {
     pub operation_id: String,
     pub operation_version: u64,
-    pub expected_identity: CanonicalIdentity,
+    /// Complete reserved ownership metadata persisted before any EFI variable write.
+    pub owned_entry: OwnedArchEntry,
     pub step: ProvisioningStep,
     pub residual: Vec<Residual>,
 }
@@ -55,26 +56,46 @@ pub struct ProvisioningRecord {
 pub struct UninstallingRecord {
     pub operation_id: String,
     pub operation_version: u64,
-    pub expected_identity: CanonicalIdentity,
-    pub step: ProvisioningStep,
+    /// Retained until BootOrder, Boot####, and UKI cleanup have been verified complete.
+    pub owned_entry: OwnedArchEntry,
+    pub step: UninstallingStep,
     pub residual: Vec<Residual>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Journal checkpoints only; a step never authorizes repeating an EFI mutation.
 pub enum ProvisioningStep {
-    Started,
-    UkiBuilt,
     UkiPublished,
+    BootEntryCreateAttempted,
     BootEntryCreated,
+    BootEntryReadBackVerified,
+    BootOrderAppendAttempted,
+    BootOrderAppended,
+    BootOrderReadBackVerified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// Journal checkpoints only; a step never authorizes repeating cleanup.
+pub enum UninstallingStep {
+    Started,
+    BootOrderRemovalAttempted,
+    BootOrderRemoved,
+    BootOrderRemovalReadBackVerified,
+    BootEntryRemovalAttempted,
     BootEntryRemoved,
+    BootEntryRemovalReadBackVerified,
+    UkiRemovalAttempted,
     UkiRemoved,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Uncertainty evidence only; these values never authorize retries or cleanup.
 pub enum Residual {
     BootEntryMayExist,
+    BootOrderMayContainEntry,
     UkiMayRemain,
     ConfigurationMayRemain,
 }
@@ -97,25 +118,31 @@ enum WireState {
     Provisioning {
         operation_id: String,
         operation_version: u64,
-        expected_identity_record: String,
+        owned_entry: WireOwnedArchEntry,
         step: ProvisioningStep,
         residual: Vec<Residual>,
     },
     Ready {
-        boot_id: u16,
-        identity_record: String,
-        identity_version: u64,
-        uki_path: String,
-        build: WireBuildMetadata,
-        publish: WirePublishMetadata,
+        entry: WireOwnedArchEntry,
     },
     Uninstalling {
         operation_id: String,
         operation_version: u64,
-        expected_identity_record: String,
-        step: ProvisioningStep,
+        owned_entry: WireOwnedArchEntry,
+        step: UninstallingStep,
         residual: Vec<Residual>,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireOwnedArchEntry {
+    boot_id: u16,
+    identity_record: String,
+    identity_version: u64,
+    uki_path: String,
+    build: WireBuildMetadata,
+    publish: WirePublishMetadata,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,7 +180,7 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
         WireState::Provisioning {
             operation_id,
             operation_version,
-            expected_identity_record,
+            owned_entry,
             step,
             residual,
         } => {
@@ -161,44 +188,16 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
             Ok(ArchProvisionState::Provisioning(ProvisioningRecord {
                 operation_id,
                 operation_version,
-                expected_identity: decode_identity(&expected_identity_record)?,
+                owned_entry: decode_owned_entry(owned_entry)?,
                 step,
                 residual,
             }))
         }
-        WireState::Ready {
-            boot_id,
-            identity_record,
-            identity_version,
-            uki_path,
-            build,
-            publish,
-        } => {
-            let identity = decode_identity(&identity_record)?;
-            let build = BuildMetadata {
-                kernel: build.kernel,
-                kernel_release: build.kernel_release,
-                initramfs_sha256: decode_hex::<32>(&build.initramfs_sha256)?,
-            };
-            let publish = PublishMetadata {
-                sha256: decode_hex::<32>(&publish.sha256)?,
-                size: publish.size,
-            };
-            let entry = OwnedArchEntry {
-                boot_id: BootId(boot_id),
-                identity,
-                identity_version,
-                uki_path,
-                build,
-                publish,
-            };
-            validate_owned_entry(&entry)?;
-            Ok(ArchProvisionState::Ready(entry))
-        }
+        WireState::Ready { entry } => Ok(ArchProvisionState::Ready(decode_owned_entry(entry)?)),
         WireState::Uninstalling {
             operation_id,
             operation_version,
-            expected_identity_record,
+            owned_entry,
             step,
             residual,
         } => {
@@ -206,7 +205,7 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
             Ok(ArchProvisionState::Uninstalling(UninstallingRecord {
                 operation_id,
                 operation_version,
-                expected_identity: decode_identity(&expected_identity_record)?,
+                owned_entry: decode_owned_entry(owned_entry)?,
                 step,
                 residual,
             }))
@@ -219,40 +218,23 @@ pub fn encode_arch_provision_state(state: &ArchProvisionState) -> Result<Vec<u8>
         ArchProvisionState::Unprovisioned => return Err(Error::CorruptRecord),
         ArchProvisionState::Provisioning(record) => {
             validate_operation(&record.operation_id, record.operation_version)?;
-            validate_fixed_identity(&record.expected_identity)?;
             WireState::Provisioning {
                 operation_id: record.operation_id.clone(),
                 operation_version: record.operation_version,
-                expected_identity_record: encode_identity(&record.expected_identity)?,
+                owned_entry: encode_owned_entry(&record.owned_entry)?,
                 step: record.step,
                 residual: record.residual.clone(),
             }
         }
-        ArchProvisionState::Ready(entry) => {
-            validate_owned_entry(entry)?;
-            WireState::Ready {
-                boot_id: entry.boot_id.0,
-                identity_record: encode_identity(&entry.identity)?,
-                identity_version: entry.identity_version,
-                uki_path: entry.uki_path.clone(),
-                build: WireBuildMetadata {
-                    kernel: entry.build.kernel.clone(),
-                    kernel_release: entry.build.kernel_release.clone(),
-                    initramfs_sha256: encode_hex(entry.build.initramfs_sha256),
-                },
-                publish: WirePublishMetadata {
-                    sha256: encode_hex(entry.publish.sha256),
-                    size: entry.publish.size,
-                },
-            }
-        }
+        ArchProvisionState::Ready(entry) => WireState::Ready {
+            entry: encode_owned_entry(entry)?,
+        },
         ArchProvisionState::Uninstalling(record) => {
             validate_operation(&record.operation_id, record.operation_version)?;
-            validate_fixed_identity(&record.expected_identity)?;
             WireState::Uninstalling {
                 operation_id: record.operation_id.clone(),
                 operation_version: record.operation_version,
-                expected_identity_record: encode_identity(&record.expected_identity)?,
+                owned_entry: encode_owned_entry(&record.owned_entry)?,
                 step: record.step,
                 residual: record.residual.clone(),
             }
@@ -312,6 +294,45 @@ fn encode_identity(identity: &CanonicalIdentity) -> Result<String, Error> {
     };
     let bytes = encode_record(&record)?;
     Ok(encode_hex_vec(&bytes))
+}
+
+fn encode_owned_entry(entry: &OwnedArchEntry) -> Result<WireOwnedArchEntry, Error> {
+    validate_owned_entry(entry)?;
+    Ok(WireOwnedArchEntry {
+        boot_id: entry.boot_id.0,
+        identity_record: encode_identity(&entry.identity)?,
+        identity_version: entry.identity_version,
+        uki_path: entry.uki_path.clone(),
+        build: WireBuildMetadata {
+            kernel: entry.build.kernel.clone(),
+            kernel_release: entry.build.kernel_release.clone(),
+            initramfs_sha256: encode_hex(entry.build.initramfs_sha256),
+        },
+        publish: WirePublishMetadata {
+            sha256: encode_hex(entry.publish.sha256),
+            size: entry.publish.size,
+        },
+    })
+}
+
+fn decode_owned_entry(wire: WireOwnedArchEntry) -> Result<OwnedArchEntry, Error> {
+    let entry = OwnedArchEntry {
+        boot_id: BootId(wire.boot_id),
+        identity: decode_identity(&wire.identity_record)?,
+        identity_version: wire.identity_version,
+        uki_path: wire.uki_path,
+        build: BuildMetadata {
+            kernel: wire.build.kernel,
+            kernel_release: wire.build.kernel_release,
+            initramfs_sha256: decode_hex::<32>(&wire.build.initramfs_sha256)?,
+        },
+        publish: PublishMetadata {
+            sha256: decode_hex::<32>(&wire.publish.sha256)?,
+            size: wire.publish.size,
+        },
+    };
+    validate_owned_entry(&entry)?;
+    Ok(entry)
 }
 
 fn decode_identity(encoded: &str) -> Result<CanonicalIdentity, Error> {
