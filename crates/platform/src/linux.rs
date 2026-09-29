@@ -2,6 +2,7 @@ pub mod arch_provision_store;
 pub mod firmware;
 pub mod reboot;
 pub mod store;
+pub mod uki;
 
 use crate::ProtectedStore;
 use boothop_core::{
