@@ -110,6 +110,31 @@ impl<F: Filesystem> LockedStore<F> {
         self.atomic_replace(ARCH_RECORD, ".arch-provision", &bytes)
     }
 
+    /// Remove only the Arch journal after every owned cleanup has been read back exactly.
+    /// This is intentionally a named operation rather than a generic record/path deletion.
+    pub fn remove_arch_provision_state(
+        &mut self,
+        expected: &ArchProvisionState,
+    ) -> Result<(), Error> {
+        let current = self.load_arch_provision_state()?;
+        if &current != expected
+            || !matches!(
+                current,
+                ArchProvisionState::Uninstalling(ref record)
+                    if record.step == boothop_core::UninstallingStep::UkiRemoved
+                        && record.residual.is_empty()
+            )
+        {
+            return Err(Error::NotConfigured);
+        }
+        self.fs
+            .unlink(&self.dir, ARCH_RECORD)
+            .map_err(|raw_code| io(PlatformOperation::Replace, raw_code))?;
+        self.fs
+            .sync(&self.dir)
+            .map_err(|raw_code| Error::StoreDurabilityUnknown { raw_code })
+    }
+
     fn read_named_record(&self, record: &str) -> Result<Option<Vec<u8>>, Error> {
         let mut file = match self.fs.open(&self.dir, record, OpenKind::ExistingFile) {
             Ok(file) => file,
