@@ -32,8 +32,10 @@
 ## File Map
 
 - `crates/core/src/arch_provision.rs`：BootHop Arch ownership record、生命周期状态、持久化 codec 与数据校验。
+- `crates/core/src/load_option.rs`：由结构化设备路径构造严格 EFI_LOAD_OPTION 字节，长度字段只由 serializer 计算。
 - `crates/platform/src/linux/arch_provision_store.rs`：Linux root-owned ownership journal；复用现有锁、原子替换和目录同步实现，不复用普通 per-OS `TargetRecord` 语义。
 - `crates/platform/src/linux/uki.rs` 与 `packaging/linux/boothop-uki-publish.sh`：只读 Arch/mkinitcpio 配置发现、UKI build plan，以及受限 post-build staging/sign/validate/atomic-publish hook。
+- `crates/platform/src/linux/esp_identity.rs`：从受信任只读 Linux 来源解析已挂载 ESP 的 GPT partition identity；不唯一或不支持的布局 fail closed。
 - `crates/platform/src/linux/boot_entry.rs`、`crates/platform/src/linux/boot_order.rs`：隔离的 Boot#### 与 BootOrder 生命周期 adapter/use-case；不把写能力放入 `Platform::write_next`。
 - `crates/platform/src/windows/uki.rs`：只读地将 UEFI hard-drive/file-path target 映射到 EFI volume 并检查固定 UKI 文件；不得挂载、分配盘符或写文件系统。
 - `crates/protocol/src/lib.rs`、`crates/helper/src/dispatch.rs`：封闭的 provision/uninstall operation 与 typed response；固定 Linux-only 操作，不接收 GUI 提交的路径、BootId、load option 或 identity。
@@ -58,24 +60,28 @@
 
 **Interface:** `discover_uki_plan(fs: &impl ArchConfigFs, policy: &UkiPolicy) -> Result<UkiBuildPlan, Error>` returns selected kernel image/flavor, mkinitcpio config and preset, stable final path `EFI/BootHop/arch.efi`, staged path on the same ESP filesystem, command-line source/value, microcode inclusion, Secure Boot/signing requirement and validation expectations. Builder/publisher is an injected trait; discovery does not execute mkinitcpio or write the filesystem.
 
-- [ ] Test active preset discovery, unsupported layout, mounted ESP/path validation, kernel flavor ambiguity, explicit preset cmdline precedence, static cmdline files and `/proc/cmdline`-only fallback; ambiguous flavor or non-persistent/dynamic command line must return an actionable fail-closed result.
-- [ ] Test `microcode` hook detection and UKI inputs contain the selected kernel, generated initramfs (with early microcode when configured), and confirmed cmdline; reject missing kernel/initramfs or unsupported root/crypt configuration.
-- [ ] Test staged build/publish contract: build or validation/signing failure leaves previous stable UKI unchanged; successful same-filesystem atomic rename publishes only the fixed path; disk-full and incomplete-stage outcomes preserve the previous file.
-- [ ] Use one narrowly scoped mkinitcpio post-build publisher: the selected preset writes to a staging filename in the same ESP directory; the hook validates the finished UKI, applies only an already-configured signer when Secure Boot requires it, verifies the resulting image, then atomically renames it to `EFI/BootHop/arch.efi`. Confirm the installed mkinitcpio update path invokes this hook; if the selected kernel update path disables post hooks, stop before real provision rather than publish directly to the live path. A kernel update must regenerate the same final path; no daemon and no versioned BootHop kernel copy.
-- [ ] Run `cargo test -p boothop-platform --test uki_discovery` and `cargo test -p boothop-platform --test uki_publish`; tests use fake files and fake builder only.
+- [x] Test active preset discovery, unsupported layout, mounted ESP/path validation, kernel flavor ambiguity, explicit preset cmdline precedence, static cmdline files and `/proc/cmdline`-only fallback; ambiguous flavor or non-persistent/dynamic command line must return an actionable fail-closed result.
+- [x] Test `microcode` hook detection and UKI inputs contain the selected kernel, generated initramfs (with early microcode when configured), and confirmed cmdline; reject missing kernel/initramfs or unsupported root/crypt configuration.
+- [x] Test staged build/publish contract: build or validation/signing failure leaves previous stable UKI unchanged; successful same-filesystem atomic rename publishes only the fixed path; disk-full and incomplete-stage outcomes preserve the previous file.
+- [x] Implement one narrowly scoped mkinitcpio post-build publisher for **Ready-only kernel updates**: it requires the trusted journal verifier's exact SHA-256/size, validates/signs the staged UKI, rechecks the existing stable file immediately before atomic replacement, and rejects every `Provisioning` checkpoint. Initial provisioning instead uses the Rust coordinator's durable Attempted-before-ESP-write flow. Phase 7 must confirm the selected installed kernel update path invokes post hooks before installing/wiring it; if it does not, stop before real provision. No daemon or versioned BootHop kernel copy.
+- [x] Run `cargo test -p boothop-platform --test uki_discovery` and `cargo test -p boothop-platform --test uki_publish`; fake files/builders only. Fake shell publisher tests and syntax checks also pass.
+
+Phase 2 abstraction is complete. Phase 7 still has to verify the actual selected local mkinitcpio update path after fresh user authorization.
 
 **Read-only host findings to carry forward:** both `linux` and `linux-zen` presets are installed and currently produce split images; the running kernel is `linux-zen`, but that alone does not select the intended BootHop flavor. The usual persistent cmdline files were absent, so mkinitcpio would fall back to `/proc/cmdline`. The existing `microcode` hook is present. Phase 2 must resolve the intended GRUB Arch flavor and command line; Phase 7 may create an explicit persistent cmdline source only after authorization.
 
 ## Task 3 — Phase 3 — Boot#### provision abstraction
 
-**Files:** `crates/platform/src/linux/boot_entry.rs`、`crates/platform/src/linux/firmware.rs`、`crates/platform/src/linux.rs`、`crates/platform/tests/boot_entry_provision.rs`、`crates/platform/tests/support/firmware.rs`。
+**Files:** `crates/core/src/load_option.rs`、`crates/platform/src/linux/esp_identity.rs`、`crates/platform/src/linux/boot_entry.rs`、`crates/platform/src/linux/firmware.rs`、`crates/platform/src/linux.rs`、`crates/platform/tests/esp_identity.rs`、`crates/platform/tests/boot_entry_provision.rs`、`crates/platform/tests/support/firmware.rs`。
 
-**Interface:** a typed `BootEntryIo` accepts only `BootId`, structured `LoadOption`, and fixed BootHop description/path policy. `allocate_boot_id()` enumerates the complete strict Boot#### namespace, including orphan variables; `create_and_verify_entry()` uses exclusive creation, writes a serialized option, rereads/parses it, and compares the full canonical identity and exact owned payload. GUI data never reaches this interface.
+**Interface:** a typed `BootEntryIo` accepts only a trusted `EspPartitionIdentity`, `BootId`, and fixed BootHop description/path policy; GUI data never reaches it. A read-only source resolves the mounted ESP to one supported GPT partition tuple (partition number, start LBA, size LBA, partition GUID); ambiguity/unsupported layouts fail closed. Core constructs the HD() + fixed `\EFI\BootHop\arch.efi` File() path and serializes EFI_LOAD_OPTION with computed lengths. `allocate_boot_id()` inspects the complete strict Boot#### namespace, including orphan variables, and rejects malformed Boot-like names rather than silently ignoring them. `create_and_verify_entry()` rechecks the candidate immediately before exclusive creation, writes the serialized option, rereads/parses it, and compares canonical identity plus the exact serialized BootHop-owned bytes. Existing entries are never rewritten.
 
-- [ ] Test allocator skips all referenced and unreferenced occupied IDs, fails closed on incomplete enumeration/malformed names/namespace exhaustion, and rechecks the chosen ID immediately before exclusive create.
+- [ ] Test synthetic GPT identity to HD() node GUID byte order, partition number/LBAs and fixed File() path; reject non-GPT, multiple/ambiguous backing devices, missing fields and overflow.
+- [ ] Add byte-level EFI_LOAD_OPTION expected-output and parse/serialize round-trip tests; compute list/description lengths, preserve fixed description/attributes/optional data exactly, and reject invalid path sequences or overflow.
+- [ ] Test allocator skips all referenced and unreferenced occupied IDs, fails closed on incomplete enumeration, malformed/case-variant Boot-like names and namespace exhaustion, and rechecks the chosen ID immediately before exclusive create.
 - [ ] Test create + readback exact match; collision after allocation; short/failed write; create reports error after possible mutation; absent/malformed/different readback; and crash after create. No path overwrites a preexisting option.
 - [ ] Persist `Provisioning` ownership metadata before the first EFI variable write. On uncertain outcomes leave the journal for explicit read-only recovery; never auto-delete, allocate another ID, or restore guessed bytes.
-- [ ] Run `cargo test -p boothop-platform --test boot_entry_provision`; all calls are fake `LinuxCalls`/firmware variables and never target host efivarfs.
+- [ ] Run `cargo test -p boothop-platform --test esp_identity` and `cargo test -p boothop-platform --test boot_entry_provision`; all partition/firmware inputs use synthetic fixtures and fake `LinuxCalls`, never host efivarfs.
 
 ## Task 4 — Phase 4 — BootOrder lifecycle and uninstall
 
