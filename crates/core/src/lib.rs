@@ -1,3 +1,4 @@
+mod arch_provision;
 mod device_path;
 mod error;
 mod flow;
@@ -6,6 +7,11 @@ mod load_option;
 mod model;
 mod record;
 
+pub use arch_provision::{
+    ArchProvisionState, BuildMetadata, OwnedArchEntry, ProvisioningRecord, ProvisioningStep,
+    PublishMetadata, Residual, UninstallingRecord, decode_arch_provision_state,
+    encode_arch_provision_state,
+};
 pub use device_path::parse_device_path;
 pub use error::{Error, PlatformOperation, ResidualAssessment, RollbackAssessment};
 pub use flow::{Platform, execute};

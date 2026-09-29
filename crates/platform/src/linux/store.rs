@@ -1,6 +1,7 @@
 use crate::ProtectedStore;
 use boothop_core::{
-    Error, PlatformOperation, RecordState, TargetRecord, decode_record, encode_record,
+    ArchProvisionState, Error, PlatformOperation, RecordState, TargetRecord,
+    decode_arch_provision_state, decode_record, encode_arch_provision_state, encode_record,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,6 +48,7 @@ pub trait Filesystem {
 
 const MAX_RECORD_BYTES: usize = 1_048_576;
 const RECORD: &str = "targets.json";
+const ARCH_RECORD: &str = "arch-provision.json";
 const LOCK: &str = "operation.lock";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -93,6 +95,105 @@ impl<F: Filesystem> LockedStore<F> {
             dir,
             _lock: lock,
         })
+    }
+
+    /// Loads the separate Arch ownership journal while the shared operation lock is held.
+    pub fn load_arch_provision_state(&mut self) -> Result<ArchProvisionState, Error> {
+        let bytes = self.read_named_record(ARCH_RECORD)?;
+        decode_arch_provision_state(bytes.as_deref())
+    }
+
+    /// Atomically saves the Arch ownership journal without touching targets.json.
+    pub fn save_arch_provision_state(&mut self, state: &ArchProvisionState) -> Result<(), Error> {
+        self.load_arch_provision_state()?;
+        let bytes = encode_arch_provision_state(state)?;
+        self.replace_named_record(ARCH_RECORD, ".arch-provision", &bytes)
+    }
+
+    fn read_named_record(&self, record: &str) -> Result<Option<Vec<u8>>, Error> {
+        let mut file = match self.fs.open(&self.dir, record, OpenKind::ExistingFile) {
+            Ok(file) => file,
+            Err(2) => return Ok(None),
+            Err(e) => return Err(io(PlatformOperation::Open, e)),
+        };
+        let meta = self
+            .fs
+            .metadata(&file)
+            .map_err(|e| io(PlatformOperation::Metadata, e))?;
+        validate_file(meta)?;
+        if meta.size > MAX_RECORD_BYTES as u64 {
+            return Err(Error::ResourceLimit);
+        }
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let limit = buffer.len().min(MAX_RECORD_BYTES - bytes.len() + 1);
+            let count = self
+                .fs
+                .read(&mut file, &mut buffer[..limit])
+                .map_err(|e| io(PlatformOperation::Read, e))?;
+            if count == 0 {
+                break;
+            }
+            if count > buffer.len() || bytes.len() + count > MAX_RECORD_BYTES {
+                return Err(Error::ResourceLimit);
+            }
+            bytes.try_reserve(count).map_err(|_| Error::ResourceLimit)?;
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        if bytes.len() as u64 != meta.size
+            || self
+                .fs
+                .metadata(&file)
+                .map_err(|e| io(PlatformOperation::Metadata, e))?
+                != meta
+        {
+            return Err(io(PlatformOperation::Read, 5));
+        }
+        Ok(Some(bytes))
+    }
+
+    fn replace_named_record(&self, record: &str, prefix: &str, bytes: &[u8]) -> Result<(), Error> {
+        let name = format!(
+            "{prefix}-{}-{}.tmp",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut file = self
+            .fs
+            .open(&self.dir, &name, OpenKind::ExclusiveTemp)
+            .map_err(|e| io(PlatformOperation::Open, e))?;
+        let result = (|| {
+            validate_file(
+                self.fs
+                    .metadata(&file)
+                    .map_err(|e| io(PlatformOperation::Metadata, e))?,
+            )?;
+            let mut written = 0;
+            while written < bytes.len() {
+                let count = self
+                    .fs
+                    .write(&mut file, &bytes[written..])
+                    .map_err(|e| io(PlatformOperation::Write, e))?;
+                if count == 0 || count > bytes.len() - written {
+                    return Err(io(PlatformOperation::Write, 5));
+                }
+                written += count;
+            }
+            self.fs
+                .sync(&file)
+                .map_err(|e| io(PlatformOperation::Flush, e))?;
+            self.fs
+                .rename(&self.dir, &name, record)
+                .map_err(|e| io(PlatformOperation::Replace, e))
+        })();
+        if let Err(error) = result {
+            self.cleanup_temp(&file, &name);
+            return Err(error);
+        }
+        self.fs
+            .sync(&self.dir)
+            .map_err(|raw_code| Error::StoreDurabilityUnknown { raw_code })
     }
 }
 impl<F: Filesystem> ProtectedStore for LockedStore<F> {

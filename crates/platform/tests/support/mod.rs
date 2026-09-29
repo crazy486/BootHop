@@ -1,4 +1,7 @@
-use boothop_core::{BootId, Os, TargetRecord, canonicalize, parse_load_option};
+use boothop_core::{
+    ArchProvisionState, BootId, BuildMetadata, CanonicalDevicePathNode, Os, OwnedArchEntry,
+    PublishMetadata, TargetRecord, canonicalize, parse_load_option,
+};
 use boothop_platform::linux::store::{Filesystem, Metadata, OpenKind};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -16,6 +19,38 @@ pub fn target() -> TargetRecord {
         os: Os::Windows,
         identity: canonicalize(&parse_load_option(&bytes).unwrap()).unwrap(),
     }
+}
+
+#[allow(dead_code)]
+pub fn ready_state() -> ArchProvisionState {
+    let mut identity = target().identity;
+    let file_length = {
+        let CanonicalDevicePathNode::FilePath(file) = &mut identity.nodes[1] else {
+            unreachable!()
+        };
+        file.path_utf16 = "\\EFI\\BootHop\\arch.efi".encode_utf16().collect();
+        file.length = ((file.path_utf16.len() + 1) * 2 + 4) as u16;
+        file.length
+    };
+    identity.file_path_list_length = match &identity.nodes[0] {
+        CanonicalDevicePathNode::HardDrive(hd) => hd.length + file_length + 4,
+        _ => unreachable!(),
+    };
+    ArchProvisionState::Ready(OwnedArchEntry {
+        boot_id: BootId(0x1234),
+        identity,
+        identity_version: 1,
+        uki_path: "EFI/BootHop/arch.efi".into(),
+        build: BuildMetadata {
+            kernel: "linux-zen".into(),
+            kernel_release: "6.12.1-zen1-1-zen".into(),
+            initramfs_sha256: [0x11; 32],
+        },
+        publish: PublishMetadata {
+            sha256: [0x22; 32],
+            size: 42,
+        },
+    })
 }
 
 #[derive(Clone)]
@@ -98,13 +133,27 @@ impl FakeFs {
         );
     }
     pub fn set_record(&self, bytes: Vec<u8>) {
-        self.insert("/var/lib/boothop/targets.json", 0o100600, bytes);
+        self.set_named_record("targets.json", bytes);
     }
     pub fn record(&self) -> Option<Vec<u8>> {
+        self.named_record("targets.json")
+    }
+    #[allow(dead_code)]
+    pub fn set_journal(&self, bytes: Vec<u8>) {
+        self.set_named_record("arch-provision.json", bytes);
+    }
+    #[allow(dead_code)]
+    pub fn journal(&self) -> Option<Vec<u8>> {
+        self.named_record("arch-provision.json")
+    }
+    fn set_named_record(&self, name: &str, bytes: Vec<u8>) {
+        self.insert(&format!("/var/lib/boothop/{name}"), 0o100600, bytes);
+    }
+    fn named_record(&self, name: &str) -> Option<Vec<u8>> {
         self.0
             .borrow()
             .nodes
-            .get("/var/lib/boothop/targets.json")
+            .get(&format!("/var/lib/boothop/{name}"))
             .map(|n| n.borrow().bytes.clone())
     }
     pub fn held(&self) -> bool {
@@ -143,7 +192,7 @@ impl Filesystem for FakeFs {
     fn open(&self, dir: &Handle, name: &str, kind: OpenKind) -> Result<Handle, i32> {
         self.stage(match kind {
             OpenKind::ExclusiveTemp => "create",
-            _ if name == "targets.json" => "open_record",
+            _ if name == "targets.json" || name == "arch-provision.json" => "open_record",
             _ if name == "operation.lock" => "open_lock",
             _ => "open_dir",
         })?;
