@@ -15,9 +15,43 @@ case "$staged_uki" in
     *) exit 0 ;;
 esac
 
-directory=${staged_uki%/*}
+secure_boot_required=${BOOT_HOP_SECURE_BOOT_REQUIRED-}
+case "$secure_boot_required" in
+    0|1) ;;
+    *) echo "BOOT_HOP_SECURE_BOOT_REQUIRED must be explicitly set to 0 or 1" >&2; exit 1 ;;
+esac
+
+esp_mount=${BOOT_HOP_ESP_MOUNT-}
+if [[ -z "$esp_mount" || "$esp_mount" != /* || "$esp_mount" == / \
+    || "$esp_mount" == */ || "$esp_mount" == *//* \
+    || "$esp_mount" == */./* || "$esp_mount" == */. \
+    || "$esp_mount" == */../* || "$esp_mount" == */.. ]]; then
+    echo "BOOT_HOP_ESP_MOUNT must be an explicit normalized absolute mount path" >&2
+    exit 1
+fi
+mount_info=$(findmnt --raw --noheadings --output TARGET,FSTYPE --mountpoint "$esp_mount") || {
+    echo "configured BootHop ESP path is not a mounted filesystem" >&2
+    exit 1
+}
+read -r mounted_target filesystem <<<"$mount_info"
+if [[ "$mounted_target" != "$esp_mount" || "$filesystem" != vfat ]]; then
+    echo "configured BootHop ESP path is not an exact vfat mount point" >&2
+    exit 1
+fi
+
+expected_staged_uki="$esp_mount/EFI/BootHop/arch.efi.staging"
+if [[ "$staged_uki" != "$expected_staged_uki" ]]; then
+    echo "mkinitcpio UKI output does not match the configured BootHop ESP staging path" >&2
+    exit 1
+fi
+
+directory="$esp_mount/EFI/BootHop"
 final_uki="$directory/arch.efi"
-[[ -d "$directory" ]] || { echo "BootHop UKI directory is missing" >&2; exit 1; }
+[[ -d "$directory" && ! -L "$directory" && ! -L "$esp_mount/EFI" \
+    && ! -L "$esp_mount" && ! -L "$staged_uki" ]] || {
+    echo "BootHop UKI directory or ESP path is missing or redirected" >&2
+    exit 1
+}
 [[ -f "$staged_uki" ]] || { echo "staged BootHop UKI is missing" >&2; exit 1; }
 
 validate_uki() {
@@ -33,7 +67,7 @@ validate_uki "$staged_uki" || {
     exit 1
 }
 
-if [[ ${BOOT_HOP_SECURE_BOOT_REQUIRED:-0} == 1 ]]; then
+if [[ "$secure_boot_required" == 1 ]]; then
     : "${BOOT_HOP_SIGNING_KEY:?Secure Boot requires an already-configured signing key}"
     : "${BOOT_HOP_SIGNING_CERT:?Secure Boot requires an already-configured signing certificate}"
     signed_uki="$staged_uki.signed"

@@ -1,0 +1,109 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../../.." && pwd)
+publisher="$repo_root/packaging/linux/boothop-uki-publish.sh"
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+
+mkdir -p "$work/bin" "$work/esp/EFI/BootHop"
+export BOOT_HOP_ESP_MOUNT="$work/esp"
+export BOOT_HOP_TEST_SIGN_LOG="$work/sign.log"
+export PATH="$work/bin:$PATH"
+
+cat >"$work/bin/findmnt" <<'EOF'
+#!/usr/bin/bash
+printf '%s %s\n' "${@: -1}" "${BOOT_HOP_TEST_FSTYPE:-vfat}"
+EOF
+cat >"$work/bin/objdump" <<'EOF'
+#!/usr/bin/bash
+printf '%s\n' '  1 .linux 0001 0000' '  2 .initrd 0001 0000' '  3 .cmdline 0001 0000'
+EOF
+cat >"$work/bin/sbsign" <<'EOF'
+#!/usr/bin/bash
+while (($#)); do
+    case "$1" in
+        --output) output=$2; shift 2 ;;
+        --key|--cert) shift 2 ;;
+        *) input=$1; shift ;;
+    esac
+done
+cp -- "$input" "$output"
+printf 'signed\n' >>"$output"
+touch "$BOOT_HOP_TEST_SIGN_LOG"
+EOF
+cat >"$work/bin/sbverify" <<'EOF'
+#!/usr/bin/bash
+exit 0
+EOF
+chmod +x "$work/bin/"*
+
+stage="$BOOT_HOP_ESP_MOUNT/EFI/BootHop/arch.efi.staging"
+final="$BOOT_HOP_ESP_MOUNT/EFI/BootHop/arch.efi"
+prepare() {
+    printf 'old stable\n' >"$final"
+    printf 'staged uki\n' >"$stage"
+    rm -f -- "$BOOT_HOP_TEST_SIGN_LOG"
+}
+assert_old_stable() {
+    [[ $(<"$final") == 'old stable' ]]
+}
+expect_failure_preserves_stable() {
+    prepare
+    if "$publisher" /dev/null /tmp/initramfs "$stage"; then
+        echo "publisher unexpectedly accepted invalid setup: $*" >&2
+        exit 1
+    fi
+    assert_old_stable
+}
+
+unset BOOT_HOP_SECURE_BOOT_REQUIRED
+expect_failure_preserves_stable unset-secure-boot-state
+BOOT_HOP_SECURE_BOOT_REQUIRED=maybe
+export BOOT_HOP_SECURE_BOOT_REQUIRED
+expect_failure_preserves_stable invalid-secure-boot-state
+
+BOOT_HOP_SECURE_BOOT_REQUIRED=0
+export BOOT_HOP_SECURE_BOOT_REQUIRED
+prepare
+"$publisher" /dev/null /tmp/initramfs "$stage"
+[[ $(<"$final") == 'staged uki' ]]
+[[ ! -e "$stage" && ! -e "$BOOT_HOP_TEST_SIGN_LOG" ]]
+
+BOOT_HOP_SECURE_BOOT_REQUIRED=1
+export BOOT_HOP_SECURE_BOOT_REQUIRED
+BOOT_HOP_SIGNING_KEY="$work/key"
+BOOT_HOP_SIGNING_CERT="$work/cert"
+export BOOT_HOP_SIGNING_KEY BOOT_HOP_SIGNING_CERT
+prepare
+"$publisher" /dev/null /tmp/initramfs "$stage"
+[[ $(<"$final") == $'staged uki\nsigned' ]]
+[[ -e "$BOOT_HOP_TEST_SIGN_LOG" ]]
+
+expect_failure_preserves_stable_unset_esp() {
+    prepare
+    unset BOOT_HOP_ESP_MOUNT
+    if "$publisher" /dev/null /tmp/initramfs "$stage"; then
+        echo "publisher unexpectedly accepted missing ESP mount" >&2
+        exit 1
+    fi
+    assert_old_stable
+    export BOOT_HOP_ESP_MOUNT="$work/esp"
+}
+expect_failure_preserves_stable_unset_esp
+
+BOOT_HOP_ESP_MOUNT="$work/esp/other"
+export BOOT_HOP_ESP_MOUNT
+expect_failure_preserves_stable mismatched-esp-path
+
+BOOT_HOP_ESP_MOUNT="$work/esp"
+BOOT_HOP_TEST_FSTYPE=ext4
+export BOOT_HOP_ESP_MOUNT BOOT_HOP_TEST_FSTYPE
+expect_failure_preserves_stable non-vfat-esp
+unset BOOT_HOP_TEST_FSTYPE
+
+BOOT_HOP_ESP_MOUNT="$work/esp/../esp"
+export BOOT_HOP_ESP_MOUNT
+expect_failure_preserves_stable non-normalized-esp-path
+
+echo "UKI publisher tests passed"

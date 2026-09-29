@@ -59,6 +59,16 @@ impl ArchConfigFs for FixtureFs {
     fn is_mounted_esp(&self, mount_path: &str) -> bool {
         mount_path == "/boot"
     }
+
+    fn files_in_directory(&self, path: &str) -> Result<Vec<String>, String> {
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        Ok(self
+            .files
+            .keys()
+            .filter(|file| file.starts_with(&prefix) && !file[prefix.len()..].contains('/'))
+            .cloned()
+            .collect())
+    }
 }
 
 fn policy() -> UkiPolicy {
@@ -101,6 +111,81 @@ fn discovers_active_preset_and_complete_fixed_path_plan() {
     assert!(
         plan.inputs
             .contains(&UkiInput::ConfirmedCommandLine("root=UUID=abc rw".into()))
+    );
+}
+
+#[test]
+fn preset_specific_kernel_and_config_override_all_values() {
+    let mut fs = FixtureFs::arch();
+    fs.insert("/boot/vmlinuz-linux-default", "selected kernel");
+    fs.insert("/boot/initramfs-linux-default.img", "selected initramfs");
+    fs.insert(
+        "/etc/mkinitcpio-default.conf",
+        "HOOKS=(base udev block filesystems)\n",
+    );
+    fs.insert(
+        "/etc/mkinitcpio.d/linux.preset",
+        "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_kver='/boot/vmlinuz-linux-default'\ndefault_config='/etc/mkinitcpio-default.conf'\ndefault_image='/boot/initramfs-linux-default.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
+    );
+
+    let plan = discover_uki_plan(&fs, &policy()).unwrap();
+
+    assert_eq!(plan.kernel_image, "/boot/vmlinuz-linux-default");
+    assert_eq!(plan.config_path, "/etc/mkinitcpio-default.conf");
+    assert_eq!(plan.initramfs_image, "/boot/initramfs-linux-default.img");
+    assert!(!plan.includes_microcode);
+}
+
+#[test]
+fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
+    let mut added = FixtureFs::arch();
+    added.insert(
+        "/etc/mkinitcpio.conf",
+        "HOOKS=(base udev block filesystems)\n",
+    );
+    added.insert(
+        "/etc/mkinitcpio.conf.d/20-boothop.conf",
+        "HOOKS=(base udev microcode block filesystems)\n",
+    );
+    assert!(
+        discover_uki_plan(&added, &policy())
+            .unwrap()
+            .includes_microcode
+    );
+
+    let mut removed = FixtureFs::arch();
+    removed.insert(
+        "/etc/mkinitcpio.conf.d/10-no-microcode.conf",
+        "HOOKS=(base udev block filesystems)\n",
+    );
+    removed.insert(
+        "/etc/mkinitcpio.conf.d/20-microcode.conf",
+        "HOOKS=(base udev microcode block filesystems)\n",
+    );
+    removed.insert(
+        "/etc/mkinitcpio.conf.d/30-final.conf",
+        "HOOKS=(base udev block filesystems)\n",
+    );
+    assert!(
+        !discover_uki_plan(&removed, &policy())
+            .unwrap()
+            .includes_microcode
+    );
+}
+
+#[test]
+fn unsupported_or_dynamic_mkinitcpio_dropin_fails_closed() {
+    let mut fs = FixtureFs::arch();
+    fs.insert(
+        "/etc/mkinitcpio.conf.d/20-dynamic.conf",
+        "HOOKS+=(microcode)\n",
+    );
+
+    let error = discover_uki_plan(&fs, &policy()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported mkinitcpio config/drop-in syntax")
     );
 }
 

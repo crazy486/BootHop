@@ -43,6 +43,9 @@ impl boothop_platform::linux::uki::ArchConfigFs for FixtureFs {
     fn is_mounted_esp(&self, mount_path: &str) -> bool {
         mount_path == "/boot"
     }
+    fn files_in_directory(&self, _: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 }
 
 fn plan() -> UkiBuildPlan {

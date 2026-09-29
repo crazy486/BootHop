@@ -30,6 +30,7 @@ cargo test -p boothop-platform --test uki_publish    # 3 passed
 - `crates/platform/tests/uki_discovery.rs` — synthetic discovery fixtures and fail-closed cases.
 - `crates/platform/tests/uki_publish.rs` — fake builder/filesystem and stable-file preservation cases.
 - `packaging/linux/boothop-uki-publish.sh` — validates staged UKI sections, optionally signs using configured key/certificate values, verifies the signature, and atomically renames to the fixed sibling final filename.
+- `packaging/linux/tests/boothop-uki-publish-test.sh` — isolated integration checks with temporary files and stubbed mount/image/signing commands.
 
 ## Verification
 
@@ -47,3 +48,15 @@ cargo test -p boothop-platform --test uki_publish    # 3 passed
 - The official mkinitcpio manual describes post hooks as receiving kernel, image, and optional UKI arguments, and states that post hooks are disabled when `kernel-install` invokes mkinitcpio: <https://man.archlinux.org/man/mkinitcpio.8>. The selected live kernel update path was not inspected because the task forbids host configuration inspection. Before real provisioning, confirm that the selected path invokes this post hook and does not pass `--nopost`; stop if it disables post hooks. The current host update path therefore remains unconfirmed.
 - The production filesystem adapter is intentionally not included here; the trait contract and behavior are exercised through fakes. Any adapter must preserve the documented same-filesystem atomic replacement guarantees and must not direct mkinitcpio at the stable path.
 - The publisher expects mkinitcpio to have produced the third post-hook argument at the fixed staging path. The host preset/update-path wiring must be configured and independently confirmed before use.
+
+## Review fix round
+
+Review found missing Secure Boot state validation, an unbound suffix-based output path, incorrect precedence for preset-specific kernel/config values, and incomplete microcode discovery when config drop-ins override `HOOKS`. These were fixed as follows:
+
+- The post-hook now requires `BOOT_HOP_SECURE_BOOT_REQUIRED` to be exactly `0` or `1`; unset and all other values fail before publication. It also requires an explicit normalized `BOOT_HOP_ESP_MOUNT`, confirms that exact mount is `vfat` with `findmnt`, and requires the staged argument to equal that mount's `EFI/BootHop/arch.efi.staging` path. There is no production environment wiring in this phase; missing values fail safely.
+- `default_kver` and `default_config` now take precedence over `ALL_kver` and `ALL_config`.
+- Discovery reads at most 64 direct `.conf` entries under `/etc/mkinitcpio.conf.d`, in sorted order. It applies only static `HOOKS=(...)` assignments; unsupported shell syntax, expansions, and non-assignment statements fail closed. Later hook assignments override earlier ones. Fake tests cover adding and removing `microcode`.
+- TDD RED evidence: the preset precedence regression first failed by selecting `/boot/vmlinuz-linux` instead of `/boot/vmlinuz-linux-default`; the publisher shell test first showed that an unset Secure Boot flag was incorrectly accepted. The initial drop-in test also failed compilation because the read-only directory enumeration API was not yet defined.
+- New verification: `cargo test -p boothop-platform --test uki_discovery` passed (10 tests); `cargo test -p boothop-platform --test uki_publish` passed (3 tests); `packaging/linux/tests/boothop-uki-publish-test.sh` passed using stubs for `findmnt`, `objdump`, `sbsign`, and `sbverify`; `bash -n` passed for both shell scripts. The workspace test suite, formatting check, and `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` passed after the fixes.
+- `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by the same two unrelated diagnostics in Phase 1 `crates/core/src/arch_provision.rs` (lines 365 and 369). Those files were not changed.
+- No host EFI, presets, ESP, or NVRAM was accessed during this review round.

@@ -11,6 +11,7 @@ pub trait ArchConfigFs {
     fn is_file(&self, path: &str) -> bool;
     fn is_directory(&self, path: &str) -> bool;
     fn is_mounted_esp(&self, mount_path: &str) -> bool;
+    fn files_in_directory(&self, path: &str) -> Result<Vec<String>, String>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,10 +140,12 @@ pub fn discover_uki_plan(
     let preset_path = format!("/etc/mkinitcpio.d/{flavor}.preset");
     let preset = read_required(fs, &preset_path)?;
     let values = parse_assignments(&preset);
-    let kernel_image = value(&values, "ALL_kver")
-        .or_else(|| value(&values, "default_kver"))
+    let kernel_image = value(&values, "default_kver")
+        .or_else(|| value(&values, "ALL_kver"))
         .ok_or_else(|| unsupported("preset must define ALL_kver or default_kver"))?;
-    let config_path = value(&values, "ALL_config").unwrap_or_else(|| "/etc/mkinitcpio.conf".into());
+    let config_path = value(&values, "default_config")
+        .or_else(|| value(&values, "ALL_config"))
+        .unwrap_or_else(|| "/etc/mkinitcpio.conf".into());
     let initramfs_image = value(&values, "default_image")
         .or_else(|| value(&values, "ALL_image"))
         .ok_or_else(|| {
@@ -170,13 +173,7 @@ pub fn discover_uki_plan(
         )));
     }
     let config = read_required(fs, &config_path)?;
-    let includes_microcode = config
-        .lines()
-        .find(|line| line.trim_start().starts_with("HOOKS="))
-        .is_some_and(|line| {
-            line.split(['(', ')', ' ', '\t', '\'', '"'])
-                .any(|hook| hook == "microcode")
-        });
+    let includes_microcode = discover_microcode_hook(fs, &config_path, &config)?;
 
     let (command_line_source, command_line) = discover_cmdline(fs, &values)?;
     validate_cmdline(&command_line)?;
@@ -247,6 +244,103 @@ fn read_required(fs: &impl ArchConfigFs, path: &str) -> Result<String, UkiDiscov
     fs.read_text(path)
         .map_err(UkiDiscoveryError::Io)?
         .ok_or_else(|| unsupported(format!("required Arch input is missing: {path}")))
+}
+
+fn discover_microcode_hook(
+    fs: &impl ArchConfigFs,
+    config_path: &str,
+    main_config: &str,
+) -> Result<bool, UkiDiscoveryError> {
+    let mut hooks = parse_static_config_hooks(main_config, config_path)?
+        .ok_or_else(|| unsupported(format!("{config_path} does not define static HOOKS")))?;
+    let dropin_dir = "/etc/mkinitcpio.conf.d";
+    let mut dropins = fs
+        .files_in_directory(dropin_dir)
+        .map_err(UkiDiscoveryError::Io)?
+        .into_iter()
+        .filter(|path| path.ends_with(".conf"))
+        .collect::<Vec<_>>();
+    if dropins.len() > 64 {
+        return Err(unsupported("too many mkinitcpio config drop-ins"));
+    }
+    for path in &dropins {
+        let prefix = format!("{dropin_dir}/");
+        if !path.starts_with(&prefix)
+            || path[prefix.len()..].is_empty()
+            || path[prefix.len()..].contains('/')
+        {
+            return Err(unsupported(format!(
+                "unsupported mkinitcpio drop-in path: {path}"
+            )));
+        }
+    }
+    dropins.sort();
+    for path in dropins {
+        let text = read_required(fs, &path)?;
+        if let Some(override_hooks) = parse_static_config_hooks(&text, &path)? {
+            hooks = override_hooks;
+        }
+    }
+    Ok(hooks.iter().any(|hook| hook == "microcode"))
+}
+
+/// Parse only bounded static assignments. This intentionally does not interpret shell syntax,
+/// source files, expand variables, or execute commands. Later static HOOKS assignments replace
+/// earlier ones, matching the mkinitcpio config/drop-in precedence used for this setting.
+fn parse_static_config_hooks(
+    text: &str,
+    source: &str,
+) -> Result<Option<Vec<String>>, UkiDiscoveryError> {
+    let mut hooks = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once('=') else {
+            return Err(unsupported(format!(
+                "unsupported mkinitcpio config/drop-in syntax in {source}"
+            )));
+        };
+        if !valid_shell_name(key) || raw_value.contains(['$', '`', ';', '&', '|', '<', '>']) {
+            return Err(unsupported(format!(
+                "unsupported mkinitcpio config/drop-in syntax in {source}"
+            )));
+        }
+        if key == "HOOKS" {
+            let value = raw_value.trim();
+            if !value.starts_with('(') || !value.ends_with(')') {
+                return Err(unsupported(format!(
+                    "unsupported static HOOKS assignment in {source}"
+                )));
+            }
+            let body = &value[1..value.len() - 1];
+            let mut parsed = Vec::new();
+            for token in body.split_whitespace() {
+                let token = token.trim_matches(['\'', '"']);
+                if token.is_empty()
+                    || !token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                {
+                    return Err(unsupported(format!(
+                        "unsupported static HOOKS assignment in {source}"
+                    )));
+                }
+                parsed.push(token.to_owned());
+            }
+            hooks = Some(parsed);
+        }
+    }
+    Ok(hooks)
+}
+
+fn valid_shell_name(value: &str) -> bool {
+    let mut chars = value.bytes();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && chars.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn parse_assignments(text: &str) -> std::collections::BTreeMap<String, String> {
