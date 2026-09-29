@@ -1,4 +1,6 @@
 pub mod arch_provision_store;
+pub mod boot_entry;
+pub mod esp_identity;
 pub mod firmware;
 pub mod reboot;
 pub mod store;

@@ -16,7 +16,10 @@ pub use device_path::parse_device_path;
 pub use error::{Error, PlatformOperation, ResidualAssessment, RollbackAssessment};
 pub use flow::{Platform, execute};
 pub use identity::{canonicalize, classify, validate_target};
-pub use load_option::parse_load_option;
+pub use load_option::{
+    arch_uki_load_option, arch_uki_load_option_from_identity, parse_load_option,
+    serialize_load_option,
+};
 pub use model::{
     BootId, Candidate, CanonicalDevicePathNode, CanonicalEndEntireNode, CanonicalFilePathNode,
     CanonicalHardDriveNode, CanonicalIdentity, Classification, DevicePath, DevicePathInstance,

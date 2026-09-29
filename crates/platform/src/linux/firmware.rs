@@ -3,6 +3,7 @@ pub enum OpenKind {
     Directory,
     ReadVariable,
     CreateNext,
+    CreateEntry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +34,7 @@ pub(crate) fn io(operation: PlatformOperation, raw_code: i32) -> Error {
 
 const EFIVARFS: u64 = 0xde5e81e4;
 const MAX_RAW: usize = 1_048_580;
-pub(crate) fn directory<C: LinuxCalls>(calls: &mut C) -> Result<C::Handle, Error> {
+pub(super) fn directory<C: LinuxCalls>(calls: &mut C) -> Result<C::Handle, Error> {
     let mut dir = calls.root().map_err(|e| io(PlatformOperation::Open, e))?;
     validate(
         calls
@@ -63,7 +64,7 @@ pub(crate) fn read_next<C: LinuxCalls>(calls: &mut C) -> Result<Option<BootId>, 
         .transpose()
 }
 
-fn validate(meta: Metadata, directory: bool, efivarfs: bool) -> Result<(), Error> {
+pub(super) fn validate(meta: Metadata, directory: bool, efivarfs: bool) -> Result<(), Error> {
     if meta.mode & 0o170000 != if directory { 0o040000 } else { 0o100000 } {
         return Err(io(PlatformOperation::Metadata, 1));
     }
@@ -75,7 +76,7 @@ fn validate(meta: Metadata, directory: bool, efivarfs: bool) -> Result<(), Error
     }
     Ok(())
 }
-fn read_variable<C: LinuxCalls>(
+pub(super) fn read_variable<C: LinuxCalls>(
     calls: &mut C,
     dir: &C::Handle,
     stem: &str,
@@ -134,7 +135,7 @@ fn read_variable<C: LinuxCalls>(
     }
     Ok(Some(bytes))
 }
-fn payload(bytes: &[u8], attributes: u32) -> Result<&[u8], Error> {
+pub(super) fn payload(bytes: &[u8], attributes: u32) -> Result<&[u8], Error> {
     if bytes.get(..4) != Some(attributes.to_le_bytes().as_slice()) {
         return Err(Error::UnsupportedFormat);
     }
@@ -227,7 +228,7 @@ pub(crate) fn read_options<C: LinuxCalls>(
     })
 }
 
-fn boot_id(name: &[u8]) -> Option<BootId> {
+pub(super) fn boot_id(name: &[u8]) -> Option<BootId> {
     if name.len() != 45 || &name[..4] != b"Boot" || name[8] != b'-' || &name[9..] != GUID.as_bytes()
     {
         return None;
@@ -282,16 +283,26 @@ pub(crate) fn native_names(dir: &std::os::fd::OwnedFd) -> Result<Vec<Vec<u8>>, E
         .map_err(|e| io(PlatformOperation::Read, e.raw_os_error()))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut names = Vec::new();
+    let mut name_bytes = 0usize;
     for entry in directory {
         if std::time::Instant::now() >= deadline {
             return Err(io(PlatformOperation::Read, 110));
         }
         let entry = entry.map_err(|e| io(PlatformOperation::Read, e.raw_os_error()))?;
         let bytes = entry.file_name().to_bytes();
-        if boot_id(bytes).is_none() {
+        if !bytes
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"Boot"))
+        {
             continue;
         }
         if names.len() == 65536 {
+            return Err(Error::ResourceLimit);
+        }
+        name_bytes = name_bytes
+            .checked_add(bytes.len())
+            .ok_or(Error::ResourceLimit)?;
+        if name_bytes > 1_048_576 {
             return Err(Error::ResourceLimit);
         }
         let mut name = Vec::new();
@@ -311,6 +322,7 @@ pub(crate) fn open_flags(kind: OpenKind) -> rustix::fs::OFlags {
             OpenKind::Directory => OFlags::RDONLY | OFlags::DIRECTORY,
             OpenKind::ReadVariable => OFlags::RDONLY,
             OpenKind::CreateNext => OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+            OpenKind::CreateEntry => OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
         }
 }
 pub(crate) fn native_metadata(fd: &std::os::fd::OwnedFd) -> Result<Metadata, i32> {
@@ -449,7 +461,10 @@ mod tests {
             names,
             [
                 b"Boot0001-8be4df61-93ca-11d2-aa0d-00e098032b8c".to_vec(),
-                b"Boot000A-8be4df61-93ca-11d2-aa0d-00e098032b8c".to_vec()
+                b"Boot00011-8be4df61-93ca-11d2-aa0d-00e098032b8c".to_vec(),
+                b"Boot000A-8be4df61-93ca-11d2-aa0d-00e098032b8c".to_vec(),
+                b"Boot000a-8be4df61-93ca-11d2-aa0d-00e098032b8c".to_vec(),
+                b"BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c".to_vec(),
             ]
         );
         let regular: OwnedFd = File::open(temp.0.join(format!("Boot0001-{GUID}")))
