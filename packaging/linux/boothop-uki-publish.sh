@@ -55,11 +55,22 @@ final_uki="$directory/arch.efi"
 [[ -f "$staged_uki" ]] || { echo "staged BootHop UKI is missing" >&2; exit 1; }
 
 validate_uki() {
-    local image=$1 sections
+    local image=$1 format properties sections name
+    format=$(objdump -f -- "$image") || return 1
+    grep -Eq 'file format pei-[[:alnum:]_-]+' <<<"$format" || return 1
+
+    properties=$(objdump -p -- "$image") || return 1
+    grep -Eq '^Magic[[:space:]]+010b[[:space:]]+\(PE32\)$' <<<"$properties" \
+        || grep -Eq '^Magic[[:space:]]+020b[[:space:]]+\(PE32\+\)$' <<<"$properties" \
+        || return 1
+    grep -Eq '^Subsystem[[:space:]]+0000000a[[:space:]]+\(EFI application\)$' <<<"$properties" \
+        || return 1
+
     sections=$(objdump -h -- "$image") || return 1
-    grep -q '[.]linux' <<<"$sections" || return 1
-    grep -q '[.]initrd' <<<"$sections" || return 1
-    grep -q '[.]cmdline' <<<"$sections" || return 1
+    for name in .linux .initrd .cmdline; do
+        awk -v expected="$name" '$1 ~ /^[0-9]+$/ && $2 == expected { found = 1 } END { exit !found }' \
+            <<<"$sections" || return 1
+    done
 }
 
 validate_uki "$staged_uki" || {

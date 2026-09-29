@@ -41,6 +41,12 @@ impl FixtureFs {
     fn remove(&mut self, path: &str) {
         self.files.remove(path);
     }
+
+    fn use_default_mkinitcpio_config(&mut self) {
+        if let Some(preset) = self.files.get_mut("/etc/mkinitcpio.d/linux.preset") {
+            *preset = preset.replace("ALL_config='/etc/mkinitcpio.conf'\n", "");
+        }
+    }
 }
 
 impl ArchConfigFs for FixtureFs {
@@ -127,6 +133,10 @@ fn preset_specific_kernel_and_config_override_all_values() {
         "/etc/mkinitcpio.d/linux.preset",
         "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_kver='/boot/vmlinuz-linux-default'\ndefault_config='/etc/mkinitcpio-default.conf'\ndefault_image='/boot/initramfs-linux-default.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
     );
+    fs.insert(
+        "/etc/mkinitcpio.conf.d/20-conflicting-default.conf",
+        "HOOKS=(base udev microcode block filesystems)\n",
+    );
 
     let plan = discover_uki_plan(&fs, &policy()).unwrap();
 
@@ -139,6 +149,7 @@ fn preset_specific_kernel_and_config_override_all_values() {
 #[test]
 fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
     let mut added = FixtureFs::arch();
+    added.use_default_mkinitcpio_config();
     added.insert(
         "/etc/mkinitcpio.conf",
         "HOOKS=(base udev block filesystems)\n",
@@ -154,6 +165,7 @@ fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
     );
 
     let mut removed = FixtureFs::arch();
+    removed.use_default_mkinitcpio_config();
     removed.insert(
         "/etc/mkinitcpio.conf.d/10-no-microcode.conf",
         "HOOKS=(base udev block filesystems)\n",
@@ -176,6 +188,7 @@ fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
 #[test]
 fn unsupported_or_dynamic_mkinitcpio_dropin_fails_closed() {
     let mut fs = FixtureFs::arch();
+    fs.use_default_mkinitcpio_config();
     fs.insert(
         "/etc/mkinitcpio.conf.d/20-dynamic.conf",
         "HOOKS+=(microcode)\n",

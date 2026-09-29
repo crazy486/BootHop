@@ -60,3 +60,16 @@ Review found missing Secure Boot state validation, an unbound suffix-based outpu
 - New verification: `cargo test -p boothop-platform --test uki_discovery` passed (10 tests); `cargo test -p boothop-platform --test uki_publish` passed (3 tests); `packaging/linux/tests/boothop-uki-publish-test.sh` passed using stubs for `findmnt`, `objdump`, `sbsign`, and `sbverify`; `bash -n` passed for both shell scripts. The workspace test suite, formatting check, and `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` passed after the fixes.
 - `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by the same two unrelated diagnostics in Phase 1 `crates/core/src/arch_provision.rs` (lines 365 and 369). Those files were not changed.
 - No host EFI, presets, ESP, or NVRAM was accessed during this review round.
+
+## Second review fix round
+
+The second review identified two issues, both fixed in this round:
+
+- Discovery now tracks whether the selected preset explicitly supplied `default_config` or `ALL_config`. For explicit config paths it reads only that file and ignores `/etc/mkinitcpio.conf.d/*.conf`, matching mkinitcpio's `-c` behavior. When the preset leaves the config implicit, it applies sorted static drop-ins. Regressions prove a conflicting default drop-in cannot override explicit config, while implicit config follows sorted drop-in overrides.
+- UKI validation now checks GNU `objdump -f` for a `pei-*` PE image format, `objdump -p` for PE32 or PE32+ magic and the exact EFI application subsystem value, and `objdump -h` for exact `.linux`, `.initrd`, and `.cmdline` section names. Substring lookalikes are rejected before any stable-file rename.
+- RED evidence: the explicit-config test initially detected microcode from a conflicting default drop-in; the publisher shell test initially accepted a fake ELF image. After the fixes, both regressions pass.
+- `packaging/linux/tests/boothop-uki-publish-test.sh` now covers non-PE, wrong subsystem, `.linuxfoo`, and wrong-section staged artifacts. Each rejection verifies that the prior stable UKI remains and the invalid staged bytes are untouched. It uses temporary files and stubbed `findmnt`, `objdump`, `sbsign`, and `sbverify`; no signing utility or real ESP is used.
+- Local GNU binutils advertises `pei-i386` and `pei-x86-64` support. I generated temporary minimal PE32 and PE32+ inspection fixtures (not UKIs) and confirmed that its `objdump -f`, `-p`, and `-h` output matches the exact format, magic, subsystem, and section checks. No real boot image was inspected or created.
+- Final fix-round verification: `cargo test --workspace --all-targets --quiet`, `cargo fmt --check`, `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings`, `bash -n packaging/linux/boothop-uki-publish.sh packaging/linux/tests/boothop-uki-publish-test.sh`, and `packaging/linux/tests/boothop-uki-publish-test.sh` all passed. The focused discovery suite passed 10 tests and publish suite passed 3 tests.
+- The prior workspace clippy limitation is unchanged: only the two unrelated Phase 1 diagnostics in `crates/core/src/arch_provision.rs` remain.
+- No host EFI, presets, ESP, or NVRAM was accessed in this round.

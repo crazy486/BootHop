@@ -143,9 +143,10 @@ pub fn discover_uki_plan(
     let kernel_image = value(&values, "default_kver")
         .or_else(|| value(&values, "ALL_kver"))
         .ok_or_else(|| unsupported("preset must define ALL_kver or default_kver"))?;
-    let config_path = value(&values, "default_config")
-        .or_else(|| value(&values, "ALL_config"))
-        .unwrap_or_else(|| "/etc/mkinitcpio.conf".into());
+    let explicit_config_path =
+        value(&values, "default_config").or_else(|| value(&values, "ALL_config"));
+    let config_is_explicit = explicit_config_path.is_some();
+    let config_path = explicit_config_path.unwrap_or_else(|| "/etc/mkinitcpio.conf".into());
     let initramfs_image = value(&values, "default_image")
         .or_else(|| value(&values, "ALL_image"))
         .ok_or_else(|| {
@@ -173,7 +174,8 @@ pub fn discover_uki_plan(
         )));
     }
     let config = read_required(fs, &config_path)?;
-    let includes_microcode = discover_microcode_hook(fs, &config_path, &config)?;
+    let includes_microcode =
+        discover_microcode_hook(fs, &config_path, &config, !config_is_explicit)?;
 
     let (command_line_source, command_line) = discover_cmdline(fs, &values)?;
     validate_cmdline(&command_line)?;
@@ -250,9 +252,13 @@ fn discover_microcode_hook(
     fs: &impl ArchConfigFs,
     config_path: &str,
     main_config: &str,
+    include_default_dropins: bool,
 ) -> Result<bool, UkiDiscoveryError> {
     let mut hooks = parse_static_config_hooks(main_config, config_path)?
         .ok_or_else(|| unsupported(format!("{config_path} does not define static HOOKS")))?;
+    if !include_default_dropins {
+        return Ok(hooks.iter().any(|hook| hook == "microcode"));
+    }
     let dropin_dir = "/etc/mkinitcpio.conf.d";
     let mut dropins = fs
         .files_in_directory(dropin_dir)

@@ -17,7 +17,35 @@ printf '%s %s\n' "${@: -1}" "${BOOT_HOP_TEST_FSTYPE:-vfat}"
 EOF
 cat >"$work/bin/objdump" <<'EOF'
 #!/usr/bin/bash
-printf '%s\n' '  1 .linux 0001 0000' '  2 .initrd 0001 0000' '  3 .cmdline 0001 0000'
+image=${@: -1}
+mode=$(<"$image")
+case "$1" in
+    -f)
+        case "$mode" in
+            NON_PE*) echo 'file format elf64-x86-64' ;;
+            PE32*) echo 'file format pei-i386' ;;
+            *) echo 'file format pei-x86-64' ;;
+        esac
+        ;;
+    -p)
+        case "$mode" in
+            PE32*) echo 'Magic 010b (PE32)' ;;
+            *) echo 'Magic 020b (PE32+)' ;;
+        esac
+        case "$mode" in
+            WRONG_SUBSYSTEM*) echo 'Subsystem 00000003 (Windows CUI)' ;;
+            *) echo 'Subsystem 0000000a (EFI application)' ;;
+        esac
+        ;;
+    -h)
+        case "$mode" in
+            LINUX_SUFFIX*) echo '  1 .linuxfoo 0001 0000' ;;
+            WRONG_SECTION*) echo '  2 .initrdx 0001 0000' ;;
+            *) echo '  1 .linux 0001 0000' ;;
+        esac
+        printf '%s\n' '  2 .initrd 0001 0000' '  3 .cmdline 0001 0000'
+        ;;
+esac
 EOF
 cat >"$work/bin/sbsign" <<'EOF'
 #!/usr/bin/bash
@@ -42,7 +70,7 @@ stage="$BOOT_HOP_ESP_MOUNT/EFI/BootHop/arch.efi.staging"
 final="$BOOT_HOP_ESP_MOUNT/EFI/BootHop/arch.efi"
 prepare() {
     printf 'old stable\n' >"$final"
-    printf 'staged uki\n' >"$stage"
+    printf 'PE32+\nstaged uki\n' >"$stage"
     rm -f -- "$BOOT_HOP_TEST_SIGN_LOG"
 }
 assert_old_stable() {
@@ -56,6 +84,16 @@ expect_failure_preserves_stable() {
     fi
     assert_old_stable
 }
+expect_invalid_image_preserves_stable() {
+    prepare
+    printf '%s\n' "$1" >"$stage"
+    if "$publisher" /dev/null /tmp/initramfs "$stage"; then
+        echo "publisher unexpectedly accepted invalid image: $1" >&2
+        exit 1
+    fi
+    assert_old_stable
+    [[ $(<"$stage") == "$1" ]]
+}
 
 unset BOOT_HOP_SECURE_BOOT_REQUIRED
 expect_failure_preserves_stable unset-secure-boot-state
@@ -66,8 +104,9 @@ expect_failure_preserves_stable invalid-secure-boot-state
 BOOT_HOP_SECURE_BOOT_REQUIRED=0
 export BOOT_HOP_SECURE_BOOT_REQUIRED
 prepare
+printf 'PE32\nstaged uki\n' >"$stage"
 "$publisher" /dev/null /tmp/initramfs "$stage"
-[[ $(<"$final") == 'staged uki' ]]
+[[ $(<"$final") == $'PE32\nstaged uki' ]]
 [[ ! -e "$stage" && ! -e "$BOOT_HOP_TEST_SIGN_LOG" ]]
 
 BOOT_HOP_SECURE_BOOT_REQUIRED=1
@@ -77,7 +116,7 @@ BOOT_HOP_SIGNING_CERT="$work/cert"
 export BOOT_HOP_SIGNING_KEY BOOT_HOP_SIGNING_CERT
 prepare
 "$publisher" /dev/null /tmp/initramfs "$stage"
-[[ $(<"$final") == $'staged uki\nsigned' ]]
+[[ $(<"$final") == $'PE32+\nstaged uki\nsigned' ]]
 [[ -e "$BOOT_HOP_TEST_SIGN_LOG" ]]
 
 expect_failure_preserves_stable_unset_esp() {
@@ -105,5 +144,12 @@ unset BOOT_HOP_TEST_FSTYPE
 BOOT_HOP_ESP_MOUNT="$work/esp/../esp"
 export BOOT_HOP_ESP_MOUNT
 expect_failure_preserves_stable non-normalized-esp-path
+
+BOOT_HOP_ESP_MOUNT="$work/esp"
+export BOOT_HOP_ESP_MOUNT
+expect_invalid_image_preserves_stable 'NON_PE invalid'
+expect_invalid_image_preserves_stable 'WRONG_SUBSYSTEM invalid'
+expect_invalid_image_preserves_stable 'LINUX_SUFFIX invalid'
+expect_invalid_image_preserves_stable 'WRONG_SECTION invalid'
 
 echo "UKI publisher tests passed"
