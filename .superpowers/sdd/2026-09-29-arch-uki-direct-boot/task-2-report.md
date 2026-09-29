@@ -73,3 +73,25 @@ The second review identified two issues, both fixed in this round:
 - Final fix-round verification: `cargo test --workspace --all-targets --quiet`, `cargo fmt --check`, `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings`, `bash -n packaging/linux/boothop-uki-publish.sh packaging/linux/tests/boothop-uki-publish-test.sh`, and `packaging/linux/tests/boothop-uki-publish-test.sh` all passed. The focused discovery suite passed 10 tests and publish suite passed 3 tests.
 - The prior workspace clippy limitation is unchanged: only the two unrelated Phase 1 diagnostics in `crates/core/src/arch_provision.rs` remain.
 - No host EFI, presets, ESP, or NVRAM was accessed in this round.
+
+## Third review fix round
+
+The third review's three findings are addressed:
+
+- Preset `_cmdline` values are now treated as paths passed to mkinitcpio `--cmdline`. Discovery accepts only an absolute path to an existing regular file, reads its content as the persistent command line, and rejects inline text, relative paths, directories, and dynamic content. When the preset omits cmdline, the existing persistent-file fallback remains. The discovery fixture now uses a cmdline file; regression cases reject inline, relative, and directory values.
+- The shell validator requires each exact `.linux`, `.initrd`, and `.cmdline` section to have a nonzero hexadecimal size. The stubbed script test independently checks each empty-section case and confirms rejection preserves the old stable UKI and leaves the staged image unchanged.
+- Secure Boot signer output now lives at `arch.efi` inside an exclusively created private temporary directory in the validated staging directory. The exit trap removes only that private directory. The signed artifact is verified and validated before it is moved over the staging file; only after that does publication replace the stable path. A preexisting `$stage.signed` symlink fixture confirms its sentinel target remains unchanged and the signer temp directory is cleaned up.
+
+TDD evidence for this round: before production changes, the inline preset cmdline fixture was incorrectly accepted, and the shell harness demonstrated that the old predictable signer output followed a preexisting symlink and overwrote its sentinel. Both regressions now pass.
+
+Verification after the round:
+
+- `cargo test -p boothop-platform --test uki_discovery` — passed, 11 tests.
+- `cargo test -p boothop-platform --test uki_publish` — passed, 3 tests.
+- `packaging/linux/tests/boothop-uki-publish-test.sh` — passed with temporary files and stubbed external tools.
+- `bash -n packaging/linux/boothop-uki-publish.sh packaging/linux/tests/boothop-uki-publish-test.sh` — passed.
+- `cargo test --workspace --all-targets --quiet` — passed all targets.
+- `cargo fmt --check` — passed.
+- `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — remains blocked only by the existing unrelated Phase 1 diagnostics in `crates/core/src/arch_provision.rs` (manual `is_multiple_of` at line 365 and `chunks_exact_to_as_chunks` at line 369).
+- No real presets, `/boot`, ESP, EFI variables, or NVRAM were accessed; all added behavior was exercised with fake or temporary fixtures.

@@ -16,6 +16,7 @@ impl FixtureFs {
             "/boot".into(),
             "/boot/EFI".into(),
             "/boot/EFI/BootHop".into(),
+            "/etc/boothop/cmdline.d".into(),
         ]);
         fs.files.insert(
             "/etc/mkinitcpio.d/linux.preset".into(),
@@ -289,6 +290,25 @@ fn preset_cmdline_precedes_static_file_and_proc_only_fallback_is_rejected() {
 }
 
 #[test]
+fn preset_cmdline_must_be_an_absolute_regular_file_path() {
+    for cmdline_value in ["root=UUID=inline rw", "cmdline", "/etc/boothop/cmdline.d"] {
+        let mut fs = FixtureFs::arch();
+        if cmdline_value == "cmdline" {
+            fs.insert("cmdline", "root=UUID=relative rw");
+        }
+        fs.insert(
+            "/etc/mkinitcpio.d/linux.preset",
+            &format!("ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='{cmdline_value}'\n"),
+        );
+
+        assert!(
+            discover_uki_plan(&fs, &policy()).is_err(),
+            "preset cmdline value {cmdline_value:?} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn secure_boot_requires_an_existing_signer_and_records_verification_expectations() {
     let fs = FixtureFs::arch();
     let mut secure = policy();
@@ -334,8 +354,9 @@ fn rejects_unsupported_root_and_crypt_configuration() {
         let mut fs = FixtureFs::arch();
         fs.insert(
             "/etc/mkinitcpio.d/linux.preset",
-            &format!("ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='{cmdline}'\n"),
+            "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
         );
+        fs.insert("/etc/boothop/cmdline", cmdline);
         assert!(discover_uki_plan(&fs, &policy()).is_err(), "{cmdline}");
     }
 }

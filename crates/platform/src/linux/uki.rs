@@ -385,17 +385,24 @@ fn discover_cmdline(
                 "preset command line is dynamic; configure a static persistent command line".into(),
             ));
         }
-        let resolved = if value.starts_with('/') {
-            fs.read_text(&value)
-                .map_err(UkiDiscoveryError::Io)?
-                .ok_or_else(|| {
-                    UkiDiscoveryError::InvalidCommandLine(format!(
-                        "preset command-line file is missing: {value}"
-                    ))
-                })?
-        } else {
-            value
-        };
+        if !value.starts_with('/') {
+            return Err(UkiDiscoveryError::InvalidCommandLine(
+                "preset cmdline must name an absolute regular file path".into(),
+            ));
+        }
+        if !fs.is_file(&value) {
+            return Err(UkiDiscoveryError::InvalidCommandLine(format!(
+                "preset cmdline is not an existing regular file: {value}"
+            )));
+        }
+        let resolved = fs
+            .read_text(&value)
+            .map_err(UkiDiscoveryError::Io)?
+            .ok_or_else(|| {
+                UkiDiscoveryError::InvalidCommandLine(format!(
+                    "preset command-line file is missing: {value}"
+                ))
+            })?;
         if is_dynamic(&resolved) {
             return Err(UkiDiscoveryError::InvalidCommandLine(
                 "preset command line is dynamic; configure a static persistent command line".into(),

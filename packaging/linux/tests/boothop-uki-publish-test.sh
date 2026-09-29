@@ -39,11 +39,19 @@ case "$1" in
         ;;
     -h)
         case "$mode" in
-            LINUX_SUFFIX*) echo '  1 .linuxfoo 0001 0000' ;;
-            WRONG_SECTION*) echo '  2 .initrdx 0001 0000' ;;
-            *) echo '  1 .linux 0001 0000' ;;
+            LINUX_SUFFIX*) printf '%s\n' '  1 .linuxfoo 0001 0000' ;;
+            EMPTY_LINUX*) printf '%s\n' '  1 .linux 0000 0000' ;;
+            *) printf '%s\n' '  1 .linux 0001 0000' ;;
         esac
-        printf '%s\n' '  2 .initrd 0001 0000' '  3 .cmdline 0001 0000'
+        case "$mode" in
+            WRONG_SECTION*) printf '%s\n' '  2 .initrdx 0001 0000' ;;
+            EMPTY_INITRD*) printf '%s\n' '  2 .initrd 0000 0000' ;;
+            *) printf '%s\n' '  2 .initrd 0001 0000' ;;
+        esac
+        case "$mode" in
+            EMPTY_CMDLINE*) printf '%s\n' '  3 .cmdline 0000 0000' ;;
+            *) printf '%s\n' '  3 .cmdline 0001 0000' ;;
+        esac
         ;;
 esac
 EOF
@@ -56,7 +64,7 @@ while (($#)); do
         *) input=$1; shift ;;
     esac
 done
-cp -- "$input" "$output"
+cat -- "$input" >"$output"
 printf 'signed\n' >>"$output"
 touch "$BOOT_HOP_TEST_SIGN_LOG"
 EOF
@@ -119,6 +127,18 @@ prepare
 [[ $(<"$final") == $'PE32+\nstaged uki\nsigned' ]]
 [[ -e "$BOOT_HOP_TEST_SIGN_LOG" ]]
 
+prepare
+sentinel="$work/signer-output-sentinel"
+printf 'must stay unchanged\n' >"$sentinel"
+ln -s "$sentinel" "$stage.signed"
+"$publisher" /dev/null /tmp/initramfs "$stage"
+[[ $(<"$sentinel") == 'must stay unchanged' ]]
+[[ -L "$stage.signed" ]]
+if compgen -G "$BOOT_HOP_ESP_MOUNT/EFI/BootHop/.boothop-uki.*" >/dev/null; then
+    echo "signer temporary directory was not cleaned up" >&2
+    exit 1
+fi
+
 expect_failure_preserves_stable_unset_esp() {
     prepare
     unset BOOT_HOP_ESP_MOUNT
@@ -151,5 +171,8 @@ expect_invalid_image_preserves_stable 'NON_PE invalid'
 expect_invalid_image_preserves_stable 'WRONG_SUBSYSTEM invalid'
 expect_invalid_image_preserves_stable 'LINUX_SUFFIX invalid'
 expect_invalid_image_preserves_stable 'WRONG_SECTION invalid'
+expect_invalid_image_preserves_stable 'EMPTY_LINUX invalid'
+expect_invalid_image_preserves_stable 'EMPTY_INITRD invalid'
+expect_invalid_image_preserves_stable 'EMPTY_CMDLINE invalid'
 
 echo "UKI publisher tests passed"

@@ -68,8 +68,12 @@ validate_uki() {
 
     sections=$(objdump -h -- "$image") || return 1
     for name in .linux .initrd .cmdline; do
-        awk -v expected="$name" '$1 ~ /^[0-9]+$/ && $2 == expected { found = 1 } END { exit !found }' \
-            <<<"$sections" || return 1
+        awk -v expected="$name" \
+            '$1 ~ /^[0-9]+$/ && $2 == expected {
+                found = 1
+                if ($3 !~ /^[[:xdigit:]]+$/ || $3 ~ /^0+$/) bad = 1
+            }
+            END { exit !(found && !bad) }' <<<"$sections" || return 1
     done
 }
 
@@ -81,8 +85,12 @@ validate_uki "$staged_uki" || {
 if [[ "$secure_boot_required" == 1 ]]; then
     : "${BOOT_HOP_SIGNING_KEY:?Secure Boot requires an already-configured signing key}"
     : "${BOOT_HOP_SIGNING_CERT:?Secure Boot requires an already-configured signing certificate}"
-    signed_uki="$staged_uki.signed"
-    trap 'rm -f -- "$signed_uki"' EXIT
+    signing_tmp_dir=$(mktemp -d -- "$directory/.boothop-uki.XXXXXX") || {
+        echo "could not create private signer temporary directory" >&2
+        exit 1
+    }
+    signed_uki="$signing_tmp_dir/arch.efi"
+    trap 'rm -rf -- "$signing_tmp_dir"' EXIT
     sbsign --key "$BOOT_HOP_SIGNING_KEY" --cert "$BOOT_HOP_SIGNING_CERT" \
         --output "$signed_uki" "$staged_uki"
     sbverify --cert "$BOOT_HOP_SIGNING_CERT" "$signed_uki"
@@ -91,7 +99,6 @@ if [[ "$secure_boot_required" == 1 ]]; then
         exit 1
     }
     mv -f -- "$signed_uki" "$staged_uki"
-    trap - EXIT
 fi
 
 # Both files share this directory, so mv uses a same-filesystem atomic rename. The stable file
