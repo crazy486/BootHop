@@ -99,7 +99,7 @@ Windows 普通 BootHop 启动 → 无主 GUI → helper 从 Windows 受保护记
 - live entry 缺失、身份不符、UKI 缺失/格式不支持、Secure Boot 签名不可接受或 BootNext 冲突时，Switch 失败且不 reboot；不追随相似条目，不隐式重建。
 - UKI 构建失败不替换已知可用文件；BootOrder 仍保持既有顺序。原 `Boot0000` + GRUB 仍是人工恢复路径。
 - 明确 setup 才可重新 provision；identity 失配先要求用户确认并重新建立所有权，不覆盖未知 Boot####。
-- uninstall 是显式且需授权的逆序清理：确认 BootNext 不指向该项、Boot#### 与 ownership 精确匹配；从当前 BootOrder 中只移除该 ID并保持其他项原相对顺序，读回后再删除 Boot#### 与 BootHop UKI/所有权记录。发现并发/外部变化、无法证明不会覆盖时停止并留待管理员处理；不做盲目恢复。UEFI 没有已核实的 BootOrder compare-and-swap，因此实现仍须承认跨进程固件变量竞态，不能声称 read-modify-write 具备事务安全。
+- uninstall 是显式且需授权的逆序清理：确认 BootNext 不指向该项、Boot#### 与 ownership 精确匹配；从当前 BootOrder 中只移除该 ID并保持其他项原相对顺序，读回后再删除 Boot#### 与 BootHop UKI/所有权记录。发现并发/外部变化、无法证明不会覆盖时停止并留待管理员处理；不做盲目恢复。UEFI 没有已核实的 BootOrder compare-and-swap，因此实现仍须承认跨进程固件变量竞态，不能声称 read-modify-write 具备事务安全。BootNext 检查与 Boot#### 删除也无法由固件提供的原子操作绑定；重复读取只能缩小竞态窗口，不能消除在最后检查后由外部写入 BootNext 的可能。
 
 ## Update compatibility
 
