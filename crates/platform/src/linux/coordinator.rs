@@ -856,7 +856,8 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
             _ => unreachable!(),
         };
         let uki = backend.observe_uki_ownership(entry);
-        if !matches!(uki, Ok(ref readback) if uki_matches(entry, readback)) {
+        if !matches!(uki, Ok(ref readback) if uki_matches_recovery_checkpoint(&state, entry, readback))
+        {
             add_residual(&mut retained, Residual::UkiMayRemain)?;
         }
     }
@@ -913,14 +914,11 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
                     add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
                 UninstallingStep::BootOrderRemoved
-                | UninstallingStep::BootOrderRemovalReadBackVerified
-                    if !matches!(
-                        readback,
-                        LifecycleReadback::BootOrder(ref order)
-                            if order.validate().is_ok()
-                                && !order.ids.contains(&record.owned_entry.boot_id)
-                    ) =>
-                {
+                | UninstallingStep::BootOrderRemovalReadBackVerified => {
+                    // These checkpoints do not persist the exact full post-order.  Absence of
+                    // the owned ID cannot prove that external entries were not reordered or
+                    // removed after the prior readback, so restart reconciliation must retain
+                    // a residual instead of inferring a clean BootOrder from partial evidence.
                     add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
                 UninstallingStep::BootEntryRemovalAttempted
@@ -1123,6 +1121,19 @@ fn uki_matches(entry: &OwnedArchEntry, readback: &LifecycleReadback) -> bool {
         (entry.publish.as_ref(), readback),
         (Some(expected), LifecycleReadback::UkiPresent(actual)) if expected == actual
     )
+}
+
+fn uki_matches_recovery_checkpoint(
+    state: &ArchProvisionState,
+    entry: &OwnedArchEntry,
+    readback: &LifecycleReadback,
+) -> bool {
+    match state {
+        ArchProvisionState::Uninstalling(record) if record.step == UninstallingStep::UkiRemoved => {
+            matches!(readback, LifecycleReadback::UkiAbsent)
+        }
+        _ => uki_matches(entry, readback),
+    }
 }
 
 fn owned_entry(state: &ArchProvisionState) -> Result<&OwnedArchEntry, Error> {

@@ -210,6 +210,7 @@ where
 
 /// Exchange one closed Linux lifecycle operation over the separate helper
 /// mode. Lifecycle responses never enter the ordinary core Report decoder.
+#[cfg(target_os = "linux")]
 pub(crate) fn run_lifecycle_exchange<B, F>(
     boundary: &mut B,
     operation: protocol::LifecycleOperation,

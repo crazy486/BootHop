@@ -37,6 +37,8 @@ struct FakeBackend {
     observe_absent: FailAt,
     observe_error: bool,
     uki_mismatch: bool,
+    observe_uki_absent: bool,
+    observed_order_override: Option<BootOrderValue>,
     uninstalling: bool,
     order_shape: Option<OrderShape>,
     mutations: Vec<&'static str>,
@@ -55,6 +57,8 @@ impl FakeBackend {
             observe_absent: FailAt::None,
             observe_error: false,
             uki_mismatch: false,
+            observe_uki_absent: false,
+            observed_order_override: None,
             uninstalling: false,
             order_shape: None,
             mutations: Vec::new(),
@@ -413,6 +417,9 @@ impl LifecycleBackend for FakeBackend {
         entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        if self.observe_uki_absent {
+            return Ok(LifecycleReadback::UkiAbsent);
+        }
         let mut metadata = entry.publish.clone().expect("published fixture");
         if self.uki_mismatch {
             metadata.size += 1;
@@ -424,6 +431,9 @@ impl LifecycleBackend for FakeBackend {
         self.observations += 1;
         if self.observe_error {
             return Err(Error::Busy);
+        }
+        if let Some(order) = self.observed_order_override.clone() {
+            return Ok(LifecycleReadback::BootOrder(order));
         }
         Ok(match state {
             ArchProvisionState::Provisioning(record) => match record.step {
@@ -1061,6 +1071,87 @@ fn recovery_observation_errors_retain_resource_specific_residuals() {
             && record.residual == vec![Residual::BootEntryMayExist])
     );
     assert!(backend.mutations.is_empty());
+}
+
+#[test]
+fn uninstall_boot_order_removed_recovery_requires_exact_durable_full_order_evidence() {
+    for step in [
+        UninstallingStep::BootOrderRemoved,
+        UninstallingStep::BootOrderRemovalReadBackVerified,
+    ] {
+        let fs = support::FakeFs::installed();
+        let ArchProvisionState::Ready(entry) = support::ready_state() else {
+            unreachable!()
+        };
+        let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
+            operation_id: "uninstall-1".into(),
+            operation_version: 1,
+            owned_entry: entry,
+            step,
+            residual: vec![],
+        });
+        fs.insert(
+            "/var/lib/boothop/arch-provision.json",
+            0o100600,
+            boothop_core::encode_arch_provision_state(&state).unwrap(),
+        );
+        let mut backend = FakeBackend::new(fs.clone());
+        // The owned ID is absent, but an external writer also reordered the other entries.
+        // Since the journal does not durably contain the full post-order proof, this is not
+        // enough evidence to clear the recovery residual.
+        backend.observed_order_override = Some(
+            BootOrderValue::new(7, vec![boothop_core::BootId(8), boothop_core::BootId(7)]).unwrap(),
+        );
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        let recovered = recover(&mut store, &mut backend).unwrap();
+        assert!(
+            matches!(recovered, ArchProvisionState::Uninstalling(ref record)
+            if record.step == step
+                && record.residual.contains(&Residual::BootOrderMayContainEntry))
+        );
+        assert!(backend.mutations.is_empty());
+    }
+}
+
+#[test]
+fn uki_removed_recovery_accepts_expected_absence_but_rejects_unknown_presence() {
+    for unknown_presence in [false, true] {
+        let fs = support::FakeFs::installed();
+        let ArchProvisionState::Ready(entry) = support::ready_state() else {
+            unreachable!()
+        };
+        let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
+            operation_id: "uninstall-1".into(),
+            operation_version: 1,
+            owned_entry: entry,
+            step: UninstallingStep::UkiRemoved,
+            residual: vec![],
+        });
+        fs.insert(
+            "/var/lib/boothop/arch-provision.json",
+            0o100600,
+            boothop_core::encode_arch_provision_state(&state).unwrap(),
+        );
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.observe_uki_absent = !unknown_presence;
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        let recovered = recover(&mut store, &mut backend).unwrap();
+        assert!(
+            matches!(recovered, ArchProvisionState::Uninstalling(ref record)
+            if record.step == UninstallingStep::UkiRemoved
+                && record.residual.contains(&Residual::UkiMayRemain) == unknown_presence)
+        );
+        assert!(backend.mutations.is_empty());
+        if unknown_presence {
+            assert!(store.complete_uninstall(&recovered).is_err());
+        } else {
+            store.complete_uninstall(&recovered).unwrap();
+            assert!(matches!(
+                store.load().unwrap(),
+                ArchProvisionState::Uninstalled(_)
+            ));
+        }
+    }
 }
 
 #[test]
