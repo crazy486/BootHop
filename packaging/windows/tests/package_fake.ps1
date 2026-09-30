@@ -157,6 +157,44 @@ try {
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-platform-uki-read-query.rs') (Join-Path $auditRoot 'crates\platform\src\windows\uki.rs')
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\uki.rs')
+    $storePath = Join-Path $auditRoot 'crates\platform\src\windows\store.rs'
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-platform-store-fileinfo.rs') $storePath
+    & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-store-fileinfo-basic.rs') $storePath -Force
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''GetFileInformationByHandle'' outside its allowlist'
+    Remove-Item -LiteralPath $storePath
+    $variantPath = Join-Path $auditRoot 'crates\platform\src\windows\unsafe-variant.rs'
+    $blockedVariants = @(
+        @{ Api='CreateFile2'; Capability='CreateFile2' },
+        @{ Api='CreateFile3'; Capability='CreateFile3' },
+        @{ Api='CreateFileUnexpected'; Capability='CreateFile' },
+        @{ Api='CreateFileTransactedW'; Capability='CreateFileTransacted' },
+        @{ Api='CreateFileFromAppW'; Capability='CreateFileFromApp' },
+        @{ Api='CreateFileMappingW'; Capability='CreateFileMapping' },
+        @{ Api='CreateFileMapping2'; Capability='CreateFileMapping2' },
+        @{ Api='CreateFileMappingFromAppW'; Capability='CreateFileMappingFromApp' },
+        @{ Api='CreateFileMappingNumaW'; Capability='CreateFileMappingNuma' },
+        @{ Api='DeleteFileTransactedW'; Capability='DeleteFileTransacted' },
+        @{ Api='DeleteFile2W'; Capability='DeleteFile2' },
+        @{ Api='DeleteFileFromAppW'; Capability='DeleteFileFromApp' },
+        @{ Api='WriteFileGather'; Capability='WriteFileGather' },
+        @{ Api='WriteFileScatter'; Capability='WriteFileScatter' },
+        @{ Api='MoveFileWithProgressW'; Capability='MoveFileWithProgress' },
+        @{ Api='MoveFileTransactedW'; Capability='MoveFileTransacted' },
+        @{ Api='ReplaceFileTransactedW'; Capability='ReplaceFileTransacted' },
+        @{ Api='LoadLibraryFromAppW'; Capability='LoadLibraryFromApp' },
+        @{ Api='LoadPackagedLibrary'; Capability='LoadPackagedLibrary' },
+        @{ Api='FindFirstVolumeMountPointW'; Capability='FindFirstVolumeMountPoint' },
+        @{ Api='FindNextVolumeMountPointW'; Capability='FindNextVolumeMountPoint' },
+        @{ Api='GetVolumeInformationByHandleW'; Capability='GetVolumeInformationByHandle' },
+        @{ Api='GetFileInformationByHandleUnexpected'; Capability='GetFileInformationByHandle' }
+    )
+    foreach ($variant in $blockedVariants) {
+        Set-Content -LiteralPath $variantPath -Value "pub fn forbidden_variant() { let _ = $($variant.Api); }" -Encoding UTF8
+        $expectedCapability = "source capability '$($variant.Capability)' outside its allowlist"
+        Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } $expectedCapability
+    }
+    Remove-Item -LiteralPath $variantPath
     New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetProcAddress', 'GetProcAddressEvil'))
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'dynamic-loader import lacks audited runtime provenance'
     New-FakeDumpbin $dumpbin $validDumpbin

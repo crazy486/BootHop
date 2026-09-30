@@ -130,27 +130,36 @@ foreach ($spec in $sourceSpecs) {
 
 $allow = @{
     'SetFirmwareEnvironmentVariable' = @('crates\platform\src\windows\firmware.rs')
+    'SetFirmwareEnvironmentVariableEx' = @('crates\platform\src\windows\firmware.rs')
     'GetFirmwareEnvironmentVariable' = @('crates\platform\src\windows\firmware.rs')
+    'GetFirmwareEnvironmentVariableEx' = @('crates\platform\src\windows\firmware.rs')
     'GetFirmwareType' = @('crates\platform\src\windows\firmware.rs')
     'AdjustTokenPrivileges' = @('crates\platform\src\windows\privilege.rs')
     'OpenProcessToken' = @('crates\platform\src\windows\privilege.rs','crates\gui\src\helper_client\windows\native.rs','crates\helper\src\windows\pipe.rs')
     'InitiateSystemShutdown' = @('crates\platform\src\windows\reboot.rs')
+    'InitiateSystemShutdownEx' = @('crates\platform\src\windows\reboot.rs')
     'ExitWindows' = @('crates\platform\src\windows\reboot.rs')
+    'ExitWindowsEx' = @('crates\platform\src\windows\reboot.rs')
     'ShellExecute' = @('crates\gui\src\helper_client\windows\native.rs')
+    'ShellExecuteEx' = @('crates\gui\src\helper_client\windows\native.rs')
     'CreateProcess' = @('crates\gui\src\helper_client\windows\native.rs')
     # Existing, unrelated file/IPC writers remain narrowly allowlisted. New
     # Windows EFI code cannot use these APIs: writes/deletes in every other
     # source file are rejected below.
     'WriteFile' = @('crates\gui\src\helper_client\windows\native.rs','crates\helper\src\windows\pipe.rs')
     'MoveFile' = @('crates\gui\src\cache\windows.rs')
+    'MoveFileEx' = @('crates\gui\src\cache\windows.rs')
     'ReplaceFile' = @('crates\platform\src\windows\store.rs')
     'SetFileInformationByHandle' = @('crates\gui\src\cache\windows.rs')
     # Read-only metadata and volume-discovery APIs may only be introduced in
     # the dedicated UKI boundary; these paths are existing unrelated uses.
     'FindFirstVolume' = @('crates\platform\src\windows\uki.rs')
+    'FindFirstVolumeMountPoint' = @('crates\platform\src\windows\uki.rs')
     'FindNextVolume' = @('crates\platform\src\windows\uki.rs')
+    'FindNextVolumeMountPoint' = @('crates\platform\src\windows\uki.rs')
     'FindVolumeClose' = @('crates\platform\src\windows\uki.rs')
     'GetVolumeInformation' = @('crates\platform\src\windows\uki.rs')
+    'GetVolumeInformationByHandle' = @('crates\platform\src\windows\uki.rs')
     'GetVolumeNameForVolumeMountPoint' = @('crates\platform\src\windows\uki.rs')
     'GetVolumePathNamesForVolumeName' = @('crates\platform\src\windows\uki.rs')
     'QueryDosDevice' = @('crates\platform\src\windows\uki.rs')
@@ -166,15 +175,53 @@ $allow = @{
 }
 $patterns = @(
     'SetFirmwareEnvironmentVariable','GetFirmwareEnvironmentVariable','GetFirmwareType',
-    'AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','ExitWindows',
-    'ShellExecute','CreateProcess','LoadLibrary','GetProcAddress','bcdedit',
+    'SetFirmwareEnvironmentVariableEx','GetFirmwareEnvironmentVariableEx',
+    'AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','InitiateSystemShutdownEx',
+    'ExitWindows','ExitWindowsEx','ShellExecute','ShellExecuteEx','CreateProcess',
+    'CreateProcessAsUser','CreateProcessWithLogon','CreateProcessWithToken',
+    'LoadLibrary','LoadLibraryEx','LoadLibraryFromApp','LoadPackagedLibrary','GetProcAddress','bcdedit',
     'SetVolumeMountPoint','DeleteVolumeMountPoint','DefineDosDevice','SetVolumeLabel',
-    'WriteFile','WriteFileEx','DeleteFile','MoveFile','ReplaceFile','SetEndOfFile',
-    'SetFileInformationByHandle','FindFirstVolume','FindNextVolume','FindVolumeClose',
-    'GetVolumeInformation','GetVolumeNameForVolumeMountPoint','GetVolumePathNamesForVolumeName',
+    'WriteFile','WriteFileEx','WriteFileGather','WriteFileScatter',
+    'DeleteFile','DeleteFile2','DeleteFileTransacted','DeleteFileFromApp',
+    'MoveFile','MoveFileEx','MoveFileWithProgress','MoveFileTransacted',
+    'ReplaceFile','ReplaceFileTransacted','SetEndOfFile',
+    'SetFileInformationByHandle','FindFirstVolume','FindFirstVolumeMountPoint',
+    'FindNextVolume','FindNextVolumeMountPoint','FindVolumeClose',
+    'GetVolumeInformation','GetVolumeInformationByHandle',
+    'GetVolumeNameForVolumeMountPoint','GetVolumePathNamesForVolumeName',
     'QueryDosDevice','GetLogicalDrives','GetFileInformationByHandle','GetFileInformationByHandleEx',
-    'GetFinalPathNameByHandle','CreateFile','OpenFileById','DeviceIoControl'
+    'GetFinalPathNameByHandle','CreateFile','CreateFile2','CreateFile3','CreateFileTransacted','CreateFileFromApp',
+    'CreateFileMapping','CreateFileMapping2','CreateFileMappingFromApp','CreateFileMappingNuma',
+    'OpenFileById','DeviceIoControl'
 )
+function Test-SourceCapability([string] $text, [string] $capability) {
+    # Find full identifier tokens that begin with this capability. A/W are
+    # conventional encoding suffixes; other unknown suffixes remain matches
+    # so a new API cannot escape its parent's allowlist. If a longer, separately
+    # listed API consumes the entire token, check it only against its own entry.
+    $escaped = [Regex]::Escape($capability)
+    $expression = "(?<![A-Za-z0-9_])$escaped[A-Za-z0-9_]*"
+    foreach ($match in [Regex]::Matches($text, $expression, [Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+        $identifier = $match.Value
+        if ($identifier -ceq $capability -or
+            $identifier -ceq ($capability + 'A') -or
+            $identifier -ceq ($capability + 'W')) { return $true }
+
+        $shadowedByListedApi = $false
+        foreach ($candidate in $patterns) {
+            if ($candidate.Length -le $capability.Length -or
+                -not $candidate.StartsWith($capability, [StringComparison]::Ordinal)) { continue }
+            if ($identifier -ceq $candidate -or
+                $identifier -ceq ($candidate + 'A') -or
+                $identifier -ceq ($candidate + 'W')) {
+                $shadowedByListedApi = $true
+                break
+            }
+        }
+        if (-not $shadowedByListedApi) { return $true }
+    }
+    return $false
+}
 foreach ($file in $sourceFiles) {
     $sourcePath = Get-Absolute $file.FullName 'source file'
     $sourceResource = Open-HeldFileResource $sourcePath 'source file' $sourcePath; [void](Add-HeldResource $resources $sourceResource); $sourceHeld = $sourceResource.Held
@@ -183,7 +230,7 @@ foreach ($file in $sourceFiles) {
         if ($sourceHeld.Stream.Length -eq 0) { Fail "source input is empty: $relative" }
         $text = Read-HeldText $sourceHeld 'source file'
         foreach ($pattern in $patterns) {
-            if ($text.IndexOf($pattern, [StringComparison]::Ordinal) -lt 0) { continue }
+            if (-not (Test-SourceCapability $text $pattern)) { continue }
             $allowed = $false
             if ($allow.ContainsKey($pattern)) { foreach ($expected in $allow[$pattern]) { if ($relative -ceq $expected) { $allowed = $true; break } } }
             if (-not $allowed) { Fail "source capability '$pattern' outside its allowlist: $relative" }
