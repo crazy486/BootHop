@@ -1265,14 +1265,24 @@ fn provision_prepare_errors_and_mismatches_retain_the_prior_checkpoint() {
 }
 
 #[test]
-fn combined_order_preflight_errors_keep_both_residuals_without_retry_or_mutation() {
+fn combined_order_preflight_errors_keep_resource_residuals_without_retry_or_mutation() {
     for error in [
         Error::Busy,
         Error::PlatformIo {
             operation: boothop_core::PlatformOperation::Read,
             raw_code: 5,
         },
+        Error::TargetMissing,
+        Error::IdentityMismatch,
     ] {
+        let expected_residuals = if error == Error::IdentityMismatch {
+            vec![Residual::BootEntryMayExist]
+        } else {
+            vec![
+                Residual::BootEntryMayExist,
+                Residual::BootOrderMayContainEntry,
+            ]
+        };
         let fs = support::FakeFs::installed();
         let mut backend = FakeBackend::new(fs.clone());
         backend.prepare_fail = FailAt::Order;
@@ -1285,10 +1295,7 @@ fn combined_order_preflight_errors_keep_both_residuals_without_retry_or_mutation
         assert!(
             matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
             if record.step == ProvisioningStep::BootEntryReadBackVerified
-                && record.residual == vec![
-                    Residual::BootEntryMayExist,
-                    Residual::BootOrderMayContainEntry,
-                ])
+                && record.residual == expected_residuals)
         );
         assert_eq!(backend.mutations, ["uki", "entry"]);
         assert_eq!(backend.prepare_order_calls, 1);
@@ -1318,10 +1325,7 @@ fn combined_order_preflight_errors_keep_both_residuals_without_retry_or_mutation
         assert!(
             matches!(store.load().unwrap(), ArchProvisionState::Uninstalling(ref record)
             if record.step == UninstallingStep::Started
-                && record.residual == vec![
-                    Residual::BootEntryMayExist,
-                    Residual::BootOrderMayContainEntry,
-                ])
+                && record.residual == expected_residuals)
         );
         assert_eq!(backend.mutations, mutations_before);
         assert_eq!(backend.prepare_order_calls, order_calls_before + 1);

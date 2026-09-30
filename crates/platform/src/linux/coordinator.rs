@@ -1409,7 +1409,7 @@ fn fail_entry_order_precondition<F: Filesystem, T>(
 ) -> Result<T, Error> {
     let mut retained = prior.clone();
     add_residual(&mut retained, Residual::BootEntryMayExist)?;
-    if !matches!(error, Error::IdentityMismatch | Error::TargetMissing) {
+    if !matches!(error, Error::IdentityMismatch) {
         add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
     }
     store.save(&retained)?;
