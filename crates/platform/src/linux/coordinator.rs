@@ -585,11 +585,6 @@ fn boot_order_remove_transition(
         && before.without(id).is_ok_and(|expected| expected == *after)
 }
 
-fn entry_precondition_residual(error: &Error) -> Option<Residual> {
-    matches!(error, Error::IdentityMismatch | Error::TargetMissing)
-        .then_some(Residual::BootEntryMayExist)
-}
-
 fn is_nonterminal_state(state: &ArchProvisionState) -> bool {
     matches!(
         state,
@@ -790,9 +785,7 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
     let observed = match backend.prepare_boot_order_append(entry) {
         Ok(observed) => observed,
         Err(error) => {
-            let residual =
-                entry_precondition_residual(&error).unwrap_or(Residual::BootOrderMayContainEntry);
-            return fail_precondition(store, &verified, residual, error);
+            return fail_entry_order_precondition(store, &verified, error);
         }
     };
     let (observed_identity, before) = match observed {
@@ -907,9 +900,7 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
     let observed = match backend.prepare_boot_order_remove(&entry) {
         Ok(observed) => observed,
         Err(error) => {
-            let residual =
-                entry_precondition_residual(&error).unwrap_or(Residual::BootOrderMayContainEntry);
-            return fail_precondition(store, &started, residual, error);
+            return fail_entry_order_precondition(store, &started, error);
         }
     };
     let (observed_identity, before) = match observed {
@@ -1407,6 +1398,20 @@ fn fail_precondition<F: Filesystem, T>(
 ) -> Result<T, Error> {
     let mut retained = prior.clone();
     add_residual(&mut retained, residual)?;
+    store.save(&retained)?;
+    Err(error)
+}
+
+fn fail_entry_order_precondition<F: Filesystem, T>(
+    store: &mut ArchProvisionStore<F>,
+    prior: &ArchProvisionState,
+    error: Error,
+) -> Result<T, Error> {
+    let mut retained = prior.clone();
+    add_residual(&mut retained, Residual::BootEntryMayExist)?;
+    if !matches!(error, Error::IdentityMismatch | Error::TargetMissing) {
+        add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
+    }
     store.save(&retained)?;
     Err(error)
 }

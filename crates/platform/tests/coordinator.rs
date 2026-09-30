@@ -34,6 +34,8 @@ struct FakeBackend {
     fail: FailAt,
     mismatch: FailAt,
     prepare_fail: FailAt,
+    prepare_error: Option<Error>,
+    prepare_order_calls: usize,
     prepare_mismatch: FailAt,
     observe_absent: FailAt,
     observe_error: bool,
@@ -92,6 +94,8 @@ impl FakeBackend {
             fail: FailAt::None,
             mismatch: FailAt::None,
             prepare_fail: FailAt::None,
+            prepare_error: None,
+            prepare_order_calls: 0,
             prepare_mismatch: FailAt::None,
             observe_absent: FailAt::None,
             observe_error: false,
@@ -365,8 +369,9 @@ impl LifecycleBackend for FakeBackend {
         entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.prepare_order_calls += 1;
         if self.prepare_fail == FailAt::Order {
-            return Err(Error::Busy);
+            return Err(self.prepare_error.clone().unwrap_or(Error::Busy));
         }
         self.trace("external-read-order");
         self.events.push("read-order");
@@ -413,8 +418,9 @@ impl LifecycleBackend for FakeBackend {
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
         self.uninstalling = true;
+        self.prepare_order_calls += 1;
         if self.prepare_fail == FailAt::Order {
-            return Err(Error::Busy);
+            return Err(self.prepare_error.clone().unwrap_or(Error::Busy));
         }
         self.trace("external-read-order");
         self.events.push("read-order");
@@ -1233,9 +1239,17 @@ fn provision_prepare_errors_and_mismatches_retain_the_prior_checkpoint() {
                     Error::Busy
                 })
             );
+            let expected_residuals = if stage == FailAt::Order && !mismatch {
+                vec![
+                    Residual::BootEntryMayExist,
+                    Residual::BootOrderMayContainEntry,
+                ]
+            } else {
+                vec![residual]
+            };
             assert!(
                 matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
-                if record.step == expected_step && record.residual == vec![residual])
+                if record.step == expected_step && record.residual == expected_residuals)
             );
             assert_eq!(
                 backend.mutations,
@@ -1247,6 +1261,76 @@ fn provision_prepare_errors_and_mismatches_retain_the_prior_checkpoint() {
                 }
             );
         }
+    }
+}
+
+#[test]
+fn combined_order_preflight_errors_keep_both_residuals_without_retry_or_mutation() {
+    for error in [
+        Error::Busy,
+        Error::PlatformIo {
+            operation: boothop_core::PlatformOperation::Read,
+            raw_code: 5,
+        },
+    ] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.prepare_fail = FailAt::Order;
+        backend.prepare_error = Some(error.clone());
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        assert_eq!(
+            provision(&mut store, &mut backend, pending_intent()),
+            Err(error.clone())
+        );
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+            if record.step == ProvisioningStep::BootEntryReadBackVerified
+                && record.residual == vec![
+                    Residual::BootEntryMayExist,
+                    Residual::BootOrderMayContainEntry,
+                ])
+        );
+        assert_eq!(backend.mutations, ["uki", "entry"]);
+        assert_eq!(backend.prepare_order_calls, 1);
+        assert_eq!(
+            provision(&mut store, &mut backend, pending_intent()),
+            Err(Error::NotConfigured)
+        );
+        assert_eq!(backend.mutations, ["uki", "entry"]);
+        assert_eq!(backend.prepare_order_calls, 1);
+
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        provision(&mut store, &mut backend, pending_intent()).unwrap();
+        let mutations_before = backend.mutations.clone();
+        let order_calls_before = backend.prepare_order_calls;
+        backend.prepare_fail = FailAt::Order;
+        backend.prepare_error = Some(error.clone());
+        assert_eq!(
+            uninstall(
+                &mut store,
+                &mut backend,
+                "uninstall-preflight-failure".into()
+            ),
+            Err(error.clone())
+        );
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Uninstalling(ref record)
+            if record.step == UninstallingStep::Started
+                && record.residual == vec![
+                    Residual::BootEntryMayExist,
+                    Residual::BootOrderMayContainEntry,
+                ])
+        );
+        assert_eq!(backend.mutations, mutations_before);
+        assert_eq!(backend.prepare_order_calls, order_calls_before + 1);
+        assert_eq!(
+            uninstall(&mut store, &mut backend, "uninstall-preflight-retry".into()),
+            Err(Error::NotConfigured)
+        );
+        assert_eq!(backend.mutations, mutations_before);
+        assert_eq!(backend.prepare_order_calls, order_calls_before + 1);
     }
 }
 
@@ -1287,9 +1371,17 @@ fn uninstall_prepare_errors_and_mismatches_retain_the_prior_checkpoint() {
                     Error::Busy
                 })
             );
+            let expected_residuals = if stage == FailAt::Order && !mismatch {
+                vec![
+                    Residual::BootEntryMayExist,
+                    Residual::BootOrderMayContainEntry,
+                ]
+            } else {
+                vec![residual]
+            };
             assert!(
                 matches!(store.load().unwrap(), ArchProvisionState::Uninstalling(ref record)
-                if record.step == expected_step && record.residual == vec![residual])
+                if record.step == expected_step && record.residual == expected_residuals)
             );
         }
     }
