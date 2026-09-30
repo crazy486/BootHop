@@ -56,6 +56,10 @@ struct FakeFirmware {
     fail_write: bool,
     order_reads: usize,
     readd_on_second_order_read: bool,
+    boot_next_reads: usize,
+    set_boot_next_on_read: Option<usize>,
+    boot_next_value: BootId,
+    external_order_on_write: Option<Vec<u16>>,
 }
 
 impl Default for FakeFirmware {
@@ -68,6 +72,10 @@ impl Default for FakeFirmware {
             fail_write: false,
             order_reads: 0,
             readd_on_second_order_read: false,
+            boot_next_reads: 0,
+            set_boot_next_on_read: None,
+            boot_next_value: BootId(0x4444),
+            external_order_on_write: None,
         }
     }
 }
@@ -83,6 +91,10 @@ impl FakeFirmware {
 
 impl BootOrderIo for FakeFirmware {
     fn read_boot_next(&mut self) -> Result<Option<BootId>, boothop_core::Error> {
+        self.boot_next_reads += 1;
+        if self.set_boot_next_on_read == Some(self.boot_next_reads) {
+            self.next = Some(self.boot_next_value);
+        }
         Ok(self.next)
     }
 
@@ -102,6 +114,10 @@ impl BootOrderIo for FakeFirmware {
                 operation: boothop_core::PlatformOperation::Write,
                 raw_code: 5,
             });
+        }
+        if let Some(ids) = self.external_order_on_write.take() {
+            self.order = BootOrderValue::new(7, ids.into_iter().map(BootId).collect()).unwrap();
+            return Ok(());
         }
         self.order = value.clone();
         if self.mutate_on_write {
@@ -186,6 +202,49 @@ fn uncertain_append_and_order_removal_keep_attempted_checkpoint() {
     assert!(
         matches!(removal_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::BootOrderRemovalAttempted)
     );
+}
+
+#[test]
+fn final_bootnext_gate_blocks_append_and_removal() {
+    let mut append_firmware = FakeFirmware::with_order(&[1, 2]);
+    append_firmware.set_boot_next_on_read = Some(3);
+    let mut append_state = provisioning(ProvisioningStep::BootOrderAppendAttempted);
+    assert_eq!(
+        append_owned_entry(&mut append_firmware, &mut append_state),
+        Err(boothop_core::Error::Busy)
+    );
+    assert_eq!(append_firmware.writes, 0);
+
+    let mut removal_firmware = FakeFirmware::with_order(&[9, 0x1234]);
+    removal_firmware.set_boot_next_on_read = Some(3);
+    removal_firmware.boot_next_value = BootId(0x1234);
+    let mut removal_state = uninstall(UninstallingStep::BootOrderRemovalAttempted);
+    assert_eq!(
+        remove_owned_from_order(&mut removal_firmware, &mut removal_state),
+        Err(boothop_core::Error::Busy)
+    );
+    assert_eq!(removal_firmware.writes, 0);
+}
+
+#[test]
+fn external_writer_winning_the_append_or_removal_write_stops_on_readback_mismatch() {
+    let mut append_firmware = FakeFirmware::with_order(&[1, 2]);
+    append_firmware.external_order_on_write = Some(vec![1, 2, 0x7777]);
+    let mut append_state = provisioning(ProvisioningStep::BootOrderAppendAttempted);
+    assert_eq!(
+        append_owned_entry(&mut append_firmware, &mut append_state),
+        Err(boothop_core::Error::ReadbackFailed)
+    );
+    assert_eq!(append_firmware.writes, 1);
+
+    let mut removal_firmware = FakeFirmware::with_order(&[9, 0x1234]);
+    removal_firmware.external_order_on_write = Some(vec![9, 0x1234, 0x7777]);
+    let mut removal_state = uninstall(UninstallingStep::BootOrderRemovalAttempted);
+    assert_eq!(
+        remove_owned_from_order(&mut removal_firmware, &mut removal_state),
+        Err(boothop_core::Error::ReadbackFailed)
+    );
+    assert_eq!(removal_firmware.writes, 1);
 }
 
 #[test]

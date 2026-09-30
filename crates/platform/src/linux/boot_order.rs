@@ -139,6 +139,9 @@ pub fn append_owned_entry<I: BootOrderIo>(
     let latest = io.read_boot_order()?;
     latest.validate()?;
     let expected = latest.appended(id)?;
+    if io.read_boot_next()?.is_some() {
+        return Err(Error::Busy);
+    }
     io.write_boot_order(&expected)?;
     if let ArchProvisionState::Provisioning(record) = state {
         record.step = ProvisioningStep::BootOrderAppendWriteCompleted;
@@ -208,6 +211,9 @@ pub fn remove_owned_from_order<I: BootOrderIo>(
     let latest = io.read_boot_order()?;
     latest.validate()?;
     let expected = latest.without(id)?;
+    if io.read_boot_next()?.is_some_and(|next| next == id) {
+        return Err(Error::Busy);
+    }
     io.write_boot_order(&expected)?;
     if let ArchProvisionState::Uninstalling(record) = state {
         record.step = UninstallingStep::BootOrderRemovalWriteCompleted;
