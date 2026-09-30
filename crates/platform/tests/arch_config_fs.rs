@@ -157,6 +157,35 @@ fn rejects_oversized_files_directories_and_invalid_or_ambiguous_mounts() {
 }
 
 #[test]
+fn malformed_mount_ids_fail_closed() {
+    let root = TempRoot::new();
+    let fs = adapter(&root);
+    root.write(
+        "proc/self/mountinfo",
+        b"not-a-number 25 8:1 / /mnt/esp rw - vfat /dev/sda1 rw\n",
+    );
+    assert!(!fs.is_mounted_esp("/mnt/esp"));
+
+    root.write(
+        "proc/self/mountinfo",
+        b"36 not-a-number 8:1 / /mnt/esp rw - vfat /dev/sda1 rw\n",
+    );
+    assert!(!fs.is_mounted_esp("/mnt/esp"));
+}
+
+#[test]
+fn out_of_range_octal_mount_escape_fails_closed_without_panicking() {
+    let root = TempRoot::new();
+    root.write(
+        "proc/self/mountinfo",
+        b"36 25 8:1 / /mnt\\777esp rw - vfat /dev/sda1 rw\n",
+    );
+    let fs = adapter(&root);
+
+    assert!(!fs.is_mounted_esp("/mnt/esp"));
+}
+
+#[test]
 fn adapter_exposes_only_the_read_only_contract() {
     fn read_only_contract(_: &impl ArchConfigFs) {}
     let root = TempRoot::new();

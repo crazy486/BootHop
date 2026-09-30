@@ -300,10 +300,18 @@ fn parse_mountinfo(text: &str) -> Result<Vec<(String, String)>, String> {
             .ok_or_else(|| "malformed mount metadata".to_string())?;
         let fields = before.split_ascii_whitespace().collect::<Vec<_>>();
         let post = after.split_ascii_whitespace().collect::<Vec<_>>();
-        if fields.len() < 6 || post.len() < 3 || fields[2].split_once(':').is_none() {
+        if fields.len() < 6 || post.len() < 3 {
             return Err("malformed mount metadata".into());
         }
-        let (major, minor) = fields[2].split_once(':').unwrap();
+        fields[0]
+            .parse::<u64>()
+            .map_err(|_| "malformed mount ID".to_string())?;
+        fields[1]
+            .parse::<u64>()
+            .map_err(|_| "malformed parent mount ID".to_string())?;
+        let (major, minor) = fields[2]
+            .split_once(':')
+            .ok_or_else(|| "malformed mount device number".to_string())?;
         if major.parse::<u32>().is_err() || minor.parse::<u32>().is_err() {
             return Err("malformed mount device number".into());
         }
@@ -327,7 +335,11 @@ fn decode_mount_path(encoded: &str) -> Result<String, String> {
             if !digits.iter().all(|digit| matches!(digit, b'0'..=b'7')) {
                 return Err("malformed escaped mount path".into());
             }
-            let value = (digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + digits[2] - b'0';
+            let value = (u16::from(digits[0] - b'0') << 6)
+                | (u16::from(digits[1] - b'0') << 3)
+                | u16::from(digits[2] - b'0');
+            let value = u8::try_from(value)
+                .map_err(|_| "escaped mount path byte is out of range".to_string())?;
             if value == 0 {
                 return Err("malformed escaped mount path".into());
             }
