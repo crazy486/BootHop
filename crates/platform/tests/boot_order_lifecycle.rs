@@ -19,6 +19,10 @@ use boothop_platform::linux::{
         ProvisionIntent, UkiPublishPermit, UkiRemovePermit, provision, uninstall as run_uninstall,
     },
     owned_uki::{OwnedUkiIo, OwnedUkiState, observe_uki_removal},
+    uki::{
+        CmdlineSource, PreparedUkiArtifact, SecureBootPlan, UkiBuildBackend, UkiBuildError,
+        UkiBuildPlan, UkiValidation, prepare_uki_artifact,
+    },
 };
 
 fn entry() -> OwnedArchEntry {
@@ -367,6 +371,47 @@ struct AdapterBackend {
     readd_order_before_entry_delete: bool,
 }
 
+struct AdapterUkiBuilder;
+impl UkiBuildBackend for AdapterUkiBuilder {
+    fn build(&mut self, _: &UkiBuildPlan) -> Result<Vec<u8>, UkiBuildError> {
+        Ok(b"order adapter UKI".to_vec())
+    }
+    fn validate(&mut self, _: &[u8], _: &UkiBuildPlan) -> Result<(), UkiBuildError> {
+        Ok(())
+    }
+    fn sign_if_required(&mut self, _: &mut Vec<u8>, _: &UkiBuildPlan) -> Result<(), UkiBuildError> {
+        Ok(())
+    }
+}
+
+fn adapter_prepared_uki() -> PreparedUkiArtifact {
+    let plan = UkiBuildPlan {
+        kernel_flavor: "linux".into(),
+        kernel_image: "/kernel".into(),
+        initramfs_image: "/initramfs".into(),
+        config_path: "/config".into(),
+        preset_path: "/preset".into(),
+        final_uki_path: "EFI/BootHop/arch.efi".into(),
+        staged_uki_path: "EFI/BootHop/arch.efi.staging".into(),
+        command_line_source: CmdlineSource::Preset,
+        command_line: "root=UUID=test".into(),
+        includes_microcode: false,
+        secure_boot: SecureBootPlan {
+            signing_required: false,
+            signer_already_configured: false,
+        },
+        validation: UkiValidation {
+            require_efi_application: true,
+            require_kernel_section: true,
+            require_initrd_section: true,
+            require_cmdline_section: true,
+            verify_after_signing: false,
+        },
+        inputs: Vec::new(),
+    };
+    prepare_uki_artifact(&plan, &mut AdapterUkiBuilder).unwrap()
+}
+
 impl AdapterBackend {
     fn new(entry: OwnedArchEntry, firmware: FakeFirmware) -> Self {
         let publish = entry.publish.as_ref().unwrap();
@@ -422,15 +467,20 @@ impl LifecycleBackend for AdapterBackend {
     fn prepare_uki_publication(
         &mut self,
         _entry: &OwnedArchEntry,
-    ) -> Result<(boothop_core::PublishMetadata, LifecycleReadback), boothop_core::Error> {
-        Ok((
-            self.entry.publish.clone().unwrap(),
-            LifecycleReadback::UkiAbsent,
-        ))
+    ) -> Result<(PreparedUkiArtifact, LifecycleReadback), boothop_core::Error> {
+        let prepared = adapter_prepared_uki();
+        let metadata = prepared.metadata().clone();
+        self.entry.publish = Some(metadata.clone());
+        self.uki_io.state = OwnedUkiState::Regular {
+            sha256: metadata.sha256,
+            size: metadata.size,
+        };
+        Ok((prepared, LifecycleReadback::UkiAbsent))
     }
 
     fn publish_uki(
         &mut self,
+        _artifact: PreparedUkiArtifact,
         permit: UkiPublishPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
         Ok(LifecycleReadback::UkiPresent(

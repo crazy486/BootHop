@@ -11,6 +11,11 @@ use boothop_platform::linux::coordinator::{
     LifecycleBackend, LifecycleFailure, LifecycleProofBinding, LifecycleReadback, ProvisionIntent,
     UkiPublishPermit, UkiRemovePermit, provision, recover, uninstall,
 };
+use boothop_platform::linux::uki::{
+    PreparedUkiArtifact, UkiBuildBackend, UkiBuildError, UkiBuildError as BuildError, UkiBuildPlan,
+    UkiFinalPathState, UkiPublishFs, prepare_uki_artifact, publish_prepared_uki,
+};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FailAt {
@@ -18,6 +23,13 @@ enum FailAt {
     Uki,
     Entry,
     Order,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UkiPublisherFailAt {
+    Stage,
+    Rename,
+    Readback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +49,11 @@ struct FakeBackend {
     prepare_error: Option<Error>,
     prepare_order_calls: usize,
     prepare_mismatch: FailAt,
+    preexisting_uki: bool,
+    uki_publisher_fail_at: Option<UkiPublisherFailAt>,
+    uki_publisher_calls: Vec<&'static str>,
+    uki_stage_remains: bool,
+    uki_final_exists: bool,
     observe_absent: FailAt,
     observe_error: bool,
     uki_mismatch: bool,
@@ -97,6 +114,11 @@ impl FakeBackend {
             prepare_error: None,
             prepare_order_calls: 0,
             prepare_mismatch: FailAt::None,
+            preexisting_uki: false,
+            uki_publisher_fail_at: None,
+            uki_publisher_calls: Vec::new(),
+            uki_stage_remains: false,
+            uki_final_exists: false,
             observe_absent: FailAt::None,
             observe_error: false,
             uki_mismatch: false,
@@ -246,10 +268,7 @@ impl FakeBackend {
             _ => unreachable!(),
         });
         Ok(match stage {
-            "uki" => LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
-                sha256: [0x22; 32],
-                size: 42,
-            }),
+            "uki" => LifecycleReadback::UkiPresent(evidence.entry.publish.clone().unwrap()),
             "entry" => LifecycleReadback::BootEntryPresent(evidence.entry.identity.clone()),
             "order" => LifecycleReadback::BootOrder(
                 BootOrderValue::new(
@@ -271,27 +290,142 @@ impl FakeBackend {
     }
 }
 
+struct CoordinatorUkiBuilder;
+impl UkiBuildBackend for CoordinatorUkiBuilder {
+    fn build(&mut self, _: &UkiBuildPlan) -> Result<Vec<u8>, UkiBuildError> {
+        Ok(b"coordinator fake UKI".to_vec())
+    }
+    fn validate(&mut self, _: &[u8], _: &UkiBuildPlan) -> Result<(), UkiBuildError> {
+        Ok(())
+    }
+    fn sign_if_required(&mut self, _: &mut Vec<u8>, _: &UkiBuildPlan) -> Result<(), UkiBuildError> {
+        Ok(())
+    }
+}
+
+fn prepared_test_uki() -> PreparedUkiArtifact {
+    let plan = UkiBuildPlan {
+        kernel_flavor: "linux".into(),
+        kernel_image: "/kernel".into(),
+        initramfs_image: "/initramfs".into(),
+        config_path: "/config".into(),
+        preset_path: "/preset".into(),
+        final_uki_path: "EFI/BootHop/arch.efi".into(),
+        staged_uki_path: "EFI/BootHop/arch.efi.staging".into(),
+        command_line_source: boothop_platform::linux::uki::CmdlineSource::Preset,
+        command_line: "root=UUID=test".into(),
+        includes_microcode: false,
+        secure_boot: boothop_platform::linux::uki::SecureBootPlan {
+            signing_required: false,
+            signer_already_configured: false,
+        },
+        validation: boothop_platform::linux::uki::UkiValidation {
+            require_efi_application: true,
+            require_kernel_section: true,
+            require_initrd_section: true,
+            require_cmdline_section: true,
+            verify_after_signing: false,
+        },
+        inputs: Vec::new(),
+    };
+    prepare_uki_artifact(&plan, &mut CoordinatorUkiBuilder).unwrap()
+}
+
+fn test_publish_metadata() -> boothop_core::PublishMetadata {
+    prepared_test_uki().metadata().clone()
+}
+
+#[derive(Default)]
+struct FakeUkiPublisher {
+    staged: Option<Vec<u8>>,
+    final_bytes: Option<Vec<u8>>,
+    calls: Vec<&'static str>,
+    fail_at: Option<UkiPublisherFailAt>,
+    final_reads: usize,
+}
+
+impl UkiPublishFs for FakeUkiPublisher {
+    fn final_path_state(&mut self, _: &str) -> Result<UkiFinalPathState, BuildError> {
+        self.calls.push("observe");
+        self.final_reads += 1;
+        if self.fail_at == Some(UkiPublisherFailAt::Readback) && self.final_reads == 3 {
+            return Err(BuildError::Publish("final readback failed".into()));
+        }
+        Ok(match &self.final_bytes {
+            Some(bytes) => UkiFinalPathState::Regular(boothop_core::PublishMetadata {
+                sha256: Sha256::digest(bytes).into(),
+                size: bytes.len() as u64,
+            }),
+            None => UkiFinalPathState::Absent,
+        })
+    }
+    fn write_stage(
+        &mut self,
+        _: &str,
+        bytes: &[u8],
+        permit: &UkiPublishPermit<'_>,
+    ) -> Result<(), BuildError> {
+        self.calls.push("stage");
+        assert!(
+            matches!(permit.attempted_state(), ArchProvisionState::Provisioning(record)
+            if record.step == ProvisioningStep::UkiPublicationAttempted)
+        );
+        self.staged = Some(if self.fail_at == Some(UkiPublisherFailAt::Stage) {
+            bytes[..bytes.len().min(5)].to_vec()
+        } else {
+            bytes.to_vec()
+        });
+        if self.fail_at == Some(UkiPublisherFailAt::Stage) {
+            return Err(BuildError::Publish("stage write failed".into()));
+        }
+        Ok(())
+    }
+    fn rename_stage_over_final(
+        &mut self,
+        _: &str,
+        _: &str,
+        permit: &UkiPublishPermit<'_>,
+    ) -> Result<(), BuildError> {
+        self.calls.push("rename");
+        assert!(
+            matches!(permit.attempted_state(), ArchProvisionState::Provisioning(record)
+            if record.step == ProvisioningStep::UkiPublicationAttempted)
+        );
+        if self.fail_at == Some(UkiPublisherFailAt::Rename) {
+            return Err(BuildError::Publish("atomic rename failed".into()));
+        }
+        self.final_bytes = self.staged.take();
+        Ok(())
+    }
+}
+
 impl LifecycleBackend for FakeBackend {
     fn prepare_uki_publication(
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
-    ) -> Result<(boothop_core::PublishMetadata, LifecycleReadback), Error> {
+    ) -> Result<(PreparedUkiArtifact, LifecycleReadback), Error> {
         self.assert_lock();
         if self.prepare_fail == FailAt::Uki {
             return Err(Error::Busy);
         }
+        let prepared = prepared_test_uki();
+        self.events.push("build-uki");
+        self.trace("prepare-uki-build");
         self.trace("external-read-uki");
         self.events.push("read-uki");
         if self.prepare_mismatch == FailAt::Uki {
             return Ok((
-                boothop_core::PublishMetadata {
-                    sha256: [0x22; 32],
-                    size: 42,
-                },
+                prepared,
                 LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
                     sha256: [0x33; 32],
                     size: 43,
                 }),
+            ));
+        }
+        if self.preexisting_uki {
+            return Ok((
+                prepared,
+                LifecycleReadback::UkiPresent(test_publish_metadata()),
             ));
         }
         if let Some(state) = self.stale_journal.take() {
@@ -304,31 +438,50 @@ impl LifecycleBackend for FakeBackend {
         if let Some(failure) = self.attempt_commit_failure {
             self.fs.0.borrow_mut().fail = Some(failure);
         }
-        Ok((
-            boothop_core::PublishMetadata {
-                sha256: [0x22; 32],
-                size: 42,
-            },
-            LifecycleReadback::UkiAbsent,
-        ))
+        Ok((prepared, LifecycleReadback::UkiAbsent))
     }
     fn publish_uki(
         &mut self,
+        artifact: PreparedUkiArtifact,
         permit: UkiPublishPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        let entry = permit.owned_entry();
-        self.mutation(
-            "uki",
-            Residual::UkiMayRemain,
-            mutation_evidence(
-                entry,
-                permit.operation_id(),
-                permit.operation_version(),
-                permit.attempted_state(),
-                permit.expected_evidence(),
-                permit.precondition_evidence(),
-            ),
-        )
+        let evidence = mutation_evidence(
+            permit.owned_entry(),
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state(),
+            permit.expected_evidence(),
+            permit.precondition_evidence(),
+        );
+        if self.fail == FailAt::Uki {
+            return self.mutation("uki", Residual::UkiMayRemain, evidence);
+        }
+        let mut publisher = FakeUkiPublisher {
+            fail_at: self.uki_publisher_fail_at,
+            ..Default::default()
+        };
+        let publish_result = publish_prepared_uki(artifact, permit, &mut publisher);
+        self.uki_publisher_calls = publisher.calls.clone();
+        self.uki_stage_remains = publisher.staged.is_some();
+        self.uki_final_exists = publisher.final_bytes.is_some();
+        let metadata = publish_result.map_err(|_| {
+            LifecycleFailure::uncertain(Error::ReadbackFailed, Residual::UkiMayRemain)
+        })?;
+        assert_eq!(
+            self.uki_publisher_calls,
+            ["observe", "stage", "observe", "rename", "observe"]
+        );
+        assert!(!self.uki_stage_remains);
+        assert!(self.uki_final_exists);
+        assert!(publisher.final_bytes.as_deref().is_some_and(|bytes| {
+            let actual: [u8; 32] = Sha256::digest(bytes).into();
+            actual == metadata.sha256 && bytes.len() as u64 == metadata.size
+        }));
+        let result = self.mutation("uki", Residual::UkiMayRemain, evidence)?;
+        if self.mismatch != FailAt::Uki {
+            assert_eq!(result, LifecycleReadback::UkiPresent(metadata));
+        }
+        Ok(result)
     }
     fn prepare_boot_entry(
         &mut self,
@@ -580,10 +733,7 @@ impl LifecycleBackend for FakeBackend {
         Ok(match state {
             ArchProvisionState::Provisioning(record) => match record.step {
                 ProvisioningStep::UkiPublicationAttempted => {
-                    LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
-                        sha256: [0x22; 32],
-                        size: 42,
-                    })
+                    LifecycleReadback::UkiPresent(test_publish_metadata())
                 }
                 ProvisioningStep::BootEntryCreateAttempted => {
                     if self.observe_absent == FailAt::Entry {
@@ -633,10 +783,7 @@ impl LifecycleBackend for FakeBackend {
                     LifecycleReadback::BootEntryPresent(record.owned_entry.identity.clone())
                 }
                 UninstallingStep::UkiRemovalAttempted => {
-                    LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
-                        sha256: [0x22; 32],
-                        size: 42,
-                    })
+                    LifecycleReadback::UkiPresent(test_publish_metadata())
                 }
                 _ => LifecycleReadback::UkiAbsent,
             },
@@ -660,10 +807,7 @@ fn published_entry() -> boothop_core::OwnedArchEntry {
     let ArchProvisionState::Ready(mut entry) = support::ready_state() else {
         unreachable!()
     };
-    entry.publish = Some(boothop_core::PublishMetadata {
-        sha256: [0x22; 32],
-        size: 42,
-    });
+    entry.publish = Some(test_publish_metadata());
     entry
 }
 
@@ -734,6 +878,7 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
     assert_eq!(
         backend.events,
         [
+            "build-uki",
             "read-uki",
             "mutate-uki",
             "readback-uki",
@@ -746,6 +891,18 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
         ]
     );
     let journal_events = fs.0.borrow().events.clone();
+    let build = journal_events
+        .iter()
+        .position(|event| event == "prepare-uki-build")
+        .unwrap();
+    let attempted_uki = journal_events
+        .iter()
+        .position(|event| event == "journal:provisioning:uki_publication_attempted")
+        .unwrap();
+    assert!(
+        build < attempted_uki,
+        "UKI bytes must be prepared before Attempted is committed"
+    );
     for (stage, attempted, verified) in [
         (
             "uki",
@@ -891,6 +1048,48 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
 }
 
 #[test]
+fn uki_stage_rename_and_readback_failures_never_retry_or_rollback() {
+    for (failure, expected_calls, stage_remains, final_exists) in [
+        (
+            UkiPublisherFailAt::Stage,
+            vec!["observe", "stage"],
+            true,
+            false,
+        ),
+        (
+            UkiPublisherFailAt::Rename,
+            vec!["observe", "stage", "observe", "rename"],
+            true,
+            false,
+        ),
+        (
+            UkiPublisherFailAt::Readback,
+            vec!["observe", "stage", "observe", "rename", "observe"],
+            false,
+            true,
+        ),
+    ] {
+        let fs = support::FakeFs::installed();
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.uki_publisher_fail_at = Some(failure);
+        assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+        assert_eq!(backend.uki_publisher_calls, expected_calls);
+        assert_eq!(backend.uki_stage_remains, stage_remains);
+        assert_eq!(backend.uki_final_exists, final_exists);
+        assert!(
+            backend.mutations.is_empty(),
+            "failure must not trigger a second publish call"
+        );
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+            if record.step == ProvisioningStep::UkiPublicationAttempted
+                && record.residual == vec![Residual::UkiMayRemain])
+        );
+    }
+}
+
+#[test]
 fn failed_or_uncertain_attempt_commit_never_grants_a_mutation_permit() {
     for (stage, attempted) in [("write", false), ("dir_fsync", true)] {
         let fs = support::FakeFs::installed();
@@ -901,6 +1100,9 @@ fn failed_or_uncertain_attempt_commit_never_grants_a_mutation_permit() {
         assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
         assert!(backend.mutations.is_empty());
         assert!(backend.permit_evidence.is_empty());
+        assert!(backend.uki_publisher_calls.is_empty());
+        assert!(!backend.uki_stage_remains);
+        assert!(!backend.uki_final_exists);
         assert!(
             matches!(store.load().unwrap(), ArchProvisionState::Provisioning(record)
             if if attempted {
@@ -926,6 +1128,7 @@ fn reopened_attempted_checkpoint_recovery_is_read_only_and_never_remints_permits
     );
     assert!(backend.mutations.is_empty());
     assert!(backend.permit_evidence.is_empty());
+    assert!(backend.uki_publisher_calls.is_empty());
     drop(store);
 
     fs.0.borrow_mut().fail = None;
@@ -938,6 +1141,7 @@ fn reopened_attempted_checkpoint_recovery_is_read_only_and_never_remints_permits
     assert_eq!(backend.observations, 1);
     assert!(backend.mutations.is_empty());
     assert!(backend.permit_evidence.is_empty());
+    assert!(backend.uki_publisher_calls.is_empty());
 }
 
 #[test]
@@ -1449,10 +1653,7 @@ fn recovery_observes_nonterminal_verified_checkpoints_without_advancing() {
         let ArchProvisionState::Ready(mut entry) = support::ready_state() else {
             unreachable!()
         };
-        entry.publish = Some(boothop_core::PublishMetadata {
-            sha256: [0x22; 32],
-            size: 42,
-        });
+        entry.publish = Some(test_publish_metadata());
         let state = ArchProvisionState::Provisioning(boothop_core::ProvisioningRecord {
             operation_id: "provision-1".into(),
             operation_version: 1,
@@ -1482,10 +1683,7 @@ fn recovery_observation_errors_retain_resource_specific_residuals() {
     let ArchProvisionState::Ready(mut entry) = support::ready_state() else {
         unreachable!()
     };
-    entry.publish = Some(boothop_core::PublishMetadata {
-        sha256: [0x22; 32],
-        size: 42,
-    });
+    entry.publish = Some(test_publish_metadata());
     let state = ArchProvisionState::Provisioning(boothop_core::ProvisioningRecord {
         operation_id: "provision-1".into(),
         operation_version: 1,
@@ -1622,4 +1820,45 @@ fn mismatched_prepare_readback_stops_before_attempt_checkpoint() {
         matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref r)
         if r.step == ProvisioningStep::UkiPublicationPending)
     );
+}
+
+#[test]
+fn preexisting_exact_uki_path_stops_before_any_publication_mutation() {
+    let fs = support::FakeFs::installed();
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let mut backend = FakeBackend::new(fs.clone());
+    backend.preexisting_uki = true;
+    assert_eq!(
+        provision(&mut store, &mut backend, pending_intent()),
+        Err(Error::ReadbackFailed)
+    );
+    assert!(backend.mutations.is_empty());
+    assert!(backend.permit_evidence.is_empty());
+    assert!(
+        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+        if record.step == ProvisioningStep::UkiPublicationPending)
+    );
+}
+
+#[test]
+fn ready_state_cannot_enter_initial_uki_publication() {
+    let fs = support::FakeFs::installed();
+    let ready = support::ready_state();
+    fs.insert(
+        "/var/lib/boothop/arch-provision.json",
+        0o100600,
+        boothop_core::encode_arch_provision_state(&ready).unwrap(),
+    );
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let mut backend = FakeBackend::new(fs);
+    assert_eq!(
+        provision(&mut store, &mut backend, pending_intent()),
+        Err(Error::NotConfigured)
+    );
+    assert!(backend.events.is_empty());
+    assert!(backend.uki_publisher_calls.is_empty());
+    assert!(matches!(
+        store.load().unwrap(),
+        ArchProvisionState::Ready(_)
+    ));
 }

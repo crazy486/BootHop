@@ -3,11 +3,13 @@ use std::{
     fmt,
 };
 
+use super::coordinator::UkiPublishPermit;
 use boothop_core::{ArchProvisionState, PublishMetadata};
 use sha2::{Digest, Sha256};
 
 pub const FINAL_UKI_PATH: &str = "EFI/BootHop/arch.efi";
 pub const STAGED_UKI_PATH: &str = "EFI/BootHop/arch.efi.staging";
+const MAX_PREPARED_UKI_SIZE: usize = 64 * 1024 * 1024;
 
 /// Read-only view used to discover an Arch/mkinitcpio configuration. Implementations must not
 /// repair mounts, execute commands, or write files; production callers should provide a bounded
@@ -741,164 +743,103 @@ pub enum UkiFinalPathState {
     Other,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UkiPublicationAuthority {
-    /// A journaled initial attempt may publish only while the fixed path remains absent.
-    ProvisioningAttempted(PublishMetadata),
-    /// Updates are authorized only while the stable file still matches this journaled identity.
-    Ready(PublishMetadata),
+/// Validated, signed bytes ready for one initial publication. The bytes and their identity are
+/// created together and cannot be constructed or altered by callers.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PreparedUkiArtifact {
+    bytes: Vec<u8>,
+    metadata: PublishMetadata,
+}
+
+impl PreparedUkiArtifact {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn metadata(&self) -> &PublishMetadata {
+        &self.metadata
+    }
 }
 
 /// Injected publication boundary. `final_path_state` must not follow symlinks and must report a
-/// regular file's exact SHA-256 and byte size. `write_stage` must target the plan's sibling
-/// staging file. `rename_stage_over_final` must re-enforce the supplied authority at the
-/// publication boundary, perform a same-filesystem atomic replace, and leave `final` untouched
-/// on error. A production adapter must obtain the authority only from a successfully decoded,
-/// root-owned provisioning journal; caller-provided paths or standalone ownership markers are
-/// not sufficient.
+/// regular file's exact SHA-256 and byte size. `write_stage` must target the fixed sibling
+/// staging file. Stage and rename both receive the same coordinator-issued permit;
+/// `rename_stage_over_final` must perform a same-filesystem atomic rename and leave the final
+/// path untouched on error.
 pub trait UkiPublishFs {
     fn final_path_state(&mut self, path: &str) -> Result<UkiFinalPathState, UkiBuildError>;
-    fn write_stage(&mut self, path: &str, contents: &[u8]) -> Result<(), UkiBuildError>;
+    fn write_stage(
+        &mut self,
+        path: &str,
+        contents: &[u8],
+        permit: &UkiPublishPermit<'_>,
+    ) -> Result<(), UkiBuildError>;
     fn rename_stage_over_final(
         &mut self,
         stage_path: &str,
         final_path: &str,
-        authority: &UkiPublicationAuthority,
+        permit: &UkiPublishPermit<'_>,
     ) -> Result<(), UkiBuildError>;
 }
 
-/// Durable journal checkpoints coupled to UKI publication. Implementations must fsync each
-/// transition before returning success. The caller must hold the same exclusive provisioning
-/// journal lock from loading `journal_state` through this entire transaction, including atomic
-/// rename, final-file readback, and the completion checkpoint.
-pub trait UkiPublishJournal {
-    /// Persist `Provisioning(UkiPublicationAttempted)` with the exact staged artifact metadata.
-    fn persist_initial_publication_attempt(
-        &mut self,
-        metadata: &PublishMetadata,
-    ) -> Result<(), UkiBuildError>;
-    /// Advance to `Provisioning(UkiPublished)` only after exact final-file readback.
-    fn mark_initial_uki_published(
-        &mut self,
-        metadata: &PublishMetadata,
-    ) -> Result<(), UkiBuildError>;
-    /// Update `Ready` metadata after exact final-file readback. Success means durable save.
-    fn persist_ready_uki_update(&mut self, metadata: &PublishMetadata)
-    -> Result<(), UkiBuildError>;
-}
-
-pub fn build_and_publish_uki(
+pub fn prepare_uki_artifact(
     plan: &UkiBuildPlan,
-    journal_state: &ArchProvisionState,
-    journal: &mut impl UkiPublishJournal,
     builder: &mut impl UkiBuildBackend,
-    publisher: &mut impl UkiPublishFs,
-) -> Result<PublishMetadata, UkiBuildError> {
+) -> Result<PreparedUkiArtifact, UkiBuildError> {
     if plan.final_uki_path != FINAL_UKI_PATH || plan.staged_uki_path != STAGED_UKI_PATH {
         return Err(UkiBuildError::Publish(
             "UKI publication paths must match the fixed BootHop paths".into(),
         ));
     }
-    match journal_state {
-        ArchProvisionState::Provisioning(record)
-            if record.owned_entry.uki_path == FINAL_UKI_PATH
-                && record.owned_entry.publish.is_none()
-                && record.step == boothop_core::ProvisioningStep::UkiPublicationPending
-                && record.residual.is_empty() =>
-        {
-            publish_initial_uki(plan, journal, builder, publisher)
-        }
-        ArchProvisionState::Provisioning(record)
-            if record.step == boothop_core::ProvisioningStep::UkiPublicationAttempted =>
-        {
-            let _ = verify_interrupted_initial_publication(journal_state, publisher)?;
-            Err(UkiBuildError::Publish(
-                "interrupted initial UKI publication requires explicit recovery; it will not be retried".into(),
-            ))
-        }
-        ArchProvisionState::Ready(entry) if entry.uki_path == FINAL_UKI_PATH => {
-            let old_metadata = entry.publish.as_ref().ok_or_else(|| {
-                UkiBuildError::Publish("journaled UKI ownership metadata is missing".into())
-            })?;
-            publish_ready_update(plan, old_metadata, journal, builder, publisher)
-        }
-        ArchProvisionState::Provisioning(_) => Err(UkiBuildError::Publish(
-            "only the exact UkiPublicationPending checkpoint may start initial UKI publication"
-                .into(),
-        )),
-        ArchProvisionState::Ready(_) => Err(UkiBuildError::Publish(
-            "journaled UKI path does not match the fixed BootHop path".into(),
-        )),
-        ArchProvisionState::Unprovisioned
-        | ArchProvisionState::Uninstalling(_)
-        | ArchProvisionState::Uninstalled(_) => Err(UkiBuildError::Publish(
-            "a valid Provisioning or Ready ownership journal is required".into(),
-        )),
-    }
-}
-
-fn publish_initial_uki(
-    plan: &UkiBuildPlan,
-    journal: &mut impl UkiPublishJournal,
-    builder: &mut impl UkiBuildBackend,
-    publisher: &mut impl UkiPublishFs,
-) -> Result<PublishMetadata, UkiBuildError> {
-    require_absent_final(publisher, &plan.final_uki_path)?;
-    let artifact = build_validated_artifact(plan, builder)?;
-    let metadata = metadata_for(&artifact);
-
-    // Persist intent before any ESP write. If the process stops during staging or after rename,
-    // the Attempted state is reconciliation-only and cannot authorize a rebuild.
-    journal.persist_initial_publication_attempt(&metadata)?;
-    publisher.write_stage(&plan.staged_uki_path, &artifact)?;
-    require_absent_final(publisher, &plan.final_uki_path)?;
-    let attempted_authority = UkiPublicationAuthority::ProvisioningAttempted(metadata.clone());
-    publisher.rename_stage_over_final(
-        &plan.staged_uki_path,
-        &plan.final_uki_path,
-        &attempted_authority,
-    )?;
-    require_exact_final(publisher, &plan.final_uki_path, &metadata)?;
-    journal.mark_initial_uki_published(&metadata)?;
-    Ok(metadata)
-}
-
-fn publish_ready_update(
-    plan: &UkiBuildPlan,
-    old_metadata: &PublishMetadata,
-    journal: &mut impl UkiPublishJournal,
-    builder: &mut impl UkiBuildBackend,
-    publisher: &mut impl UkiPublishFs,
-) -> Result<PublishMetadata, UkiBuildError> {
-    if old_metadata.size == 0 {
-        return Err(UkiBuildError::Publish(
-            "journaled UKI ownership metadata is incomplete".into(),
+    let bytes = build_validated_artifact(plan, builder)?;
+    if bytes.is_empty() || bytes.len() > MAX_PREPARED_UKI_SIZE {
+        return Err(UkiBuildError::Validation(
+            "prepared UKI exceeds the allowed size bound".into(),
         ));
     }
-    require_exact_final(publisher, &plan.final_uki_path, old_metadata)?;
-    let artifact = build_validated_artifact(plan, builder)?;
-    let new_metadata = metadata_for(&artifact);
-    verify_publication_authority(
-        publisher,
-        &plan.final_uki_path,
-        &UkiPublicationAuthority::Ready(old_metadata.clone()),
-    )?;
-    publisher.write_stage(&plan.staged_uki_path, &artifact)?;
-    verify_publication_authority(
-        publisher,
-        &plan.final_uki_path,
-        &UkiPublicationAuthority::Ready(old_metadata.clone()),
-    )?;
-    publisher.rename_stage_over_final(
-        &plan.staged_uki_path,
-        &plan.final_uki_path,
-        &UkiPublicationAuthority::Ready(old_metadata.clone()),
-    )?;
-    require_exact_final(publisher, &plan.final_uki_path, &new_metadata)?;
-    // If this durable write fails after rename, the journal still describes the old file. The
-    // next update consequently fails its old digest/size gate and cannot overwrite blindly.
-    journal.persist_ready_uki_update(&new_metadata)?;
-    Ok(new_metadata)
+    let metadata = metadata_for(&bytes);
+    Ok(PreparedUkiArtifact { bytes, metadata })
+}
+
+/// Publish exactly the artifact whose metadata is committed in the coordinator's Attempted
+/// checkpoint. The permit is borrowed at both low-level write seams and consumed here.
+pub fn publish_prepared_uki(
+    artifact: PreparedUkiArtifact,
+    permit: UkiPublishPermit<'_>,
+    publisher: &mut impl UkiPublishFs,
+) -> Result<PublishMetadata, UkiBuildError> {
+    validate_uki_publish_permit(&permit, &artifact.metadata)?;
+    require_absent_final(publisher, FINAL_UKI_PATH)?;
+    publisher.write_stage(STAGED_UKI_PATH, &artifact.bytes, &permit)?;
+    require_absent_final(publisher, FINAL_UKI_PATH)?;
+    publisher.rename_stage_over_final(STAGED_UKI_PATH, FINAL_UKI_PATH, &permit)?;
+    require_exact_final(publisher, FINAL_UKI_PATH, &artifact.metadata)?;
+    Ok(artifact.metadata)
+}
+
+fn validate_uki_publish_permit(
+    permit: &UkiPublishPermit<'_>,
+    metadata: &PublishMetadata,
+) -> Result<(), UkiBuildError> {
+    let attempted = permit.attempted_state();
+    let ArchProvisionState::Provisioning(record) = attempted else {
+        return Err(UkiBuildError::Publish(
+            "UKI permit is not for initial publication".into(),
+        ));
+    };
+    if record.step != boothop_core::ProvisioningStep::UkiPublicationAttempted
+        || record.owned_entry.uki_path != FINAL_UKI_PATH
+        || record.owned_entry.publish.as_ref() != Some(metadata)
+        || permit.owned_entry().uki_path != FINAL_UKI_PATH
+        || permit.owned_entry().publish.as_ref() != Some(metadata)
+        || permit.expected_evidence()
+            != &super::coordinator::LifecycleProofBinding::Uki(metadata.clone())
+        || permit.precondition_evidence() != &super::coordinator::LifecycleProofBinding::UkiAbsent
+    {
+        return Err(UkiBuildError::Publish(
+            "UKI permit does not match the prepared artifact".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn build_validated_artifact(
@@ -936,38 +877,17 @@ fn require_exact_final(
     final_path: &str,
     expected: &PublishMetadata,
 ) -> Result<(), UkiBuildError> {
-    verify_publication_authority(
-        publisher,
-        final_path,
-        &UkiPublicationAuthority::Ready(expected.clone()),
-    )
-}
-
-fn verify_publication_authority(
-    publisher: &mut impl UkiPublishFs,
-    final_path: &str,
-    authority: &UkiPublicationAuthority,
-) -> Result<(), UkiBuildError> {
-    let state = publisher.final_path_state(final_path)?;
-    match (authority, state) {
-        (UkiPublicationAuthority::ProvisioningAttempted(_), UkiFinalPathState::Absent) => Ok(()),
-        (UkiPublicationAuthority::Ready(expected), UkiFinalPathState::Regular(actual))
-            if expected == &actual =>
-        {
-            Ok(())
-        }
-        (UkiPublicationAuthority::ProvisioningAttempted(_), _) => Err(UkiBuildError::Publish(
-            "initial publication requires the stable UKI path to remain absent".into(),
-        )),
-        (UkiPublicationAuthority::Ready(_), _) => Err(UkiBuildError::Publish(
-            "stable UKI does not match journaled ownership metadata".into(),
+    match publisher.final_path_state(final_path)? {
+        UkiFinalPathState::Regular(actual) if &actual == expected => Ok(()),
+        _ => Err(UkiBuildError::Publish(
+            "published UKI does not match the prepared artifact".into(),
         )),
     }
 }
 
 /// Readback-only reconciliation helper for `Provisioning(UkiPublicationAttempted)`. It never
-/// builds, renames, deletes, or advances the journal. A caller may explicitly persist
-/// `UkiPublished` only when this returns the exact recorded attempt metadata.
+/// builds, stages, renames, deletes, mints a permit, or advances the journal. It only surfaces
+/// the exact recorded metadata when the fixed final file matches it.
 pub fn verify_interrupted_initial_publication(
     journal_state: &ArchProvisionState,
     publisher: &mut impl UkiPublishFs,

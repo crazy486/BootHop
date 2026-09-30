@@ -7,6 +7,7 @@
 use super::arch_provision_store::ArchProvisionStore;
 use super::boot_order::BootOrderValue;
 use super::store::Filesystem;
+use super::uki::PreparedUkiArtifact;
 use boothop_core::{
     ArchProvisionState, Error, OwnedArchEntry, ProvisioningRecord, ProvisioningStep,
     PublishMetadata, Residual, UninstallingRecord, UninstallingStep,
@@ -88,9 +89,10 @@ pub trait LifecycleBackend {
     fn prepare_uki_publication(
         &mut self,
         entry: &OwnedArchEntry,
-    ) -> Result<(PublishMetadata, LifecycleReadback), Error>;
+    ) -> Result<(PreparedUkiArtifact, LifecycleReadback), Error>;
     fn publish_uki(
         &mut self,
+        artifact: PreparedUkiArtifact,
         permit: UkiPublishPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure>;
 
@@ -686,10 +688,11 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
     let ArchProvisionState::Provisioning(record) = &pending else {
         unreachable!()
     };
-    let (metadata, observed) = match backend.prepare_uki_publication(&record.owned_entry) {
+    let (prepared, observed) = match backend.prepare_uki_publication(&record.owned_entry) {
         Ok(value) => value,
         Err(error) => return fail_precondition(store, &pending, Residual::UkiMayRemain, error),
     };
+    let metadata = prepared.metadata().clone();
     require_precondition_at(
         store,
         &pending,
@@ -709,7 +712,7 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         LifecycleProofBinding::Uki(metadata.clone()),
         LifecycleProofBinding::UkiAbsent,
     )?;
-    let observed = match backend.publish_uki(permit) {
+    let observed = match backend.publish_uki(prepared, permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
