@@ -19,6 +19,8 @@ pub use firmware::{
 
 pub use reboot::{RebootCalls, RebootReply, with_shutdown_privilege};
 
+use boothop_core::TargetRecord;
+
 /// The Windows production adapter composes the trusted record store with the
 /// closed firmware and reboot seams.  All mutation ordering remains owned by
 /// `boothop_core::execute`; this type only maps each semantic operation to the
@@ -27,6 +29,7 @@ pub struct WindowsPlatform<S: crate::ProtectedStore, F: WindowsCalls, R: RebootC
     store: S,
     firmware: F,
     reboot: R,
+    uki_volumes: Box<dyn uki::ReadOnlyEfiVolumes>,
 }
 
 impl<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> WindowsPlatform<S, F, R> {
@@ -37,7 +40,35 @@ impl<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> WindowsPlatform<
             store,
             firmware,
             reboot,
+            uki_volumes: Box::new(UnavailableEfiVolumes),
         }
+    }
+
+    /// Inject an already-existing EFI-volume reader. Its trait exposes no
+    /// mount, drive-letter, or write operations; production stays fail-closed
+    /// until a native read-only provider is configured.
+    pub fn with_read_only_efi_volumes(
+        mut self,
+        volumes: impl uki::ReadOnlyEfiVolumes + 'static,
+    ) -> Self {
+        self.uki_volumes = Box::new(volumes);
+        self
+    }
+}
+
+struct UnavailableEfiVolumes;
+
+impl uki::ReadOnlyEfiVolumes for UnavailableEfiVolumes {
+    fn existing_efi_volumes(&self) -> Result<Vec<uki::EfiVolume>, uki::VolumeEnumerationError> {
+        Err(uki::VolumeEnumerationError::Failed)
+    }
+
+    fn read_file(
+        &self,
+        _volume_id: u64,
+        _path_utf16: &[u16],
+    ) -> Result<Vec<u8>, uki::FileReadError> {
+        Err(uki::FileReadError::Unsupported)
     }
 }
 
@@ -84,6 +115,18 @@ impl<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> boothop_core::Pl
 
     fn check_environment(&mut self) -> Result<(), boothop_core::Error> {
         firmware::check_environment(&mut self.firmware)
+    }
+
+    fn preflight_saved_target(&self, target: &TargetRecord) -> Result<(), boothop_core::Error> {
+        if !uki::uses_fixed_uki_path(&target.identity) {
+            return Ok(());
+        }
+        uki::preflight_uki(&*self.uki_volumes, &target.identity).map_err(|error| match error {
+            uki::UkiPreflightError::NoMatchingVolume | uki::UkiPreflightError::FileUnavailable => {
+                boothop_core::Error::TargetMissing
+            }
+            _ => boothop_core::Error::UnsupportedFormat,
+        })
     }
 }
 
@@ -161,5 +204,8 @@ impl boothop_core::Platform for ProductionPlatform {
     }
     fn check_environment(&mut self) -> Result<(), boothop_core::Error> {
         self.inner.check_environment()
+    }
+    fn preflight_saved_target(&self, target: &TargetRecord) -> Result<(), boothop_core::Error> {
+        self.inner.preflight_saved_target(target)
     }
 }

@@ -75,6 +75,15 @@ pub trait ReadOnlyEfiVolumes {
     fn read_file(&self, volume_id: u64, path_utf16: &[u16]) -> Result<Vec<u8>, FileReadError>;
 }
 
+/// Whether a saved identity requests the one special path that needs local UKI preflight.
+/// Other existing targets, including the user's GRUB entry, keep their current Switch flow.
+pub fn uses_fixed_uki_path(identity: &CanonicalIdentity) -> bool {
+    matches!(
+        &identity.nodes[1],
+        CanonicalDevicePathNode::FilePath(path) if path.path_utf16 == UKI_PATH_UTF16
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UkiPreflightError {
     UnsupportedIdentity,
