@@ -7,8 +7,9 @@ use boothop_core::{ArchProvisionState, Error, ProvisioningStep, Residual, Uninst
 use boothop_platform::linux::arch_provision_store::ArchProvisionStore;
 use boothop_platform::linux::boot_order::BootOrderValue;
 use boothop_platform::linux::coordinator::{
-    LifecycleBackend, LifecycleFailure, LifecycleReadback, ProvisionIntent, provision, recover,
-    uninstall,
+    BootEntryCreatePermit, BootEntryRemovePermit, BootOrderAppendPermit, BootOrderRemovePermit,
+    LifecycleBackend, LifecycleFailure, LifecycleProofBinding, LifecycleReadback, ProvisionIntent,
+    UkiPublishPermit, UkiRemovePermit, provision, recover, uninstall,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,8 +43,19 @@ struct FakeBackend {
     uninstalling: bool,
     order_shape: Option<OrderShape>,
     mutations: Vec<&'static str>,
+    permit_evidence: Vec<(
+        &'static str,
+        String,
+        u64,
+        ArchProvisionState,
+        boothop_core::OwnedArchEntry,
+        LifecycleProofBinding,
+        LifecycleProofBinding,
+    )>,
     events: Vec<&'static str>,
     observations: usize,
+    attempt_commit_failure: Option<(&'static str, i32)>,
+    stale_journal: Option<ArchProvisionState>,
 }
 
 impl FakeBackend {
@@ -62,8 +74,11 @@ impl FakeBackend {
             uninstalling: false,
             order_shape: None,
             mutations: Vec::new(),
+            permit_evidence: Vec::new(),
             events: Vec::new(),
             observations: 0,
+            attempt_commit_failure: None,
+            stale_journal: None,
         }
     }
 
@@ -82,7 +97,12 @@ impl FakeBackend {
         &mut self,
         stage: &'static str,
         residual: Residual,
-        entry: Option<&boothop_core::OwnedArchEntry>,
+        entry: &boothop_core::OwnedArchEntry,
+        operation_id: &str,
+        operation_version: u64,
+        attempted_state: ArchProvisionState,
+        expected_evidence: LifecycleProofBinding,
+        precondition_evidence: LifecycleProofBinding,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
         self.assert_lock();
         self.trace(match stage {
@@ -98,6 +118,15 @@ impl FakeBackend {
             _ => unreachable!(),
         });
         self.mutations.push(stage);
+        self.permit_evidence.push((
+            stage,
+            operation_id.to_owned(),
+            operation_version,
+            attempted_state,
+            entry.clone(),
+            expected_evidence,
+            precondition_evidence,
+        ));
         let fail = match stage {
             "uki" => self.fail == FailAt::Uki,
             "entry" => self.fail == FailAt::Entry,
@@ -121,7 +150,7 @@ impl FakeBackend {
                     size: 43,
                 }),
                 "entry" => {
-                    let mut identity = entry.expect("entry readback identity").identity.clone();
+                    let mut identity = entry.identity.clone();
                     identity.file_path_list_length = identity.file_path_list_length.wrapping_add(1);
                     LifecycleReadback::BootEntryPresent(identity)
                 }
@@ -195,9 +224,7 @@ impl FakeBackend {
                 sha256: [0x22; 32],
                 size: 42,
             }),
-            "entry" => LifecycleReadback::BootEntryPresent(
-                entry.expect("entry readback identity").identity.clone(),
-            ),
+            "entry" => LifecycleReadback::BootEntryPresent(entry.identity.clone()),
             "order" => LifecycleReadback::BootOrder(
                 BootOrderValue::new(
                     7,
@@ -241,6 +268,16 @@ impl LifecycleBackend for FakeBackend {
                 }),
             ));
         }
+        if let Some(state) = self.stale_journal.take() {
+            self.fs.insert(
+                "/var/lib/boothop/arch-provision.json",
+                0o100600,
+                boothop_core::encode_arch_provision_state(&state).unwrap(),
+            );
+        }
+        if let Some(failure) = self.attempt_commit_failure {
+            self.fs.0.borrow_mut().fail = Some(failure);
+        }
         Ok((
             boothop_core::PublishMetadata {
                 sha256: [0x22; 32],
@@ -251,10 +288,19 @@ impl LifecycleBackend for FakeBackend {
     }
     fn publish_uki(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
-        _expected: &boothop_core::PublishMetadata,
+        permit: UkiPublishPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("uki", Residual::UkiMayRemain, None)
+        let entry = permit.owned_entry();
+        self.mutation(
+            "uki",
+            Residual::UkiMayRemain,
+            entry,
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state().clone(),
+            permit.expected_evidence().clone(),
+            permit.precondition_evidence().clone(),
+        )
     }
     fn prepare_boot_entry(
         &mut self,
@@ -275,9 +321,18 @@ impl LifecycleBackend for FakeBackend {
     }
     fn create_boot_entry(
         &mut self,
-        entry: &boothop_core::OwnedArchEntry,
+        permit: BootEntryCreatePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("entry", Residual::BootEntryMayExist, Some(entry))
+        self.mutation(
+            "entry",
+            Residual::BootEntryMayExist,
+            permit.owned_entry(),
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state().clone(),
+            permit.expected_evidence().clone(),
+            permit.precondition_evidence().clone(),
+        )
     }
     fn prepare_boot_order_append(
         &mut self,
@@ -308,9 +363,18 @@ impl LifecycleBackend for FakeBackend {
     }
     fn append_boot_order(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        permit: BootOrderAppendPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("order", Residual::BootOrderMayContainEntry, None)
+        self.mutation(
+            "order",
+            Residual::BootOrderMayContainEntry,
+            permit.owned_entry(),
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state().clone(),
+            permit.expected_evidence().clone(),
+            permit.precondition_evidence().clone(),
+        )
     }
     fn prepare_boot_order_remove(
         &mut self,
@@ -343,9 +407,18 @@ impl LifecycleBackend for FakeBackend {
     }
     fn remove_boot_order(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        permit: BootOrderRemovePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        let observed = self.mutation("order", Residual::BootOrderMayContainEntry, None)?;
+        let observed = self.mutation(
+            "order",
+            Residual::BootOrderMayContainEntry,
+            permit.owned_entry(),
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state().clone(),
+            permit.expected_evidence().clone(),
+            permit.precondition_evidence().clone(),
+        )?;
         if self.mismatch == FailAt::Order {
             Ok(observed)
         } else {
@@ -372,16 +445,26 @@ impl LifecycleBackend for FakeBackend {
     }
     fn remove_boot_entry(
         &mut self,
-        entry: &boothop_core::OwnedArchEntry,
+        permit: BootEntryRemovePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("entry", Residual::BootEntryMayExist, Some(entry))
-            .map(|_| {
-                if self.mismatch == FailAt::Entry {
-                    LifecycleReadback::BootEntryPresent(entry.identity.clone())
-                } else {
-                    LifecycleReadback::BootEntryAbsent
-                }
-            })
+        let entry = permit.owned_entry().clone();
+        self.mutation(
+            "entry",
+            Residual::BootEntryMayExist,
+            &entry,
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state().clone(),
+            permit.expected_evidence().clone(),
+            permit.precondition_evidence().clone(),
+        )
+        .map(|_| {
+            if self.mismatch == FailAt::Entry {
+                LifecycleReadback::BootEntryPresent(entry.identity.clone())
+            } else {
+                LifecycleReadback::BootEntryAbsent
+            }
+        })
     }
     fn prepare_uki_remove(
         &mut self,
@@ -402,9 +485,20 @@ impl LifecycleBackend for FakeBackend {
     }
     fn remove_uki(
         &mut self,
-        entry: &boothop_core::OwnedArchEntry,
+        permit: UkiRemovePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("uki", Residual::UkiMayRemain, None).map(|_| {
+        let entry = permit.owned_entry().clone();
+        self.mutation(
+            "uki",
+            Residual::UkiMayRemain,
+            &entry,
+            permit.operation_id(),
+            permit.operation_version(),
+            permit.attempted_state().clone(),
+            permit.expected_evidence().clone(),
+            permit.precondition_evidence().clone(),
+        )
+        .map(|_| {
             if self.mismatch == FailAt::Uki {
                 LifecycleReadback::UkiPresent(entry.publish.clone().expect("published fixture"))
             } else {
@@ -514,6 +608,17 @@ fn pending_intent() -> ProvisionIntent {
     }
 }
 
+fn published_entry() -> boothop_core::OwnedArchEntry {
+    let ArchProvisionState::Ready(mut entry) = support::ready_state() else {
+        unreachable!()
+    };
+    entry.publish = Some(boothop_core::PublishMetadata {
+        sha256: [0x22; 32],
+        size: 42,
+    });
+    entry
+}
+
 #[test]
 fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
     let fs = support::FakeFs::installed();
@@ -522,6 +627,56 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
     let ready = provision(&mut store, &mut backend, pending_intent()).unwrap();
     assert!(matches!(ready, ArchProvisionState::Ready(_)));
     assert_eq!(backend.mutations, ["uki", "entry", "order"]);
+    assert_eq!(backend.permit_evidence.len(), 3);
+    let expected_entry = published_entry();
+    for (
+        (stage, operation_id, version, attempted, permit_entry, expected, precondition),
+        expected_step,
+    ) in backend.permit_evidence.iter().zip([
+        ProvisioningStep::UkiPublicationAttempted,
+        ProvisioningStep::BootEntryCreateAttempted,
+        ProvisioningStep::BootOrderAppendAttempted,
+    ]) {
+        assert_eq!(operation_id, "provision-1");
+        assert_eq!(*version, 1);
+        assert!(matches!(attempted, ArchProvisionState::Provisioning(record)
+            if record.step == expected_step
+                && record.operation_id == *operation_id
+                && record.operation_version == *version
+                && record.owned_entry == expected_entry));
+        assert_eq!(permit_entry, &expected_entry);
+        let (expected_binding, precondition_binding) = match expected_step {
+            ProvisioningStep::UkiPublicationAttempted => (
+                LifecycleProofBinding::Uki(expected_entry.publish.clone().unwrap()),
+                LifecycleProofBinding::UkiAbsent,
+            ),
+            ProvisioningStep::BootEntryCreateAttempted => (
+                LifecycleProofBinding::BootEntryPresent,
+                LifecycleProofBinding::BootEntryAbsent,
+            ),
+            ProvisioningStep::BootOrderAppendAttempted => {
+                let before =
+                    BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)])
+                        .unwrap();
+                (
+                    LifecycleProofBinding::BootOrderBefore(before.clone()),
+                    LifecycleProofBinding::BootOrderBefore(before),
+                )
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(expected, &expected_binding);
+        assert_eq!(precondition, &precondition_binding);
+        assert_eq!(
+            stage,
+            match expected_step {
+                ProvisioningStep::UkiPublicationAttempted => &"uki",
+                ProvisioningStep::BootEntryCreateAttempted => &"entry",
+                ProvisioningStep::BootOrderAppendAttempted => &"order",
+                _ => unreachable!(),
+            }
+        );
+    }
     assert_eq!(
         backend.events,
         [
@@ -580,6 +735,64 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
         backend.mutations,
         ["uki", "entry", "order", "order", "entry", "uki"]
     );
+    for (stage, operation_id, version, attempted, permit_entry, expected, precondition) in
+        backend.permit_evidence.iter().skip(3)
+    {
+        assert_eq!(operation_id, "uninstall-1");
+        assert_eq!(*version, 1);
+        assert!(matches!(attempted, ArchProvisionState::Uninstalling(record)
+            if record.operation_id == *operation_id
+                && record.operation_version == *version
+                && record.owned_entry == expected_entry));
+        assert_eq!(permit_entry, &expected_entry);
+        assert!(
+            matches!((*stage, attempted),
+            ("order", ArchProvisionState::Uninstalling(record))
+                if record.step == UninstallingStep::BootOrderRemovalAttempted)
+                || matches!((*stage, attempted),
+            ("entry", ArchProvisionState::Uninstalling(record))
+                if record.step == UninstallingStep::BootEntryRemovalAttempted)
+                || matches!((*stage, attempted),
+            ("uki", ArchProvisionState::Uninstalling(record))
+                if record.step == UninstallingStep::UkiRemovalAttempted)
+        );
+        let ArchProvisionState::Uninstalling(record) = attempted else {
+            unreachable!()
+        };
+        match record.step {
+            UninstallingStep::BootOrderRemovalAttempted => {
+                let before = BootOrderValue::new(
+                    7,
+                    vec![
+                        boothop_core::BootId(7),
+                        boothop_core::BootId(8),
+                        expected_entry.boot_id,
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    expected,
+                    &LifecycleProofBinding::BootOrderBefore(before.clone())
+                );
+                assert_eq!(
+                    precondition,
+                    &LifecycleProofBinding::BootOrderBefore(before)
+                );
+            }
+            UninstallingStep::BootEntryRemovalAttempted => {
+                assert_eq!(expected, &LifecycleProofBinding::BootEntryAbsent);
+                assert_eq!(precondition, &LifecycleProofBinding::BootEntryPresent);
+            }
+            UninstallingStep::UkiRemovalAttempted => {
+                assert_eq!(expected, &LifecycleProofBinding::UkiAbsent);
+                assert_eq!(
+                    precondition,
+                    &LifecycleProofBinding::Uki(expected_entry.publish.clone().unwrap())
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
     let all_events = fs.0.borrow().events.clone();
     let ready = all_events
         .iter()
@@ -615,6 +828,80 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
     assert!(fs.0.borrow().held);
     drop(store);
     assert!(!fs.0.borrow().held);
+}
+
+#[test]
+fn failed_or_uncertain_attempt_commit_never_grants_a_mutation_permit() {
+    for (stage, attempted) in [("write", false), ("dir_fsync", true)] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.attempt_commit_failure = Some((stage, 5));
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+
+        assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+        assert!(backend.mutations.is_empty());
+        assert!(backend.permit_evidence.is_empty());
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Provisioning(record)
+            if if attempted {
+                record.step == ProvisioningStep::UkiPublicationAttempted
+            } else {
+                record.step == ProvisioningStep::UkiPublicationPending
+            })
+        );
+    }
+}
+
+#[test]
+fn reopened_attempted_checkpoint_recovery_is_read_only_and_never_remints_permits() {
+    let fs = support::FakeFs::installed();
+    let mut backend = FakeBackend::new(fs.clone());
+    backend.attempt_commit_failure = Some(("dir_fsync", 5));
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+
+    assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+    assert!(
+        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(record)
+        if record.step == ProvisioningStep::UkiPublicationAttempted)
+    );
+    assert!(backend.mutations.is_empty());
+    assert!(backend.permit_evidence.is_empty());
+    drop(store);
+
+    fs.0.borrow_mut().fail = None;
+    let mut reopened = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let recovered = recover(&mut reopened, &mut backend).unwrap();
+
+    assert!(matches!(recovered, ArchProvisionState::Provisioning(record)
+        if record.step == ProvisioningStep::UkiPublicationAttempted
+            && record.residual == vec![Residual::UkiMayRemain]));
+    assert_eq!(backend.observations, 1);
+    assert!(backend.mutations.is_empty());
+    assert!(backend.permit_evidence.is_empty());
+}
+
+#[test]
+fn stale_attempt_proof_is_rejected_before_a_mutation_permit_is_minted() {
+    let fs = support::FakeFs::installed();
+    let mut backend = FakeBackend::new(fs.clone());
+    let intent = pending_intent();
+    backend.stale_journal = Some(ArchProvisionState::Provisioning(
+        boothop_core::ProvisioningRecord {
+            operation_id: "stale-operation".into(),
+            operation_version: 1,
+            owned_entry: intent.owned_entry.clone(),
+            step: ProvisioningStep::UkiPublicationPending,
+            residual: vec![],
+        },
+    ));
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+
+    assert_eq!(
+        provision(&mut store, &mut backend, intent),
+        Err(Error::NotConfigured)
+    );
+    assert!(backend.mutations.is_empty());
+    assert!(backend.permit_evidence.is_empty());
 }
 
 #[test]
@@ -1171,109 +1458,18 @@ fn failed_verified_checkpoint_save_preserves_attempt_evidence_without_retry() {
 
 #[test]
 fn mismatched_prepare_readback_stops_before_attempt_checkpoint() {
-    struct Wrong(FakeBackend);
-    impl LifecycleBackend for Wrong {
-        fn prepare_uki_publication(
-            &mut self,
-            _: &boothop_core::OwnedArchEntry,
-        ) -> Result<(boothop_core::PublishMetadata, LifecycleReadback), Error> {
-            self.0.assert_lock();
-            Ok((
-                boothop_core::PublishMetadata {
-                    sha256: [0x22; 32],
-                    size: 42,
-                },
-                LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
-                    sha256: [0x22; 32],
-                    size: 42,
-                }),
-            ))
-        }
-        fn publish_uki(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-            m: &boothop_core::PublishMetadata,
-        ) -> Result<LifecycleReadback, LifecycleFailure> {
-            self.0.publish_uki(e, m)
-        }
-        fn prepare_boot_entry(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, Error> {
-            self.0.prepare_boot_entry(e)
-        }
-        fn create_boot_entry(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, LifecycleFailure> {
-            self.0.create_boot_entry(e)
-        }
-        fn prepare_boot_order_append(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, Error> {
-            self.0.prepare_boot_order_append(e)
-        }
-        fn append_boot_order(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, LifecycleFailure> {
-            self.0.append_boot_order(e)
-        }
-        fn prepare_boot_order_remove(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, Error> {
-            self.0.prepare_boot_order_remove(e)
-        }
-        fn remove_boot_order(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, LifecycleFailure> {
-            self.0.remove_boot_order(e)
-        }
-        fn prepare_boot_entry_remove(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, Error> {
-            self.0.prepare_boot_entry_remove(e)
-        }
-        fn remove_boot_entry(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, LifecycleFailure> {
-            self.0.remove_boot_entry(e)
-        }
-        fn prepare_uki_remove(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, Error> {
-            self.0.prepare_uki_remove(e)
-        }
-        fn remove_uki(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, LifecycleFailure> {
-            self.0.remove_uki(e)
-        }
-        fn observe(&mut self, s: &ArchProvisionState) -> Result<LifecycleReadback, Error> {
-            self.0.observe(s)
-        }
-        fn observe_uki_ownership(
-            &mut self,
-            e: &boothop_core::OwnedArchEntry,
-        ) -> Result<LifecycleReadback, Error> {
-            self.0.observe_uki_ownership(e)
-        }
-    }
     let fs = support::FakeFs::installed();
     let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
-    let mut backend = Wrong(FakeBackend::new(fs.clone()));
+    let mut backend = FakeBackend::new(fs.clone());
+    backend.prepare_mismatch = FailAt::Uki;
     assert_eq!(
         provision(&mut store, &mut backend, pending_intent()),
         Err(Error::ReadbackFailed)
     );
+    assert!(backend.mutations.is_empty());
+    assert!(backend.permit_evidence.is_empty());
     assert!(
-        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref r) if r.step == ProvisioningStep::UkiPublicationPending)
+        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref r)
+        if r.step == ProvisioningStep::UkiPublicationPending)
     );
 }

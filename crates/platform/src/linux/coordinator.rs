@@ -11,6 +11,7 @@ use boothop_core::{
     ArchProvisionState, Error, OwnedArchEntry, ProvisioningRecord, ProvisioningStep,
     PublishMetadata, Residual, UninstallingRecord, UninstallingStep,
 };
+use std::marker::PhantomData;
 
 /// A readback supplied by a trusted, narrowly scoped lifecycle adapter.
 ///
@@ -58,8 +59,9 @@ pub struct ProvisionIntent {
 }
 
 /// The injected platform boundary used by the coordinator.  Each prepare method performs the
-/// exact readback needed to establish the pre-mutation proof.  Each mutation method performs
-/// one write/delete at most and returns an exact readback; it must never retry or roll back.
+/// exact readback needed to establish the pre-mutation proof. Each mutation method consumes an
+/// action-specific permit containing the committed Attempted checkpoint and its proof evidence.
+/// It performs one write/delete at most, returns an exact readback, and never retries or rolls back.
 pub trait LifecycleBackend {
     fn prepare_uki_publication(
         &mut self,
@@ -67,14 +69,13 @@ pub trait LifecycleBackend {
     ) -> Result<(PublishMetadata, LifecycleReadback), Error>;
     fn publish_uki(
         &mut self,
-        entry: &OwnedArchEntry,
-        expected: &PublishMetadata,
+        permit: UkiPublishPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure>;
 
     fn prepare_boot_entry(&mut self, entry: &OwnedArchEntry) -> Result<LifecycleReadback, Error>;
     fn create_boot_entry(
         &mut self,
-        entry: &OwnedArchEntry,
+        permit: BootEntryCreatePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure>;
 
     fn prepare_boot_order_append(
@@ -83,7 +84,7 @@ pub trait LifecycleBackend {
     ) -> Result<LifecycleReadback, Error>;
     fn append_boot_order(
         &mut self,
-        entry: &OwnedArchEntry,
+        permit: BootOrderAppendPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure>;
 
     fn prepare_boot_order_remove(
@@ -92,7 +93,7 @@ pub trait LifecycleBackend {
     ) -> Result<LifecycleReadback, Error>;
     fn remove_boot_order(
         &mut self,
-        entry: &OwnedArchEntry,
+        permit: BootOrderRemovePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure>;
 
     fn prepare_boot_entry_remove(
@@ -101,12 +102,14 @@ pub trait LifecycleBackend {
     ) -> Result<LifecycleReadback, Error>;
     fn remove_boot_entry(
         &mut self,
-        entry: &OwnedArchEntry,
+        permit: BootEntryRemovePermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure>;
 
     fn prepare_uki_remove(&mut self, entry: &OwnedArchEntry) -> Result<LifecycleReadback, Error>;
-    fn remove_uki(&mut self, entry: &OwnedArchEntry)
-    -> Result<LifecycleReadback, LifecycleFailure>;
+    fn remove_uki(
+        &mut self,
+        permit: UkiRemovePermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure>;
 
     /// Restart reconciliation is read-only.  It must not call any mutation method.
     fn observe(&mut self, state: &ArchProvisionState) -> Result<LifecycleReadback, Error>;
@@ -118,7 +121,8 @@ pub trait LifecycleBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ProofBinding {
+/// Exact precondition or expected postcondition evidence bound to a lifecycle proof.
+pub enum LifecycleProofBinding {
     UkiAbsent,
     Uki(PublishMetadata),
     BootEntryAbsent,
@@ -138,16 +142,16 @@ pub(crate) struct LifecycleProof {
     next: ArchProvisionState,
     operation_id: String,
     owned_entry: OwnedArchEntry,
-    expected: ProofBinding,
-    observed: ProofBinding,
+    expected: LifecycleProofBinding,
+    observed: LifecycleProofBinding,
 }
 
 impl LifecycleProof {
     fn new(
         prior: ArchProvisionState,
         next: ArchProvisionState,
-        expected: ProofBinding,
-        observed: ProofBinding,
+        expected: LifecycleProofBinding,
+        observed: LifecycleProofBinding,
     ) -> Result<Self, Error> {
         let (operation_id, owned_entry) = operation_and_entry(&prior)?;
         Ok(Self {
@@ -187,33 +191,214 @@ impl LifecycleProof {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MutationAction {
+    UkiPublish,
+    BootEntryCreate,
+    BootOrderAppend,
+    BootOrderRemove,
+    BootEntryRemove,
+    UkiRemove,
+}
+
+struct MutationPermitBinding {
+    action: MutationAction,
+    operation_id: String,
+    operation_version: u64,
+    owned_entry: OwnedArchEntry,
+}
+
+impl MutationPermitBinding {
+    fn validate(proof: &LifecycleProof, expected_action: MutationAction) -> Result<Self, Error> {
+        proof.validate(&proof.prior)?;
+        if mutation_action(&proof.next) != Some(expected_action) {
+            return Err(Error::NotConfigured);
+        }
+        let (operation_id, owned_entry) = operation_and_entry(&proof.next)?;
+        let committed_version = operation_version(&proof.next)?;
+        if operation_id != proof.operation_id
+            || !same_owned_identity(&owned_entry, &proof.owned_entry)
+            || operation_version(&proof.prior)? != committed_version
+        {
+            return Err(Error::IdentityMismatch);
+        }
+        Ok(Self {
+            action: expected_action,
+            operation_id,
+            operation_version: committed_version,
+            owned_entry,
+        })
+    }
+}
+
+struct MutationPermitEvidence {
+    proof: LifecycleProof,
+    binding: MutationPermitBinding,
+}
+
+impl MutationPermitEvidence {
+    fn from_committed_proof(proof: LifecycleProof, binding: MutationPermitBinding) -> Self {
+        Self { proof, binding }
+    }
+
+    fn operation_id(&self) -> &str {
+        &self.binding.operation_id
+    }
+
+    fn operation_version(&self) -> u64 {
+        self.binding.operation_version
+    }
+
+    fn owned_entry(&self) -> &OwnedArchEntry {
+        &self.binding.owned_entry
+    }
+
+    fn attempted_state(&self) -> &ArchProvisionState {
+        &self.proof.next
+    }
+
+    fn expected_evidence(&self) -> &LifecycleProofBinding {
+        &self.proof.expected
+    }
+
+    fn precondition_evidence(&self) -> &LifecycleProofBinding {
+        &self.proof.observed
+    }
+}
+
+macro_rules! define_lifecycle_permit {
+    ($name:ident, $action:ident) => {
+        /// Opaque authority for exactly one committed Arch lifecycle mutation.
+        ///
+        /// The coordinator is the only constructor. The permit borrows the operation store
+        /// mutably until the matching mutation method consumes it.
+        #[must_use = "a lifecycle permit must be consumed by its matching backend mutation"]
+        pub struct $name<'store> {
+            evidence: MutationPermitEvidence,
+            _store_borrow: PhantomData<&'store mut ()>,
+        }
+
+        impl<'store> $name<'store> {
+            fn from_committed_proof(proof: LifecycleProof, binding: MutationPermitBinding) -> Self {
+                debug_assert_eq!(binding.action, MutationAction::$action);
+                let evidence = MutationPermitEvidence::from_committed_proof(proof, binding);
+                Self {
+                    evidence,
+                    _store_borrow: PhantomData,
+                }
+            }
+
+            /// Operation identity journaled for the committed Attempted checkpoint.
+            pub fn operation_id(&self) -> &str {
+                self.evidence.operation_id()
+            }
+
+            /// Journal operation version bound to the committed Attempted checkpoint.
+            pub fn operation_version(&self) -> u64 {
+                self.evidence.operation_version()
+            }
+
+            /// Full owned entry recorded in the committed Attempted checkpoint.
+            pub fn owned_entry(&self) -> &OwnedArchEntry {
+                self.evidence.owned_entry()
+            }
+
+            /// Exact checkpoint committed before this permit was issued.
+            pub fn attempted_state(&self) -> &ArchProvisionState {
+                self.evidence.attempted_state()
+            }
+
+            /// Expected postcondition encoded by the coordinator's lifecycle proof.
+            pub fn expected_evidence(&self) -> &LifecycleProofBinding {
+                self.evidence.expected_evidence()
+            }
+
+            /// Exact precondition evidence observed before the Attempted commit.
+            pub fn precondition_evidence(&self) -> &LifecycleProofBinding {
+                self.evidence.precondition_evidence()
+            }
+        }
+    };
+}
+
+define_lifecycle_permit!(UkiPublishPermit, UkiPublish);
+define_lifecycle_permit!(BootEntryCreatePermit, BootEntryCreate);
+define_lifecycle_permit!(BootOrderAppendPermit, BootOrderAppend);
+define_lifecycle_permit!(BootOrderRemovePermit, BootOrderRemove);
+define_lifecycle_permit!(BootEntryRemovePermit, BootEntryRemove);
+define_lifecycle_permit!(UkiRemovePermit, UkiRemove);
+
+fn operation_version(state: &ArchProvisionState) -> Result<u64, Error> {
+    match state {
+        ArchProvisionState::Provisioning(record) => Ok(record.operation_version),
+        ArchProvisionState::Uninstalling(record) => Ok(record.operation_version),
+        ArchProvisionState::Unprovisioned
+        | ArchProvisionState::Ready(_)
+        | ArchProvisionState::Uninstalled(_) => Err(Error::NotConfigured),
+    }
+}
+
+fn mutation_action(state: &ArchProvisionState) -> Option<MutationAction> {
+    match state {
+        ArchProvisionState::Provisioning(record) => match record.step {
+            ProvisioningStep::UkiPublicationAttempted => Some(MutationAction::UkiPublish),
+            ProvisioningStep::BootEntryCreateAttempted => Some(MutationAction::BootEntryCreate),
+            ProvisioningStep::BootOrderAppendAttempted => Some(MutationAction::BootOrderAppend),
+            ProvisioningStep::UkiPublicationPending
+            | ProvisioningStep::UkiPublished
+            | ProvisioningStep::BootEntryCreated
+            | ProvisioningStep::BootEntryReadBackVerified
+            | ProvisioningStep::BootOrderAppendWriteCompleted
+            | ProvisioningStep::BootOrderAppended
+            | ProvisioningStep::BootOrderReadBackVerified => None,
+        },
+        ArchProvisionState::Uninstalling(record) => match record.step {
+            UninstallingStep::BootOrderRemovalAttempted => Some(MutationAction::BootOrderRemove),
+            UninstallingStep::BootEntryRemovalAttempted => Some(MutationAction::BootEntryRemove),
+            UninstallingStep::UkiRemovalAttempted => Some(MutationAction::UkiRemove),
+            UninstallingStep::Started
+            | UninstallingStep::BootOrderRemovalWriteCompleted
+            | UninstallingStep::BootOrderRemoved
+            | UninstallingStep::BootOrderRemovalReadBackVerified
+            | UninstallingStep::BootEntryDeleteCompleted
+            | UninstallingStep::BootEntryRemoved
+            | UninstallingStep::BootEntryRemovalReadBackVerified
+            | UninstallingStep::UkiDeleteCompleted
+            | UninstallingStep::UkiRemoved => None,
+        },
+        ArchProvisionState::Unprovisioned
+        | ArchProvisionState::Ready(_)
+        | ArchProvisionState::Uninstalled(_) => None,
+    }
+}
+
 fn proof_bindings_valid(
     state: &ArchProvisionState,
-    expected: &ProofBinding,
-    observed: &ProofBinding,
+    expected: &LifecycleProofBinding,
+    observed: &LifecycleProofBinding,
 ) -> bool {
     let same = expected == observed;
     match state {
         ArchProvisionState::Provisioning(record) => match record.step {
             ProvisioningStep::UkiPublicationAttempted => {
-                matches!(expected, ProofBinding::Uki(metadata) if record.owned_entry.publish.as_ref() == Some(metadata))
-                    && matches!(observed, ProofBinding::UkiAbsent)
+                matches!(expected, LifecycleProofBinding::Uki(metadata) if record.owned_entry.publish.as_ref() == Some(metadata))
+                    && matches!(observed, LifecycleProofBinding::UkiAbsent)
             }
             ProvisioningStep::UkiPublished => {
-                matches!(expected, ProofBinding::Uki(metadata) if record.owned_entry.publish.as_ref() == Some(metadata))
+                matches!(expected, LifecycleProofBinding::Uki(metadata) if record.owned_entry.publish.as_ref() == Some(metadata))
                     && same
             }
             ProvisioningStep::BootEntryCreateAttempted => {
-                matches!(expected, ProofBinding::BootEntryPresent)
-                    && matches!(observed, ProofBinding::BootEntryAbsent)
+                matches!(expected, LifecycleProofBinding::BootEntryPresent)
+                    && matches!(observed, LifecycleProofBinding::BootEntryAbsent)
             }
             ProvisioningStep::BootEntryCreated | ProvisioningStep::BootEntryReadBackVerified => {
-                matches!(expected, ProofBinding::BootEntryPresent) && same
+                matches!(expected, LifecycleProofBinding::BootEntryPresent) && same
             }
             ProvisioningStep::BootOrderAppendAttempted => {
                 matches!(
                     (expected, observed),
-                    (ProofBinding::BootOrderBefore(before), ProofBinding::BootOrderBefore(observed))
+                    (LifecycleProofBinding::BootOrderBefore(before), LifecycleProofBinding::BootOrderBefore(observed))
                         if before == observed
                             && boot_order_append_precondition(before, record.owned_entry.boot_id)
                 )
@@ -222,8 +407,8 @@ fn proof_bindings_valid(
                 matches!(
                     (expected, observed),
                     (
-                        ProofBinding::BootOrderTransition { before, after },
-                        ProofBinding::BootOrderTransition {
+                        LifecycleProofBinding::BootOrderTransition { before, after },
+                        LifecycleProofBinding::BootOrderTransition {
                             before: observed_before,
                             after: observed_after,
                         },
@@ -243,7 +428,7 @@ fn proof_bindings_valid(
             UninstallingStep::BootOrderRemovalAttempted => {
                 matches!(
                     (expected, observed),
-                    (ProofBinding::BootOrderBefore(before), ProofBinding::BootOrderBefore(observed))
+                    (LifecycleProofBinding::BootOrderBefore(before), LifecycleProofBinding::BootOrderBefore(observed))
                         if before == observed
                             && boot_order_remove_precondition(before, record.owned_entry.boot_id)
                 )
@@ -253,8 +438,8 @@ fn proof_bindings_valid(
                 matches!(
                     (expected, observed),
                     (
-                        ProofBinding::BootOrderTransition { before, after },
-                        ProofBinding::BootOrderTransition {
+                        LifecycleProofBinding::BootOrderTransition { before, after },
+                        LifecycleProofBinding::BootOrderTransition {
                             before: observed_before,
                             after: observed_after,
                         },
@@ -268,22 +453,24 @@ fn proof_bindings_valid(
                 )
             }
             UninstallingStep::BootEntryRemovalAttempted => {
-                matches!(expected, ProofBinding::BootEntryAbsent)
-                    && matches!(observed, ProofBinding::BootEntryPresent)
+                matches!(expected, LifecycleProofBinding::BootEntryAbsent)
+                    && matches!(observed, LifecycleProofBinding::BootEntryPresent)
             }
             UninstallingStep::BootEntryRemoved
             | UninstallingStep::BootEntryRemovalReadBackVerified => {
-                matches!(expected, ProofBinding::BootEntryAbsent) && same
+                matches!(expected, LifecycleProofBinding::BootEntryAbsent) && same
             }
             UninstallingStep::UkiRemovalAttempted => {
-                matches!(expected, ProofBinding::UkiAbsent)
+                matches!(expected, LifecycleProofBinding::UkiAbsent)
                     && matches!(
                         observed,
-                        ProofBinding::Uki(metadata)
+                        LifecycleProofBinding::Uki(metadata)
                             if record.owned_entry.publish.as_ref() == Some(metadata)
                     )
             }
-            UninstallingStep::UkiRemoved => matches!(expected, ProofBinding::UkiAbsent) && same,
+            UninstallingStep::UkiRemoved => {
+                matches!(expected, LifecycleProofBinding::UkiAbsent) && same
+            }
             UninstallingStep::Started
             | UninstallingStep::BootOrderRemovalWriteCompleted
             | UninstallingStep::BootEntryDeleteCompleted
@@ -292,8 +479,8 @@ fn proof_bindings_valid(
         ArchProvisionState::Ready(entry) => matches!(
             (expected, observed),
             (
-                ProofBinding::BootOrderTransition { before, after },
-                ProofBinding::BootOrderTransition {
+                LifecycleProofBinding::BootOrderTransition { before, after },
+                LifecycleProofBinding::BootOrderTransition {
                     before: observed_before,
                     after: observed_after,
                 },
@@ -369,6 +556,7 @@ fn valid_proof_transition(prior: &ArchProvisionState, next: &ArchProvisionState)
     match (prior, next) {
         (ArchProvisionState::Provisioning(a), ArchProvisionState::Provisioning(b))
             if a.operation_id == b.operation_id
+                && a.operation_version == b.operation_version
                 && same_owned_identity(&a.owned_entry, &b.owned_entry) =>
         {
             matches!(
@@ -386,7 +574,9 @@ fn valid_proof_transition(prior: &ArchProvisionState, next: &ArchProvisionState)
             )
         }
         (ArchProvisionState::Uninstalling(a), ArchProvisionState::Uninstalling(b))
-            if a.operation_id == b.operation_id && a.owned_entry == b.owned_entry =>
+            if a.operation_id == b.operation_id
+                && a.operation_version == b.operation_version
+                && a.owned_entry == b.owned_entry =>
         {
             matches!(
                 (a.step, b.step),
@@ -470,14 +660,14 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         ProvisioningStep::UkiPublicationAttempted,
         Some(metadata.clone()),
     )?;
-    commit(
+    let permit = commit_uki_publish_attempt(
         store,
         pending.clone(),
         attempt.clone(),
-        ProofBinding::Uki(metadata.clone()),
-        ProofBinding::UkiAbsent,
+        LifecycleProofBinding::Uki(metadata.clone()),
+        LifecycleProofBinding::UkiAbsent,
     )?;
-    let observed = match backend.publish_uki(&record.owned_entry, &metadata) {
+    let observed = match backend.publish_uki(permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
@@ -493,8 +683,8 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         store,
         &attempt,
         published.clone(),
-        ProofBinding::Uki(published_publish(&published)?),
-        ProofBinding::Uki(published_publish(&published)?),
+        LifecycleProofBinding::Uki(published_publish(&published)?),
+        LifecycleProofBinding::Uki(published_publish(&published)?),
         Residual::UkiMayRemain,
     )?;
 
@@ -517,14 +707,14 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         ProvisioningStep::BootEntryCreateAttempted,
         published_publish_opt(&published)?,
     )?;
-    commit(
+    let permit = commit_boot_entry_create_attempt(
         store,
         published.clone(),
         attempt.clone(),
-        ProofBinding::BootEntryPresent,
-        ProofBinding::BootEntryAbsent,
+        LifecycleProofBinding::BootEntryPresent,
+        LifecycleProofBinding::BootEntryAbsent,
     )?;
-    let observed = match backend.create_boot_entry(entry) {
+    let observed = match backend.create_boot_entry(permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
@@ -544,8 +734,8 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         store,
         &attempt,
         verified.clone(),
-        ProofBinding::BootEntryPresent,
-        ProofBinding::BootEntryPresent,
+        LifecycleProofBinding::BootEntryPresent,
+        LifecycleProofBinding::BootEntryPresent,
         Residual::BootEntryMayExist,
     )?;
 
@@ -576,14 +766,14 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         ProvisioningStep::BootOrderAppendAttempted,
         published_publish_opt(&verified)?,
     )?;
-    commit(
+    let permit = commit_boot_order_append_attempt(
         store,
         verified.clone(),
         attempt.clone(),
-        ProofBinding::BootOrderBefore(before.clone()),
-        ProofBinding::BootOrderBefore(before.clone()),
+        LifecycleProofBinding::BootOrderBefore(before.clone()),
+        LifecycleProofBinding::BootOrderBefore(before.clone()),
     )?;
-    let observed = match backend.append_boot_order(entry) {
+    let observed = match backend.append_boot_order(permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
@@ -616,7 +806,7 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         ProvisioningStep::BootOrderReadBackVerified,
         published_publish_opt(&attempt)?,
     )?;
-    let transition = ProofBinding::BootOrderTransition {
+    let transition = LifecycleProofBinding::BootOrderTransition {
         before,
         after: expected_after,
     };
@@ -674,14 +864,14 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         }
     };
     let attempt = uninstall_step(&started, UninstallingStep::BootOrderRemovalAttempted)?;
-    commit(
+    let permit = commit_boot_order_remove_attempt(
         store,
         started.clone(),
         attempt.clone(),
-        ProofBinding::BootOrderBefore(before.clone()),
-        ProofBinding::BootOrderBefore(before.clone()),
+        LifecycleProofBinding::BootOrderBefore(before.clone()),
+        LifecycleProofBinding::BootOrderBefore(before.clone()),
     )?;
-    let observed = match backend.remove_boot_order(&entry) {
+    let observed = match backend.remove_boot_order(permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
@@ -710,7 +900,7 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         Residual::BootOrderMayContainEntry,
     )?;
     let removed = uninstall_step(&attempt, UninstallingStep::BootOrderRemoved)?;
-    let transition = ProofBinding::BootOrderTransition {
+    let transition = LifecycleProofBinding::BootOrderTransition {
         before,
         after: expected_after,
     };
@@ -745,14 +935,14 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         Residual::BootEntryMayExist,
     )?;
     let attempt = uninstall_step(&verified, UninstallingStep::BootEntryRemovalAttempted)?;
-    commit(
+    let permit = commit_boot_entry_remove_attempt(
         store,
         verified,
         attempt.clone(),
-        ProofBinding::BootEntryAbsent,
-        ProofBinding::BootEntryPresent,
+        LifecycleProofBinding::BootEntryAbsent,
+        LifecycleProofBinding::BootEntryPresent,
     )?;
-    let observed = match backend.remove_boot_entry(&entry) {
+    let observed = match backend.remove_boot_entry(permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
@@ -768,8 +958,8 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         store,
         &attempt,
         removed.clone(),
-        ProofBinding::BootEntryAbsent,
-        ProofBinding::BootEntryAbsent,
+        LifecycleProofBinding::BootEntryAbsent,
+        LifecycleProofBinding::BootEntryAbsent,
         Residual::BootEntryMayExist,
     )?;
     let verified = uninstall_step(&removed, UninstallingStep::BootEntryRemovalReadBackVerified)?;
@@ -777,8 +967,8 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         store,
         &removed,
         verified.clone(),
-        ProofBinding::BootEntryAbsent,
-        ProofBinding::BootEntryAbsent,
+        LifecycleProofBinding::BootEntryAbsent,
+        LifecycleProofBinding::BootEntryAbsent,
     )?;
 
     let observed = match backend.prepare_uki_remove(&entry) {
@@ -794,14 +984,14 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         Residual::UkiMayRemain,
     )?;
     let attempt = uninstall_step(&verified, UninstallingStep::UkiRemovalAttempted)?;
-    commit(
+    let permit = commit_uki_remove_attempt(
         store,
         verified,
         attempt.clone(),
-        ProofBinding::UkiAbsent,
-        ProofBinding::Uki(expected_uki.clone()),
+        LifecycleProofBinding::UkiAbsent,
+        LifecycleProofBinding::Uki(expected_uki.clone()),
     )?;
-    let observed = match backend.remove_uki(&entry) {
+    let observed = match backend.remove_uki(permit) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
@@ -817,8 +1007,8 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         store,
         &attempt,
         removed.clone(),
-        ProofBinding::UkiAbsent,
-        ProofBinding::UkiAbsent,
+        LifecycleProofBinding::UkiAbsent,
+        LifecycleProofBinding::UkiAbsent,
         Residual::UkiMayRemain,
     )?;
     store.complete_uninstall(&removed)?;
@@ -959,19 +1149,59 @@ fn commit<F: Filesystem>(
     store: &mut ArchProvisionStore<F>,
     prior: ArchProvisionState,
     next: ArchProvisionState,
-    expected: ProofBinding,
-    observed: ProofBinding,
+    expected: LifecycleProofBinding,
+    observed: LifecycleProofBinding,
 ) -> Result<(), Error> {
     let proof = LifecycleProof::new(prior, next, expected, observed)?;
     store.commit_proof(&proof)
 }
 
+macro_rules! commit_mutation_attempt {
+    ($function:ident, $permit:ident, $action:ident) => {
+        fn $function<'store, F: Filesystem>(
+            store: &'store mut ArchProvisionStore<F>,
+            prior: ArchProvisionState,
+            attempted: ArchProvisionState,
+            expected: LifecycleProofBinding,
+            observed: LifecycleProofBinding,
+        ) -> Result<$permit<'store>, Error> {
+            let proof = LifecycleProof::new(prior, attempted, expected, observed)?;
+            let binding = MutationPermitBinding::validate(&proof, MutationAction::$action)?;
+            store.commit_proof(&proof)?;
+            Ok($permit::from_committed_proof(proof, binding))
+        }
+    };
+}
+
+commit_mutation_attempt!(commit_uki_publish_attempt, UkiPublishPermit, UkiPublish);
+commit_mutation_attempt!(
+    commit_boot_entry_create_attempt,
+    BootEntryCreatePermit,
+    BootEntryCreate
+);
+commit_mutation_attempt!(
+    commit_boot_order_append_attempt,
+    BootOrderAppendPermit,
+    BootOrderAppend
+);
+commit_mutation_attempt!(
+    commit_boot_order_remove_attempt,
+    BootOrderRemovePermit,
+    BootOrderRemove
+);
+commit_mutation_attempt!(
+    commit_boot_entry_remove_attempt,
+    BootEntryRemovePermit,
+    BootEntryRemove
+);
+commit_mutation_attempt!(commit_uki_remove_attempt, UkiRemovePermit, UkiRemove);
+
 fn commit_after_mutation<F: Filesystem>(
     store: &mut ArchProvisionStore<F>,
     attempted: &ArchProvisionState,
     next: ArchProvisionState,
-    expected: ProofBinding,
-    observed: ProofBinding,
+    expected: LifecycleProofBinding,
+    observed: LifecycleProofBinding,
     residual: Residual,
 ) -> Result<(), Error> {
     match commit(store, attempted.clone(), next.clone(), expected, observed) {
@@ -997,8 +1227,8 @@ fn commit_preserving<F: Filesystem>(
     store: &mut ArchProvisionStore<F>,
     prior: &ArchProvisionState,
     next: ArchProvisionState,
-    expected: ProofBinding,
-    observed: ProofBinding,
+    expected: LifecycleProofBinding,
+    observed: LifecycleProofBinding,
 ) -> Result<(), Error> {
     match commit(store, prior.clone(), next, expected, observed) {
         Ok(()) => Ok(()),
@@ -1274,8 +1504,8 @@ mod tests {
         let stale = LifecycleProof::new(
             prior.clone(),
             next,
-            ProofBinding::BootEntryPresent,
-            ProofBinding::BootEntryAbsent,
+            LifecycleProofBinding::BootEntryPresent,
+            LifecycleProofBinding::BootEntryAbsent,
         )
         .unwrap();
         assert_eq!(stale.validate(&prior), Err(Error::IdentityMismatch));
@@ -1295,8 +1525,8 @@ mod tests {
         let mismatched = LifecycleProof::new(
             prior.clone(),
             advanced,
-            ProofBinding::BootEntryPresent,
-            ProofBinding::BootEntryAbsent,
+            LifecycleProofBinding::BootEntryPresent,
+            LifecycleProofBinding::BootEntryAbsent,
         )
         .unwrap();
         assert_eq!(mismatched.validate(&prior), Err(Error::ReadbackFailed));
@@ -1321,8 +1551,8 @@ mod tests {
         let forged_attempt = LifecycleProof::new(
             published.clone(),
             entry_attempt.clone(),
-            ProofBinding::BootEntryAbsent,
-            ProofBinding::BootEntryAbsent,
+            LifecycleProofBinding::BootEntryAbsent,
+            LifecycleProofBinding::BootEntryAbsent,
         )
         .unwrap();
         assert_eq!(
@@ -1342,8 +1572,8 @@ mod tests {
         let valid_created = LifecycleProof::new(
             entry_attempt.clone(),
             created.clone(),
-            ProofBinding::BootEntryPresent,
-            ProofBinding::BootEntryPresent,
+            LifecycleProofBinding::BootEntryPresent,
+            LifecycleProofBinding::BootEntryPresent,
         )
         .unwrap();
         assert!(valid_created.validate(&entry_attempt).is_ok());
@@ -1369,8 +1599,12 @@ mod tests {
         let forged_appended = LifecycleProof::new(
             order_attempt.clone(),
             appended,
-            ProofBinding::BootOrderBefore(BootOrderValue::new(7, vec![BootId(7)]).unwrap()),
-            ProofBinding::BootOrderBefore(BootOrderValue::new(7, vec![BootId(7)]).unwrap()),
+            LifecycleProofBinding::BootOrderBefore(
+                BootOrderValue::new(7, vec![BootId(7)]).unwrap(),
+            ),
+            LifecycleProofBinding::BootOrderBefore(
+                BootOrderValue::new(7, vec![BootId(7)]).unwrap(),
+            ),
         )
         .unwrap();
         assert_eq!(
