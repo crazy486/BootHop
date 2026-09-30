@@ -1,12 +1,63 @@
 mod support;
 
 use boothop_core::{
-    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, Os, Platform,
-    PlatformOperation, RebootOutcome, RecordDiagnostic, RecordState, Request, ResidualAssessment,
-    RollbackAssessment, RollbackOutcome, Stage, canonicalize, decode_record, encode_record,
-    execute,
+    BootId, CanonicalDevicePathNode, Classification, DevicePathNodeKind, Error, OptionInventory,
+    Os, Platform, PlatformOperation, RebootOutcome, RecordDiagnostic, RecordState, Request,
+    ResidualAssessment, RollbackAssessment, RollbackOutcome, Stage, TargetRecord, canonicalize,
+    decode_record, encode_record, execute,
 };
 use support::{Event, FakePlatform};
+
+struct PreflightPlatform {
+    inner: FakePlatform,
+    result: Result<(), Error>,
+    calls: std::cell::Cell<usize>,
+    event_count_at_call: std::cell::Cell<Option<usize>>,
+}
+
+impl PreflightPlatform {
+    fn new(inner: FakePlatform) -> Self {
+        Self {
+            inner,
+            result: Ok(()),
+            calls: std::cell::Cell::new(0),
+            event_count_at_call: std::cell::Cell::new(None),
+        }
+    }
+}
+
+impl Platform for PreflightPlatform {
+    fn load_record(&mut self) -> Result<RecordState, Error> {
+        self.inner.load_record()
+    }
+    fn save_record(&mut self, target: &TargetRecord) -> Result<(), Error> {
+        self.inner.save_record(target)
+    }
+    fn read_options(&mut self) -> Result<OptionInventory, Error> {
+        self.inner.read_options()
+    }
+    fn read_next(&mut self) -> Result<Option<BootId>, Error> {
+        self.inner.read_next()
+    }
+    fn write_next(&mut self, target: BootId) -> Result<(), Error> {
+        self.inner.write_next(target)
+    }
+    fn rollback_next(&mut self, original: Option<BootId>, written: BootId) -> RollbackOutcome {
+        self.inner.rollback_next(original, written)
+    }
+    fn reboot(&mut self) -> RebootOutcome {
+        self.inner.reboot()
+    }
+    fn check_environment(&mut self) -> Result<(), Error> {
+        self.inner.check_environment()
+    }
+    fn preflight_saved_target(&self, target: &TargetRecord) -> Result<(), Error> {
+        assert_eq!(target.boot_id, BootId(7));
+        self.calls.set(self.calls.get() + 1);
+        self.event_count_at_call.set(Some(self.inner.events.len()));
+        self.result.clone()
+    }
+}
 
 fn requests() -> [Request; 3] {
     [
@@ -460,6 +511,77 @@ fn configure_rejects_host_os_and_missing_selected_id() {
 
 fn switch() -> Request {
     Request::Switch { os: Os::Windows }
+}
+
+#[test]
+fn switch_runs_saved_target_preflight_after_identity_validation_before_boot_next() {
+    let mut p = PreflightPlatform::new(FakePlatform::ready());
+
+    execute(switch(), Os::Linux, &mut p).unwrap();
+
+    assert_eq!(p.calls.get(), 1);
+    assert_eq!(p.event_count_at_call.get(), Some(3));
+    assert_eq!(
+        p.inner.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions,
+            Event::ReadNext,
+            Event::ReadNext,
+            Event::WriteNext(BootId(7)),
+            Event::ReadNext,
+            Event::Reboot,
+        ]
+    );
+}
+
+#[test]
+fn failed_saved_target_preflight_stops_before_boot_next_or_mutation() {
+    let cause = Error::PlatformIo {
+        operation: PlatformOperation::Read,
+        raw_code: 81,
+    };
+    let mut p = PreflightPlatform::new(FakePlatform::ready());
+    p.result = Err(cause.clone());
+
+    assert_eq!(execute(switch(), Os::Linux, &mut p), Err(cause));
+    assert_eq!(p.calls.get(), 1);
+    assert_eq!(p.event_count_at_call.get(), Some(3));
+    assert_eq!(
+        p.inner.events,
+        [
+            Event::ReadRecord,
+            Event::CheckEnvironment,
+            Event::ReadOptions
+        ]
+    );
+    assert_eq!(p.inner.next, None);
+    assert!(!p.inner.events.iter().any(Event::is_mutation));
+}
+
+#[test]
+fn inspect_and_configure_do_not_run_saved_target_preflight() {
+    let mut inspect = PreflightPlatform::new(FakePlatform::ready());
+    execute(Request::Inspect, Os::Linux, &mut inspect).unwrap();
+    assert_eq!(inspect.calls.get(), 0);
+
+    let mut configure = PreflightPlatform::new(FakePlatform::missing());
+    execute(requests()[1], Os::Linux, &mut configure).unwrap();
+    assert_eq!(configure.calls.get(), 0);
+}
+
+#[test]
+fn live_identity_mismatch_stops_before_saved_target_preflight() {
+    let mut p = PreflightPlatform::new(FakePlatform::ready());
+    p.inner.options[0].1.optional_data[0] ^= 1;
+
+    assert_eq!(
+        execute(switch(), Os::Linux, &mut p),
+        Err(Error::IdentityMismatch)
+    );
+    assert_eq!(p.calls.get(), 0);
+    assert!(!p.inner.events.iter().any(Event::is_mutation));
 }
 
 fn success_events() -> Vec<Event> {

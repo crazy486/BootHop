@@ -22,6 +22,11 @@ pub trait Platform {
     fn reboot(&mut self) -> RebootOutcome;
     /// Called after the trusted record read and before any firmware reads or mutations.
     fn check_environment(&mut self) -> Result<(), Error>;
+    /// Read-only adapter validation of a saved target before Switch accesses BootNext.
+    /// The default preserves the behavior of platforms that do not need extra validation.
+    fn preflight_saved_target(&self, _target: &TargetRecord) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Result<Report, Error> {
@@ -124,6 +129,7 @@ pub fn execute(request: Request, host: Os, platform: &mut impl Platform) -> Resu
                 .position(|(id, _)| *id == target.boot_id)
                 .ok_or(Error::TargetMissing)?;
             validate_target(&target, &options[index].1)?;
+            platform.preflight_saved_target(&target)?;
             report.stages.push(Stage::TargetValidated);
             let original = platform
                 .read_next()
