@@ -50,10 +50,13 @@ struct FakeBackend {
     prepare_order_calls: usize,
     prepare_mismatch: FailAt,
     preexisting_uki: bool,
+    publish_different_artifact: bool,
+    foreign_uki_appears_before_publish: bool,
     uki_publisher_fail_at: Option<UkiPublisherFailAt>,
     uki_publisher_calls: Vec<&'static str>,
     uki_stage_remains: bool,
     uki_final_exists: bool,
+    last_uki_permit_attempted: Option<ArchProvisionState>,
     observe_absent: FailAt,
     observe_error: bool,
     uki_mismatch: bool,
@@ -115,10 +118,13 @@ impl FakeBackend {
             prepare_order_calls: 0,
             prepare_mismatch: FailAt::None,
             preexisting_uki: false,
+            publish_different_artifact: false,
+            foreign_uki_appears_before_publish: false,
             uki_publisher_fail_at: None,
             uki_publisher_calls: Vec::new(),
             uki_stage_remains: false,
             uki_final_exists: false,
+            last_uki_permit_attempted: None,
             observe_absent: FailAt::None,
             observe_error: false,
             uki_mismatch: false,
@@ -290,10 +296,10 @@ impl FakeBackend {
     }
 }
 
-struct CoordinatorUkiBuilder;
+struct CoordinatorUkiBuilder(&'static [u8]);
 impl UkiBuildBackend for CoordinatorUkiBuilder {
     fn build(&mut self, _: &UkiBuildPlan) -> Result<Vec<u8>, UkiBuildError> {
-        Ok(b"coordinator fake UKI".to_vec())
+        Ok(self.0.to_vec())
     }
     fn validate(&mut self, _: &[u8], _: &UkiBuildPlan) -> Result<(), UkiBuildError> {
         Ok(())
@@ -304,6 +310,10 @@ impl UkiBuildBackend for CoordinatorUkiBuilder {
 }
 
 fn prepared_test_uki() -> PreparedUkiArtifact {
+    prepared_test_uki_bytes(b"coordinator fake UKI")
+}
+
+fn prepared_test_uki_bytes(bytes: &'static [u8]) -> PreparedUkiArtifact {
     let plan = UkiBuildPlan {
         kernel_flavor: "linux".into(),
         kernel_image: "/kernel".into(),
@@ -328,7 +338,7 @@ fn prepared_test_uki() -> PreparedUkiArtifact {
         },
         inputs: Vec::new(),
     };
-    prepare_uki_artifact(&plan, &mut CoordinatorUkiBuilder).unwrap()
+    prepare_uki_artifact(&plan, &mut CoordinatorUkiBuilder(bytes)).unwrap()
 }
 
 fn test_publish_metadata() -> boothop_core::PublishMetadata {
@@ -445,6 +455,7 @@ impl LifecycleBackend for FakeBackend {
         artifact: PreparedUkiArtifact,
         permit: UkiPublishPermit<'_>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
+        self.last_uki_permit_attempted = Some(permit.attempted_state().clone());
         let evidence = mutation_evidence(
             permit.owned_entry(),
             permit.operation_id(),
@@ -456,11 +467,19 @@ impl LifecycleBackend for FakeBackend {
         if self.fail == FailAt::Uki {
             return self.mutation("uki", Residual::UkiMayRemain, evidence);
         }
+        let prepared_for_publish = if self.publish_different_artifact {
+            prepared_test_uki_bytes(b"different artifact B")
+        } else {
+            artifact
+        };
         let mut publisher = FakeUkiPublisher {
+            final_bytes: self
+                .foreign_uki_appears_before_publish
+                .then(|| b"foreign file appeared after prepare".to_vec()),
             fail_at: self.uki_publisher_fail_at,
             ..Default::default()
         };
-        let publish_result = publish_prepared_uki(artifact, permit, &mut publisher);
+        let publish_result = publish_prepared_uki(prepared_for_publish, permit, &mut publisher);
         self.uki_publisher_calls = publisher.calls.clone();
         self.uki_stage_remains = publisher.staged.is_some();
         self.uki_final_exists = publisher.final_bytes.is_some();
@@ -1087,6 +1106,61 @@ fn uki_stage_rename_and_readback_failures_never_retry_or_rollback() {
                 && record.residual == vec![Residual::UkiMayRemain])
         );
     }
+}
+
+#[test]
+fn mismatched_artifact_after_attempt_is_rejected_before_stage_or_rename() {
+    let fs = support::FakeFs::installed();
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let mut backend = FakeBackend::new(fs);
+    backend.publish_different_artifact = true;
+    assert_ne!(
+        prepared_test_uki_bytes(b"different artifact B").metadata(),
+        prepared_test_uki().metadata()
+    );
+    assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+    assert!(backend.uki_publisher_calls.is_empty());
+    assert!(matches!(&backend.last_uki_permit_attempted,
+        Some(ArchProvisionState::Provisioning(record))
+            if record.step == ProvisioningStep::UkiPublicationAttempted
+                && record.owned_entry.publish.as_ref() == Some(&test_publish_metadata())));
+    assert!(backend.mutations.is_empty());
+    assert!(
+        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+        if record.step == ProvisioningStep::UkiPublicationAttempted
+            && record.residual == vec![Residual::UkiMayRemain])
+    );
+    assert_eq!(
+        provision(&mut store, &mut backend, pending_intent()),
+        Err(Error::NotConfigured)
+    );
+    assert!(backend.uki_publisher_calls.is_empty());
+}
+
+#[test]
+fn foreign_fixed_path_appearing_after_attempt_stops_before_stage_or_rename() {
+    let fs = support::FakeFs::installed();
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let mut backend = FakeBackend::new(fs);
+    backend.foreign_uki_appears_before_publish = true;
+    assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+    assert_eq!(backend.uki_publisher_calls, ["observe"]);
+    assert!(matches!(&backend.last_uki_permit_attempted,
+        Some(ArchProvisionState::Provisioning(record))
+            if record.step == ProvisioningStep::UkiPublicationAttempted
+                && record.owned_entry.publish.as_ref() == Some(&test_publish_metadata())));
+    assert!(backend.uki_final_exists);
+    assert!(backend.mutations.is_empty());
+    assert!(
+        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+        if record.step == ProvisioningStep::UkiPublicationAttempted
+            && record.residual == vec![Residual::UkiMayRemain])
+    );
+    assert_eq!(
+        provision(&mut store, &mut backend, pending_intent()),
+        Err(Error::NotConfigured)
+    );
+    assert_eq!(backend.uki_publisher_calls, ["observe"]);
 }
 
 #[test]
