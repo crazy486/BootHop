@@ -92,6 +92,16 @@ pub fn serve_lifecycle(
     io.send(&response)
 }
 
+/// Production lifecycle entrypoint remains deliberately unavailable until a
+/// concrete, separately authorized Linux adapter can bind the Phase 5A
+/// coordinator to the host's UKI, Boot####, and BootOrder sources. Returning
+/// `Failed` means the request was rejected before any journal or platform
+/// mutation; no fake backend is exposed as operational success.
+#[cfg(target_os = "linux")]
+pub fn production_lifecycle(_operation: protocol::LifecycleOperation) -> protocol::LifecycleStatus {
+    protocol::LifecycleStatus::Failed
+}
+
 /// Complete one authenticated Windows operation. The operation guard is
 /// acquired before platform construction and remains in scope until the
 /// terminal `send` attempt has returned.

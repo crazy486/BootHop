@@ -102,6 +102,10 @@ pub enum LifecycleStatus {
     AlreadyPresent,
     NotPresent,
     Failed,
+    /// The trusted coordinator retained a partial or residual journal state.
+    /// The UI must require an out-of-band recovery decision before another
+    /// lifecycle action can be offered.
+    RecoveryRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1003,6 +1007,16 @@ pub fn decode_lifecycle_response_envelope(
         request_id: wire.request_id,
         status: wire.lifecycle_response,
     })
+}
+pub fn decode_lifecycle_response_for(
+    frame: &[u8],
+    expected_id: &RequestId,
+) -> Result<LifecycleStatus, ProtocolError> {
+    let response = decode_lifecycle_response_envelope(frame)?;
+    if &response.request_id != expected_id {
+        return Err(ProtocolError::Invalid);
+    }
+    Ok(response.status)
 }
 pub fn encode_response_with_id(
     request_id: &RequestId,

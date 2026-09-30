@@ -52,6 +52,7 @@ fn lifecycle_transport_round_trips_closed_typed_operations_and_statuses() {
         LifecycleStatus::AlreadyPresent,
         LifecycleStatus::NotPresent,
         LifecycleStatus::Failed,
+        LifecycleStatus::RecoveryRequired,
     ] {
         let frame = encode_lifecycle_response_with_id(&id, status.clone()).unwrap();
         let decoded = decode_lifecycle_response_envelope(&frame).unwrap();
@@ -74,6 +75,16 @@ fn lifecycle_transport_rejects_fields_outside_its_small_closed_schema() {
     .is_err());
     assert!(decode_lifecycle_request_envelope(&raw(&format!(
         r#"{{"protocol_version":2,"request_id":"{id}","lifecycle_request":{{"ProvisionArchEntry":{{"boot_id":7}}}}}}"#
+    )))
+    .is_err());
+    assert!(
+        decode_lifecycle_response_envelope(&raw(&format!(
+            r#"{{"protocol_version":1,"request_id":"{id}","lifecycle_response":"Failed"}}"#
+        )))
+        .is_err()
+    );
+    assert!(decode_lifecycle_response_envelope(&raw(&format!(
+        r#"{{"protocol_version":2,"request_id":"{id}","lifecycle_response":"Failed","path":"/etc"}}"#
     )))
     .is_err());
 }

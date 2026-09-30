@@ -1,5 +1,8 @@
 //! Explicit production process boundary. Construction alone has no OS side effects.
-use super::{Boundary, Event, HelperClient, SpawnSpec, TransportError};
+use super::{
+    Boundary, ClientError, Event, HelperClient, SpawnSpec, TransportError, run_lifecycle_exchange,
+};
+use boothop_protocol::{LifecycleOperation, LifecycleStatus};
 use std::{
     io,
     os::fd::AsRawFd,
@@ -89,6 +92,56 @@ impl Default for SystemProcess {
     }
 }
 impl HelperClient<SystemProcess> {
+    pub fn system() -> Self {
+        Self::new(SystemProcess::default())
+    }
+}
+
+/// Separate Linux helper client for closed lifecycle operations. It has a
+/// distinct process argument and decoder, so callers cannot accidentally send
+/// lifecycle intent through ordinary Inspect/Configure/Switch dispatch.
+pub struct LifecycleClient<B: Boundary> {
+    boundary: B,
+}
+
+impl<B: Boundary> LifecycleClient<B> {
+    pub fn new(boundary: B) -> Self {
+        Self { boundary }
+    }
+
+    pub fn into_boundary(self) -> B {
+        self.boundary
+    }
+
+    pub fn run(&mut self, operation: LifecycleOperation) -> Result<LifecycleStatus, ClientError> {
+        let result = self.run_once(operation);
+        self.boundary.stop();
+        result
+    }
+
+    fn run_once(&mut self, operation: LifecycleOperation) -> Result<LifecycleStatus, ClientError> {
+        let spec = SpawnSpec {
+            program: "/usr/bin/pkexec",
+            args: vec![
+                "--disable-internal-agent",
+                "/usr/lib/boothop/boothop-helper",
+                "--lifecycle",
+            ],
+            environment: vec![("LC_ALL", "C")],
+        };
+        run_lifecycle_exchange(&mut self.boundary, operation, |boundary, _, _| {
+            boundary.spawn(&spec).map_err(|error| {
+                if error == TransportError::Cancelled {
+                    TransportError::Launch
+                } else {
+                    error
+                }
+            })
+        })
+    }
+}
+
+impl LifecycleClient<SystemProcess> {
     pub fn system() -> Self {
         Self::new(SystemProcess::default())
     }

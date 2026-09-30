@@ -2,6 +2,10 @@ use boothop_core::{
     BootId, Candidate, Classification, Error, Os, PlatformOperation, RecordDiagnostic, Report,
     Request, ResidualAssessment, RollbackAssessment, Stage,
 };
+#[cfg(target_os = "linux")]
+use boothop_gui::controller::{
+    LifecycleController, LifecycleHelper, LifecycleIntent, LifecycleState,
+};
 use boothop_gui::{
     cache::{Cache, CacheError, CachedTarget, StartupPhase},
     controller::{
@@ -10,6 +14,8 @@ use boothop_gui::{
     },
     helper_client::{ClientError, NativeIoStage, TransportError},
 };
+#[cfg(target_os = "linux")]
+use boothop_protocol::{LifecycleOperation, LifecycleStatus};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -129,6 +135,101 @@ fn finish(c: &mut TestController, h: &FakeHelper, e: &Manual, result: Result<Rep
     h.replies.lock().unwrap().push_back(result);
     e.finish();
     c.poll();
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Default)]
+struct FakeLifecycleHelper {
+    calls: Arc<Mutex<Vec<LifecycleOperation>>>,
+    replies: Arc<Mutex<VecDeque<Result<LifecycleStatus, ClientError>>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl LifecycleHelper for FakeLifecycleHelper {
+    fn run(&mut self, operation: LifecycleOperation) -> Result<LifecycleStatus, ClientError> {
+        self.calls.lock().unwrap().push(operation);
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected lifecycle request")
+    }
+}
+
+#[cfg(target_os = "linux")]
+type TestLifecycleController = LifecycleController<FakeLifecycleHelper, Manual>;
+
+#[cfg(target_os = "linux")]
+fn lifecycle_setup() -> (TestLifecycleController, FakeLifecycleHelper, Manual) {
+    let helper = FakeLifecycleHelper::default();
+    let executor = Manual::default();
+    (
+        LifecycleController::new(helper.clone(), executor.clone(), Arc::new(|| {})),
+        helper,
+        executor,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn finish_lifecycle(
+    controller: &mut TestLifecycleController,
+    helper: &FakeLifecycleHelper,
+    executor: &Manual,
+    result: Result<LifecycleStatus, ClientError>,
+) {
+    helper.replies.lock().unwrap().push_back(result);
+    executor.finish();
+    controller.poll();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lifecycle_controller_sends_only_after_explicit_action_and_renders_terminal_status() {
+    let (mut controller, helper, executor) = lifecycle_setup();
+    assert_eq!(controller.state(), &LifecycleState::Idle);
+    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(executor.0.lock().unwrap().is_empty());
+
+    controller.handle(LifecycleIntent::Provision);
+    assert_eq!(controller.state(), &LifecycleState::Busy);
+    assert_eq!(executor.0.lock().unwrap().len(), 1);
+    finish_lifecycle(
+        &mut controller,
+        &helper,
+        &executor,
+        Ok(LifecycleStatus::Succeeded),
+    );
+    assert_eq!(controller.state(), &LifecycleState::Succeeded);
+    assert!(controller.status().contains("完成"));
+    assert_eq!(
+        *helper.calls.lock().unwrap(),
+        vec![LifecycleOperation::ProvisionArchEntry]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lifecycle_controller_disables_every_action_after_recovery_or_unknown_result() {
+    for result in [
+        Ok(LifecycleStatus::RecoveryRequired),
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout)),
+    ] {
+        let (mut controller, helper, executor) = lifecycle_setup();
+        controller.handle(LifecycleIntent::Uninstall);
+        finish_lifecycle(&mut controller, &helper, &executor, result);
+        let expected = if matches!(controller.state(), LifecycleState::RecoveryRequired) {
+            LifecycleState::RecoveryRequired
+        } else {
+            LifecycleState::UnknownAfterSend
+        };
+        assert_eq!(controller.state(), &expected);
+        assert!(!controller.can_provision());
+        assert!(!controller.can_uninstall());
+        controller.handle(LifecycleIntent::Provision);
+        controller.handle(LifecycleIntent::Uninstall);
+        assert_eq!(helper.calls.lock().unwrap().len(), 1);
+        assert!(executor.0.lock().unwrap().is_empty());
+    }
 }
 fn inspect(c: &mut TestController, h: &FakeHelper, e: &Manual, r: Report) {
     c.handle(UiIntent::Inspect);

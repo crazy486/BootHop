@@ -1,8 +1,12 @@
 use boothop_core::{Error, Request};
+#[cfg(target_os = "linux")]
+use boothop_gui::helper_client::linux::LifecycleClient;
 use boothop_gui::helper_client::{
     Boundary, ClientError, Event, HelperClient, SpawnSpec, TransportError,
 };
 use boothop_protocol::encode_hello;
+#[cfg(target_os = "linux")]
+use boothop_protocol::{LifecycleOperation, LifecycleStatus};
 use std::{collections::VecDeque, time::Duration};
 struct Fake {
     events: VecDeque<Result<Event, TransportError>>,
@@ -93,6 +97,57 @@ impl Boundary for Fake {
             }
             flush(&mut fragments, &mut rewritten);
             self.events = rewritten;
+        } else if let Ok(request) = boothop_protocol::decode_lifecycle_request_envelope(bytes) {
+            let mut rewritten = VecDeque::new();
+            let mut fragments: Vec<Vec<u8>> = Vec::new();
+            let flush = |fragments: &mut Vec<Vec<u8>>, rewritten: &mut VecDeque<_>| {
+                if fragments.is_empty() {
+                    return;
+                }
+                let sizes: Vec<_> = fragments.iter().map(Vec::len).collect();
+                let mut joined = Vec::new();
+                for fragment in fragments.drain(..) {
+                    joined.extend_from_slice(&fragment);
+                }
+                if let Ok(response) = boothop_protocol::decode_lifecycle_response_envelope(&joined)
+                {
+                    let frame = boothop_protocol::encode_lifecycle_response_with_id(
+                        &request.request_id,
+                        response.status,
+                    )
+                    .unwrap();
+                    let mut offset = 0;
+                    for size in sizes {
+                        let end = (offset + size).min(frame.len());
+                        rewritten.push_back(Ok(Event::Stdout(frame[offset..end].to_vec())));
+                        offset = end;
+                    }
+                    if offset < frame.len() {
+                        rewritten.push_back(Ok(Event::Stdout(frame[offset..].to_vec())));
+                    }
+                } else {
+                    rewritten.extend(
+                        fragments
+                            .drain(..)
+                            .map(|fragment| Ok(Event::Stdout(fragment))),
+                    );
+                }
+            };
+            while let Some(event) = self.events.pop_front() {
+                let event = match event {
+                    Ok(Event::Stdout(frame)) => {
+                        fragments.push(frame);
+                        continue;
+                    }
+                    other => {
+                        flush(&mut fragments, &mut rewritten);
+                        other
+                    }
+                };
+                rewritten.push_back(event);
+            }
+            flush(&mut fragments, &mut rewritten);
+            self.events = rewritten;
         }
         Ok(())
     }
@@ -103,6 +158,50 @@ fn json_frame(json: &str) -> Vec<u8> {
     let mut bytes = (json.len() as u32).to_le_bytes().to_vec();
     bytes.extend_from_slice(json.as_bytes());
     bytes
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lifecycle_client_uses_a_separate_helper_mode_and_returns_typed_status() {
+    let id = boothop_protocol::RequestId::parse("0123456789abcdef0123456789abcde1").unwrap();
+    let response =
+        boothop_protocol::encode_lifecycle_response_with_id(&id, LifecycleStatus::AlreadyPresent)
+            .unwrap();
+    let mut client = LifecycleClient::new(Fake::new(vec![
+        Ok(Event::Stdout(encode_hello())),
+        Ok(Event::Stdout(response)),
+        Ok(Event::Exit(0)),
+    ]));
+    assert_eq!(
+        client.run(LifecycleOperation::ProvisionArchEntry),
+        Ok(LifecycleStatus::AlreadyPresent)
+    );
+    let fake = client.into_boundary();
+    assert_eq!(fake.specs.len(), 1);
+    assert_eq!(
+        fake.specs[0].args,
+        vec![
+            "--disable-internal-agent",
+            "/usr/lib/boothop/boothop-helper",
+            "--lifecycle"
+        ]
+    );
+    assert_eq!(fake.writes.len(), 1);
+    let request = boothop_protocol::decode_lifecycle_request_envelope(&fake.writes[0]).unwrap();
+    assert_eq!(request.operation, LifecycleOperation::ProvisionArchEntry);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lifecycle_client_maps_missing_terminal_response_to_non_retryable_unknown() {
+    let mut client = LifecycleClient::new(Fake::new(vec![
+        Ok(Event::Stdout(encode_hello())),
+        Err(TransportError::Timeout),
+    ]));
+    assert_eq!(
+        client.run(LifecycleOperation::UninstallArchEntry),
+        Err(ClientError::UnknownAfterSend(TransportError::Timeout))
+    );
 }
 #[test]
 fn noncanonical_hello_never_enters_send_phase() {

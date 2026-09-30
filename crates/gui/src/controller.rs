@@ -26,6 +26,217 @@ impl<B: crate::helper_client::windows::WindowsBoundary + Send + 'static> Helper
         crate::helper_client::windows::WindowsClient::run(self, request)
     }
 }
+
+/// Lifecycle intent is deliberately independent from ordinary Inspect,
+/// Configure, and Switch requests. This trait is implemented only by the
+/// Linux lifecycle client and carries the closed operation/status DTOs.
+#[cfg(target_os = "linux")]
+pub trait LifecycleHelper: Send + 'static {
+    fn run(
+        &mut self,
+        operation: boothop_protocol::LifecycleOperation,
+    ) -> Result<boothop_protocol::LifecycleStatus, ClientError>;
+}
+
+#[cfg(target_os = "linux")]
+impl<B: Boundary + Send + 'static> LifecycleHelper
+    for crate::helper_client::linux::LifecycleClient<B>
+{
+    fn run(
+        &mut self,
+        operation: boothop_protocol::LifecycleOperation,
+    ) -> Result<boothop_protocol::LifecycleStatus, ClientError> {
+        crate::helper_client::linux::LifecycleClient::run(self, operation)
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleIntent {
+    Provision,
+    Uninstall,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleState {
+    Idle,
+    Busy,
+    Pending,
+    Succeeded,
+    AlreadyPresent,
+    NotPresent,
+    Failed,
+    RecoveryRequired,
+    UnknownAfterSend,
+}
+
+#[cfg(target_os = "linux")]
+pub type LifecycleUiState = LifecycleState;
+
+#[cfg(target_os = "linux")]
+type LifecycleCompletion = (
+    LifecycleIntent,
+    Result<boothop_protocol::LifecycleStatus, ClientError>,
+);
+
+/// Linux setup/uninstall UI state machine. It has no startup path and never
+/// participates in ordinary target inspection or Quick Hop.
+#[cfg(target_os = "linux")]
+pub struct LifecycleController<H, E> {
+    helper: Arc<Mutex<H>>,
+    executor: E,
+    state: LifecycleState,
+    status: String,
+    diagnostic: String,
+    tx: mpsc::Sender<LifecycleCompletion>,
+    rx: mpsc::Receiver<LifecycleCompletion>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(target_os = "linux")]
+impl<H: LifecycleHelper, E: Executor> LifecycleController<H, E> {
+    pub fn new(helper: H, executor: E, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            helper: Arc::new(Mutex::new(helper)),
+            executor,
+            state: LifecycleState::Idle,
+            status: "尚未执行 Linux 启动配置操作。".into(),
+            diagnostic: String::new(),
+            tx,
+            rx,
+            wake,
+        }
+    }
+
+    pub fn state(&self) -> &LifecycleState {
+        &self.state
+    }
+
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn diagnostic(&self) -> &str {
+        &self.diagnostic
+    }
+
+    pub fn set_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.wake = wake;
+    }
+
+    pub fn can_provision(&self) -> bool {
+        self.can_start()
+    }
+
+    pub fn can_uninstall(&self) -> bool {
+        self.can_start()
+    }
+
+    fn can_start(&self) -> bool {
+        !matches!(
+            self.state,
+            LifecycleState::Busy
+                | LifecycleState::Pending
+                | LifecycleState::RecoveryRequired
+                | LifecycleState::UnknownAfterSend
+        )
+    }
+
+    pub fn handle(&mut self, intent: LifecycleIntent) {
+        if !self.can_start() {
+            return;
+        }
+        let operation = match intent {
+            LifecycleIntent::Provision => boothop_protocol::LifecycleOperation::ProvisionArchEntry,
+            LifecycleIntent::Uninstall => boothop_protocol::LifecycleOperation::UninstallArchEntry,
+        };
+        self.state = LifecycleState::Busy;
+        self.status = "正在等待授权或处理 Linux 启动配置，请勿重复操作。".into();
+        self.diagnostic.clear();
+        let helper = self.helper.clone();
+        let tx = self.tx.clone();
+        let wake = self.wake.clone();
+        if self
+            .executor
+            .execute(Box::new(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    helper
+                        .lock()
+                        .map_err(|_| ClientError::BeforeSend(TransportError::Launch))?
+                        .run(operation)
+                }))
+                .unwrap_or(Err(ClientError::UnknownAfterSend(TransportError::Io)));
+                if tx.send((intent, result)).is_ok() {
+                    wake();
+                }
+            }))
+            .is_err()
+        {
+            self.finish(intent, Err(ClientError::BeforeSend(TransportError::Launch)));
+        }
+    }
+
+    pub fn poll(&mut self) {
+        if let Ok((intent, result)) = self.rx.try_recv() {
+            self.finish(intent, result);
+        }
+    }
+
+    fn finish(
+        &mut self,
+        _intent: LifecycleIntent,
+        result: Result<boothop_protocol::LifecycleStatus, ClientError>,
+    ) {
+        match result {
+            Ok(status) => {
+                self.state = match status {
+                    boothop_protocol::LifecycleStatus::Pending => LifecycleState::Pending,
+                    boothop_protocol::LifecycleStatus::Succeeded => LifecycleState::Succeeded,
+                    boothop_protocol::LifecycleStatus::AlreadyPresent => {
+                        LifecycleState::AlreadyPresent
+                    }
+                    boothop_protocol::LifecycleStatus::NotPresent => LifecycleState::NotPresent,
+                    boothop_protocol::LifecycleStatus::Failed => LifecycleState::Failed,
+                    boothop_protocol::LifecycleStatus::RecoveryRequired => {
+                        LifecycleState::RecoveryRequired
+                    }
+                };
+                self.status = match self.state {
+                    LifecycleState::Pending => "helper 返回了未完成状态；请勿重复操作。".into(),
+                    LifecycleState::Succeeded => "Linux 启动配置操作已完成。".into(),
+                    LifecycleState::AlreadyPresent => "Linux 启动配置已经存在。".into(),
+                    LifecycleState::NotPresent => "Linux 启动配置不存在。".into(),
+                    LifecycleState::Failed => {
+                        "Linux 启动配置操作在变更前失败；可由用户明确重试。".into()
+                    }
+                    LifecycleState::RecoveryRequired => {
+                        "Linux 启动配置存在部分或残留状态；需要明确的管理员恢复流程。".into()
+                    }
+                    LifecycleState::UnknownAfterSend => {
+                        "Linux 启动配置结果未知；请勿重复操作。".into()
+                    }
+                    LifecycleState::Idle | LifecycleState::Busy => unreachable!(),
+                };
+                self.diagnostic = format!("LifecycleStatus::{status:?}");
+            }
+            Err(error) => {
+                self.state = if matches!(error, ClientError::UnknownAfterSend(_)) {
+                    LifecycleState::UnknownAfterSend
+                } else {
+                    LifecycleState::Failed
+                };
+                self.status = if self.state == LifecycleState::UnknownAfterSend {
+                    "Linux 启动配置结果未知；请勿重复操作。".into()
+                } else {
+                    "Linux 启动配置操作失败；不会自动重试。".into()
+                };
+                self.diagnostic = format!("{error:?}");
+            }
+        }
+    }
+}
 #[derive(Debug)]
 pub struct ScheduleError;
 /// An error guarantees the job did not run and will not run later.

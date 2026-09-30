@@ -3,14 +3,24 @@ mod linux {
     use boothop_core::{BootId, Classification, Os};
     use boothop_gui::{
         cache::{Cache, LinuxCache, safe_description},
-        controller::{Controller, Executor, Helper, StartupDisposition, ThreadExecutor, UiIntent},
-        helper_client::{HelperClient, linux::SystemProcess},
+        controller::{
+            Controller, Executor, Helper, LifecycleController, LifecycleHelper, LifecycleIntent,
+            StartupDisposition, ThreadExecutor, UiIntent,
+        },
+        helper_client::{
+            HelperClient,
+            linux::{LifecycleClient, SystemProcess},
+        },
         ui::{AppWindow, CandidateRow},
     };
     use slint::{ComponentHandle, ModelRc, VecModel};
     use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-    fn render<H: Helper, E: Executor, C: Cache>(ui: &AppWindow, c: &Controller<H, E, C>) {
+    fn render<H: Helper, E: Executor, C: Cache, L: LifecycleHelper, LE: Executor>(
+        ui: &AppWindow,
+        c: &Controller<H, E, C>,
+        lifecycle: &LifecycleController<L, LE>,
+    ) {
         ui.set_status_text(c.status().into());
         ui.set_target_text(
             c.target()
@@ -57,6 +67,10 @@ mod linux {
         ui.set_confirmation_enabled(c.can_select() && c.selected().is_some());
         ui.set_target_confirmed(c.confirmed());
         ui.set_target_os_name("Windows".into());
+        ui.set_lifecycle_visible(true);
+        ui.set_lifecycle_status_text(lifecycle.status().into());
+        ui.set_provision_enabled(lifecycle.can_provision());
+        ui.set_uninstall_enabled(lifecycle.can_uninstall());
         ui.set_candidates(ModelRc::new(VecModel::from(
             c.candidates()
                 .iter()
@@ -104,6 +118,11 @@ mod linux {
             Arc::new(|| {}),
             Os::Windows,
         );
+        let mut lifecycle_controller = LifecycleController::new(
+            LifecycleClient::<SystemProcess>::system(),
+            ThreadExecutor,
+            Arc::new(|| {}),
+        );
         let mode = super::startup_mode();
         if mode == boothop_gui::controller::StartupMode::QuickHop {
             let _ = startup_diagnostics
@@ -127,63 +146,72 @@ mod linux {
         let wake = Arc::new(move || {
             let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_completed());
         });
-        controller.set_wake(wake);
+        controller.set_wake(wake.clone());
+        lifecycle_controller.set_wake(wake);
         let controller = Rc::new(RefCell::new(controller));
-        render(&ui, &controller.borrow());
+        let lifecycle_controller = Rc::new(RefCell::new(lifecycle_controller));
+        render(&ui, &controller.borrow(), &lifecycle_controller.borrow());
         {
             let c = controller.clone();
+            let lifecycle = lifecycle_controller.clone();
             let weak = ui.as_weak();
             ui.on_completed(move || {
                 c.borrow_mut().poll();
+                lifecycle.borrow_mut().poll();
                 if let Some(ui) = weak.upgrade() {
-                    render(&ui, &c.borrow());
+                    render(&ui, &c.borrow(), &lifecycle.borrow());
                 }
             });
         }
         {
             let c = controller.clone();
+            let lifecycle = lifecycle_controller.clone();
             let weak = ui.as_weak();
             ui.on_inspect(move || {
                 c.borrow_mut().handle(UiIntent::Inspect);
                 if let Some(ui) = weak.upgrade() {
-                    render(&ui, &c.borrow());
+                    render(&ui, &c.borrow(), &lifecycle.borrow());
                 }
             });
         }
         {
             let c = controller.clone();
+            let lifecycle = lifecycle_controller.clone();
             let weak = ui.as_weak();
             ui.on_switch_target(move || {
                 c.borrow_mut().handle(UiIntent::Switch);
                 if let Some(ui) = weak.upgrade() {
-                    render(&ui, &c.borrow());
+                    render(&ui, &c.borrow(), &lifecycle.borrow());
                 }
             });
         }
         {
             let c = controller.clone();
+            let lifecycle = lifecycle_controller.clone();
             let weak = ui.as_weak();
             ui.on_select_target(move |id| {
                 if let Ok(id) = u16::try_from(id) {
                     c.borrow_mut().select(BootId(id));
                 }
                 if let Some(ui) = weak.upgrade() {
-                    render(&ui, &c.borrow());
+                    render(&ui, &c.borrow(), &lifecycle.borrow());
                 }
             });
         }
         {
             let c = controller.clone();
+            let lifecycle = lifecycle_controller.clone();
             let weak = ui.as_weak();
             ui.on_confirm_target(move |confirmed| {
                 c.borrow_mut().confirm_target(confirmed);
                 if let Some(ui) = weak.upgrade() {
-                    render(&ui, &c.borrow());
+                    render(&ui, &c.borrow(), &lifecycle.borrow());
                 }
             });
         }
         {
-            let c = controller;
+            let c = controller.clone();
+            let lifecycle = lifecycle_controller.clone();
             let weak = ui.as_weak();
             ui.on_configure(move || {
                 let selected = c.borrow().selected();
@@ -191,7 +219,29 @@ mod linux {
                     c.borrow_mut().handle(UiIntent::Configure(id, Os::Windows));
                 }
                 if let Some(ui) = weak.upgrade() {
-                    render(&ui, &c.borrow());
+                    render(&ui, &c.borrow(), &lifecycle.borrow());
+                }
+            });
+        }
+        {
+            let c = lifecycle_controller.clone();
+            let ordinary = controller.clone();
+            let weak = ui.as_weak();
+            ui.on_provision(move || {
+                c.borrow_mut().handle(LifecycleIntent::Provision);
+                if let Some(ui) = weak.upgrade() {
+                    render(&ui, &ordinary.borrow(), &c.borrow());
+                }
+            });
+        }
+        {
+            let c = lifecycle_controller;
+            let ordinary = controller;
+            let weak = ui.as_weak();
+            ui.on_uninstall(move || {
+                c.borrow_mut().handle(LifecycleIntent::Uninstall);
+                if let Some(ui) = weak.upgrade() {
+                    render(&ui, &ordinary.borrow(), &c.borrow());
                 }
             });
         }
@@ -274,6 +324,10 @@ mod windows {
         ui.set_confirmation_enabled(c.can_select() && c.selected().is_some());
         ui.set_target_confirmed(c.confirmed());
         ui.set_target_os_name("Linux".into());
+        ui.set_lifecycle_visible(false);
+        ui.set_lifecycle_status_text("".into());
+        ui.set_provision_enabled(false);
+        ui.set_uninstall_enabled(false);
         ui.set_candidates(ModelRc::new(VecModel::from(
             c.candidates()
                 .iter()

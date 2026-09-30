@@ -20,12 +20,18 @@ export component AppWindow inherits Window {
     in property <bool> confirmation-enabled;
     in property <bool> target-confirmed;
     in property <string> target-os-name;
+    in property <bool> lifecycle-visible;
+    in property <string> lifecycle-status-text;
+    in property <bool> provision-enabled;
+    in property <bool> uninstall-enabled;
     in property <[CandidateRow]> candidates;
     callback inspect();
     callback switch-target();
     callback select-target(int);
     callback confirm-target(bool);
     callback configure();
+    callback provision();
+    callback uninstall();
     callback completed();
     VerticalLayout {
         padding: 20px;
@@ -63,6 +69,16 @@ export component AppWindow inherits Window {
                 toggled => { root.confirm-target(self.checked); }
             }
             Button { text: "配置所选目标"; enabled: root.configure-enabled; clicked => { root.configure(); } }
+        }
+        if root.lifecycle-visible: VerticalLayout {
+            spacing: 8px;
+            Text { text: "Linux 启动配置"; font-weight: 700; }
+            Text { text: root.lifecycle-status-text; wrap: word-wrap; }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: "设置 Linux 启动项"; enabled: root.provision-enabled; clicked => { root.provision(); } }
+                Button { text: "卸载 Linux 启动项"; enabled: root.uninstall-enabled; clicked => { root.uninstall(); } }
+            }
         }
         Text { text: "诊断（仅公开编号、阶段和错误；不保证启动链或实际进入目标系统）"; wrap: word-wrap; }
         diagnostic := TextEdit { text: root.diagnostic-text; read-only: true; min-height: 64px; }

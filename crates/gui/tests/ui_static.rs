@@ -58,9 +58,21 @@ fn linux_entry_point_wires_explicit_callbacks_and_event_loop_completions() {
         "on_completed",
         "upgrade_in_event_loop",
         "ThreadExecutor",
+        "on_provision",
+        "on_uninstall",
+        "LifecycleController",
+        "LifecycleIntent::Provision",
+        "LifecycleIntent::Uninstall",
     ] {
         assert!(main.contains(boundary), "missing {boundary}");
     }
+
+    let linux_start = main.find("mod linux").unwrap();
+    let windows_start = main.find("mod windows").unwrap();
+    assert!(main[linux_start..windows_start].contains("on_provision"));
+    assert!(main[linux_start..windows_start].contains("on_uninstall"));
+    assert!(!main[windows_start..].contains("on_provision"));
+    assert!(!main[windows_start..].contains("on_uninstall"));
 }
 
 #[test]

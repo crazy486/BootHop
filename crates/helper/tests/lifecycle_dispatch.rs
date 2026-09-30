@@ -130,3 +130,15 @@ fn terminal_response_is_attempted_once_even_when_send_fails() {
     assert!(called.get());
     assert_eq!(io.output.len(), 2);
 }
+
+#[test]
+fn production_lifecycle_route_is_fail_closed_until_a_trusted_backend_exists() {
+    assert_eq!(
+        dispatch::production_lifecycle(LifecycleOperation::ProvisionArchEntry),
+        LifecycleStatus::Failed
+    );
+    assert_eq!(
+        dispatch::production_lifecycle(LifecycleOperation::UninstallArchEntry),
+        LifecycleStatus::Failed
+    );
+}

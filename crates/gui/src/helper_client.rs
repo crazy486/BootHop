@@ -207,6 +207,80 @@ where
         complete(&stdout).map_err(ClientError::UnknownAfterSend)?;
     }
 }
+
+/// Exchange one closed Linux lifecycle operation over the separate helper
+/// mode. Lifecycle responses never enter the ordinary core Report decoder.
+pub(crate) fn run_lifecycle_exchange<B, F>(
+    boundary: &mut B,
+    operation: protocol::LifecycleOperation,
+    start: F,
+) -> Result<protocol::LifecycleStatus, ClientError>
+where
+    B: ClientIo,
+    F: FnOnce(&mut B, &protocol::RequestId, Duration) -> Result<(), TransportError>,
+{
+    let request_id = protocol::RequestId::generate()
+        .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
+    let request = protocol::encode_lifecycle_request_with_id(&request_id, operation)
+        .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
+    let hello_deadline = boundary.now() + Duration::from_secs(120);
+    start(boundary, &request_id, hello_deadline).map_err(|error| {
+        if error == TransportError::Cancelled {
+            ClientError::Cancelled
+        } else {
+            ClientError::BeforeSend(error)
+        }
+    })?;
+    let mut used = 0;
+    let mut stdout = Vec::new();
+    loop {
+        let event = boundary
+            .next(hello_deadline)
+            .map_err(ClientError::BeforeSend)?;
+        if boundary.now() > hello_deadline {
+            return Err(ClientError::BeforeSend(TransportError::Timeout));
+        }
+        match event {
+            Event::Exit(126) => return Err(ClientError::Cancelled),
+            Event::Exit(127) => {
+                return Err(ClientError::AuthorizationOrLaunchFailed { raw_code: 127 });
+            }
+            Event::Exit(_) => return Err(ClientError::BeforeSend(TransportError::Exit)),
+            event => collect(event, &mut used, &mut stdout).map_err(ClientError::BeforeSend)?,
+        }
+        if complete(&stdout).map_err(ClientError::BeforeSend)? {
+            protocol::decode_hello(&stdout)
+                .map_err(|_| ClientError::BeforeSend(TransportError::Protocol))?;
+            break;
+        }
+    }
+    let deadline = boundary
+        .operation_deadline()
+        .unwrap_or_else(|| boundary.now() + Duration::from_secs(30));
+    boundary
+        .send(&request, deadline)
+        .map_err(ClientError::BeforeSend)?;
+    stdout.clear();
+    loop {
+        let event = boundary
+            .next(deadline)
+            .map_err(ClientError::UnknownAfterSend)?;
+        if boundary.now() > deadline {
+            return Err(ClientError::UnknownAfterSend(TransportError::Timeout));
+        }
+        match event {
+            Event::Exit(0) => {
+                return protocol::decode_lifecycle_response_for(&stdout, &request_id)
+                    .map_err(|_| ClientError::UnknownAfterSend(TransportError::Protocol));
+            }
+            Event::Exit(_) => return Err(ClientError::UnknownAfterSend(TransportError::Exit)),
+            event => {
+                collect(event, &mut used, &mut stdout).map_err(ClientError::UnknownAfterSend)?
+            }
+        }
+        complete(&stdout).map_err(ClientError::UnknownAfterSend)?;
+    }
+}
 fn collect(event: Event, used: &mut usize, stdout: &mut Vec<u8>) -> Result<(), TransportError> {
     let bytes = match &event {
         Event::Stdout(b) | Event::Stderr(b) => b,

@@ -21,7 +21,14 @@ fn main() {
     ) else {
         std::process::exit(1);
     };
-    let result = dispatch::serve(euid, &mut io, dispatch::production);
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let result = match args.as_slice() {
+        [] => dispatch::serve(euid, &mut io, dispatch::production),
+        [arg] if arg == "--lifecycle" => {
+            dispatch::serve_lifecycle(euid, &mut io, dispatch::production_lifecycle)
+        }
+        _ => std::process::exit(1),
+    };
     std::process::exit(if result.is_ok() { 0 } else { 1 });
 }
 #[cfg(windows)]
