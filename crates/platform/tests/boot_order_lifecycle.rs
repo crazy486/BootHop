@@ -1,7 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use boothop_core::{
-    ArchProvisionState, BootId, OwnedArchEntry, UninstallingRecord, UninstallingStep,
+    ArchProvisionState, BootId, BootOrderRemovalProof, BootOrderSnapshot, OwnedArchEntry,
+    UninstallingRecord, UninstallingStep,
 };
 
 #[allow(dead_code)]
@@ -39,6 +40,23 @@ fn uninstall(step: UninstallingStep) -> ArchProvisionState {
         owned_entry: entry(),
         step,
         residual: Vec::new(),
+        boot_order_proof: Some(BootOrderRemovalProof {
+            operation_id: "phase4-test".into(),
+            operation_version: 1,
+            boot_id: entry().boot_id,
+            before: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![BootId(9), entry().boot_id, BootId(4)],
+            },
+            expected_after: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![BootId(9), BootId(4)],
+            },
+            observed_after: Some(BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![BootId(9), BootId(4)],
+            }),
+        }),
     })
 }
 

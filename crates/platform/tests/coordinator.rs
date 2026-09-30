@@ -3,7 +3,10 @@
 #[allow(dead_code)]
 mod support;
 
-use boothop_core::{ArchProvisionState, Error, ProvisioningStep, Residual, UninstallingStep};
+use boothop_core::{
+    ArchProvisionState, BootOrderRemovalProof, BootOrderSnapshot, Error, ProvisioningStep,
+    Residual, UninstallingStep,
+};
 use boothop_platform::linux::arch_provision_store::ArchProvisionStore;
 use boothop_platform::linux::boot_order::BootOrderValue;
 use boothop_platform::linux::coordinator::{
@@ -989,6 +992,15 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
         let ArchProvisionState::Uninstalling(record) = attempted else {
             unreachable!()
         };
+        if record.step != UninstallingStep::BootOrderRemovalAttempted {
+            assert!(record.boot_order_proof.as_ref().is_some_and(|proof| {
+                proof.observed_after.as_ref()
+                    == Some(&boothop_core::BootOrderSnapshot {
+                        attributes: 7,
+                        ids: vec![boothop_core::BootId(7), boothop_core::BootId(8)],
+                    })
+            }));
+        }
         match record.step {
             UninstallingStep::BootOrderRemovalAttempted => {
                 let before = BootOrderValue::new(
@@ -1792,12 +1804,30 @@ fn uninstall_boot_order_removed_recovery_requires_exact_durable_full_order_evide
         let ArchProvisionState::Ready(entry) = support::ready_state() else {
             unreachable!()
         };
+        let boot_id = entry.boot_id;
         let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
             operation_id: "uninstall-1".into(),
             operation_version: 1,
             owned_entry: entry,
             step,
             residual: vec![],
+            boot_order_proof: Some(BootOrderRemovalProof {
+                operation_id: "uninstall-1".into(),
+                operation_version: 1,
+                boot_id,
+                before: BootOrderSnapshot {
+                    attributes: 7,
+                    ids: vec![boothop_core::BootId(8), boot_id],
+                },
+                expected_after: BootOrderSnapshot {
+                    attributes: 7,
+                    ids: vec![boothop_core::BootId(8)],
+                },
+                observed_after: Some(BootOrderSnapshot {
+                    attributes: 7,
+                    ids: vec![boothop_core::BootId(8)],
+                }),
+            }),
         });
         fs.insert(
             "/var/lib/boothop/arch-provision.json",
@@ -1823,18 +1853,141 @@ fn uninstall_boot_order_removed_recovery_requires_exact_durable_full_order_evide
 }
 
 #[test]
+fn uninstall_boot_order_recovery_advances_only_on_exact_durable_post_order() {
+    let fs = support::FakeFs::installed();
+    let ArchProvisionState::Ready(entry) = support::ready_state() else {
+        unreachable!()
+    };
+    let boot_id = entry.boot_id;
+    let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
+        operation_id: "uninstall-exact".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: UninstallingStep::BootOrderRemoved,
+        residual: vec![],
+        boot_order_proof: Some(BootOrderRemovalProof {
+            operation_id: "uninstall-exact".into(),
+            operation_version: 1,
+            boot_id,
+            before: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![boothop_core::BootId(8), boot_id, boothop_core::BootId(9)],
+            },
+            expected_after: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![boothop_core::BootId(8), boothop_core::BootId(9)],
+            },
+            observed_after: Some(BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![boothop_core::BootId(8), boothop_core::BootId(9)],
+            }),
+        }),
+    });
+    fs.insert(
+        "/var/lib/boothop/arch-provision.json",
+        0o100600,
+        boothop_core::encode_arch_provision_state(&state).unwrap(),
+    );
+    let mut backend = FakeBackend::new(fs.clone());
+    backend.observed_order_override = Some(
+        BootOrderValue::new(7, vec![boothop_core::BootId(8), boothop_core::BootId(9)]).unwrap(),
+    );
+    let mut store = ArchProvisionStore::acquire(fs).unwrap();
+    let recovered = recover(&mut store, &mut backend).unwrap();
+    assert!(matches!(
+        recovered,
+        ArchProvisionState::Uninstalling(record)
+            if record.step == UninstallingStep::BootOrderRemovalReadBackVerified
+                && record.residual.is_empty()
+    ));
+    assert!(backend.mutations.is_empty());
+}
+
+#[test]
+fn uninstall_restart_after_mutation_before_checkpoint_uses_durable_expected_order() {
+    let fs = support::FakeFs::installed();
+    let ArchProvisionState::Ready(entry) = support::ready_state() else {
+        unreachable!()
+    };
+    let boot_id = entry.boot_id;
+    let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
+        operation_id: "uninstall-before-checkpoint".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: UninstallingStep::BootOrderRemovalAttempted,
+        residual: vec![],
+        boot_order_proof: Some(BootOrderRemovalProof {
+            operation_id: "uninstall-before-checkpoint".into(),
+            operation_version: 1,
+            boot_id,
+            before: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![boothop_core::BootId(8), boot_id, boothop_core::BootId(9)],
+            },
+            expected_after: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![boothop_core::BootId(8), boothop_core::BootId(9)],
+            },
+            observed_after: None,
+        }),
+    });
+    fs.insert(
+        "/var/lib/boothop/arch-provision.json",
+        0o100600,
+        boothop_core::encode_arch_provision_state(&state).unwrap(),
+    );
+    let mut backend = FakeBackend::new(fs.clone());
+    backend.observed_order_override = Some(
+        BootOrderValue::new(7, vec![boothop_core::BootId(8), boothop_core::BootId(9)]).unwrap(),
+    );
+    let writes_before = backend.mutations.len();
+    let mut store = ArchProvisionStore::acquire(fs).unwrap();
+    let recovered = recover(&mut store, &mut backend).unwrap();
+    assert!(matches!(
+        recovered,
+        ArchProvisionState::Uninstalling(record)
+            if record.step == UninstallingStep::BootOrderRemovalReadBackVerified
+                && record.residual.is_empty()
+                && record.boot_order_proof.as_ref().is_some_and(|proof|
+                    proof.observed_after.as_ref() == Some(&BootOrderSnapshot {
+                        attributes: 7,
+                        ids: vec![boothop_core::BootId(8), boothop_core::BootId(9)],
+                    }))
+    ));
+    assert_eq!(backend.mutations.len(), writes_before);
+}
+
+#[test]
 fn uki_removed_recovery_accepts_expected_absence_but_rejects_unknown_presence() {
     for unknown_presence in [false, true] {
         let fs = support::FakeFs::installed();
         let ArchProvisionState::Ready(entry) = support::ready_state() else {
             unreachable!()
         };
+        let boot_id = entry.boot_id;
         let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
             operation_id: "uninstall-1".into(),
             operation_version: 1,
             owned_entry: entry,
             step: UninstallingStep::UkiRemoved,
             residual: vec![],
+            boot_order_proof: Some(BootOrderRemovalProof {
+                operation_id: "uninstall-1".into(),
+                operation_version: 1,
+                boot_id,
+                before: BootOrderSnapshot {
+                    attributes: 7,
+                    ids: vec![boot_id],
+                },
+                expected_after: BootOrderSnapshot {
+                    attributes: 7,
+                    ids: vec![],
+                },
+                observed_after: Some(BootOrderSnapshot {
+                    attributes: 7,
+                    ids: vec![],
+                }),
+            }),
         });
         fs.insert(
             "/var/lib/boothop/arch-provision.json",

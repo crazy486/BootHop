@@ -8,9 +8,9 @@ mod model;
 mod record;
 
 pub use arch_provision::{
-    ArchProvisionState, BuildMetadata, OwnedArchEntry, ProvisioningRecord, ProvisioningStep,
-    PublishMetadata, Residual, UninstalledRecord, UninstallingRecord, UninstallingStep,
-    decode_arch_provision_state, encode_arch_provision_state,
+    ArchProvisionState, BootOrderRemovalProof, BootOrderSnapshot, BuildMetadata, OwnedArchEntry,
+    ProvisioningRecord, ProvisioningStep, PublishMetadata, Residual, UninstalledRecord,
+    UninstallingRecord, UninstallingStep, decode_arch_provision_state, encode_arch_provision_state,
 };
 pub use device_path::parse_device_path;
 pub use error::{Error, PlatformOperation, ResidualAssessment, RollbackAssessment};

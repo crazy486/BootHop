@@ -5,11 +5,13 @@ use crate::{
     encode_record,
 };
 
-const RECORD_VERSION: u64 = 4;
+const RECORD_VERSION: u64 = 5;
 const IDENTITY_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1_048_576;
 const FIXED_IDENTITY_PATH: &str = "\\EFI\\BootHop\\arch.efi";
 const FIXED_UKI_PATH: &str = "EFI/BootHop/arch.efi";
+const BOOT_ORDER_ATTRIBUTES: u32 = 7;
+const MAX_BOOT_ORDER_ITEMS: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArchProvisionState {
@@ -64,6 +66,27 @@ pub struct UninstallingRecord {
     pub owned_entry: OwnedArchEntry,
     pub step: UninstallingStep,
     pub residual: Vec<Residual>,
+    /// Durable full-order evidence for the owned BootOrder removal. This is absent only before
+    /// the removal attempt is proof-bound; once present it is retained through all later steps.
+    pub boot_order_proof: Option<BootOrderRemovalProof>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootOrderSnapshot {
+    pub attributes: u32,
+    pub ids: Vec<BootId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootOrderRemovalProof {
+    pub operation_id: String,
+    pub operation_version: u64,
+    pub boot_id: BootId,
+    pub before: BootOrderSnapshot,
+    pub expected_after: BootOrderSnapshot,
+    /// Set only after an exact post-mutation readback. Recovery may advance a checkpoint only
+    /// when this exact expected snapshot is observed again.
+    pub observed_after: Option<BootOrderSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -148,6 +171,7 @@ enum WireState {
         owned_entry: WireOwnedArchEntry,
         step: UninstallingStep,
         residual: Vec<Residual>,
+        boot_order_proof: Option<WireBootOrderRemovalProof>,
     },
     Uninstalled {
         operation_id: String,
@@ -180,6 +204,24 @@ struct WireBuildMetadata {
 struct WirePublishMetadata {
     sha256: String,
     size: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireBootOrderRemovalProof {
+    operation_id: String,
+    operation_version: u64,
+    boot_id: u16,
+    before: WireBootOrderSnapshot,
+    expected_after: WireBootOrderSnapshot,
+    observed_after: Option<WireBootOrderSnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireBootOrderSnapshot {
+    attributes: u32,
+    ids: Vec<u16>,
 }
 
 /// Missing journal bytes alone mean Unprovisioned. Present bytes must decode completely.
@@ -228,16 +270,26 @@ pub fn decode_arch_provision_state(bytes: Option<&[u8]>) -> Result<ArchProvision
             owned_entry,
             step,
             residual,
+            boot_order_proof,
         } => {
             validate_operation(&operation_id, operation_version)?;
             let owned_entry = decode_owned_entry(owned_entry)?;
             require_publish_metadata(&owned_entry)?;
+            let boot_order_proof = decode_boot_order_proof(boot_order_proof)?;
+            validate_uninstall_boot_order_proof(
+                &operation_id,
+                operation_version,
+                &owned_entry,
+                step,
+                boot_order_proof.as_ref(),
+            )?;
             Ok(ArchProvisionState::Uninstalling(UninstallingRecord {
                 operation_id,
                 operation_version,
                 owned_entry,
                 step,
                 residual,
+                boot_order_proof,
             }))
         }
         WireState::Uninstalled {
@@ -280,12 +332,24 @@ pub fn encode_arch_provision_state(state: &ArchProvisionState) -> Result<Vec<u8>
         ArchProvisionState::Uninstalling(record) => {
             validate_operation(&record.operation_id, record.operation_version)?;
             require_publish_metadata(&record.owned_entry)?;
+            validate_uninstall_boot_order_proof(
+                &record.operation_id,
+                record.operation_version,
+                &record.owned_entry,
+                record.step,
+                record.boot_order_proof.as_ref(),
+            )?;
             WireState::Uninstalling {
                 operation_id: record.operation_id.clone(),
                 operation_version: record.operation_version,
                 owned_entry: encode_owned_entry(&record.owned_entry)?,
                 step: record.step,
                 residual: record.residual.clone(),
+                boot_order_proof: record
+                    .boot_order_proof
+                    .as_ref()
+                    .map(encode_boot_order_proof)
+                    .transpose()?,
             }
         }
         ArchProvisionState::Uninstalled(record) => {
@@ -307,6 +371,161 @@ pub fn encode_arch_provision_state(state: &ArchProvisionState) -> Result<Vec<u8>
         return Err(Error::ResourceLimit);
     }
     Ok(bytes)
+}
+
+fn decode_boot_order_proof(
+    wire: Option<WireBootOrderRemovalProof>,
+) -> Result<Option<BootOrderRemovalProof>, Error> {
+    wire.map(|proof| {
+        let proof = BootOrderRemovalProof {
+            operation_id: proof.operation_id,
+            operation_version: proof.operation_version,
+            boot_id: BootId(proof.boot_id),
+            before: decode_boot_order_snapshot(proof.before)?,
+            expected_after: decode_boot_order_snapshot(proof.expected_after)?,
+            observed_after: proof
+                .observed_after
+                .map(decode_boot_order_snapshot)
+                .transpose()?,
+        };
+        proof.validate().map(|()| proof)
+    })
+    .transpose()
+}
+
+fn decode_boot_order_snapshot(wire: WireBootOrderSnapshot) -> Result<BootOrderSnapshot, Error> {
+    let snapshot = BootOrderSnapshot {
+        attributes: wire.attributes,
+        ids: wire.ids.into_iter().map(BootId).collect(),
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+fn encode_boot_order_proof(
+    proof: &BootOrderRemovalProof,
+) -> Result<WireBootOrderRemovalProof, Error> {
+    proof.validate()?;
+    Ok(WireBootOrderRemovalProof {
+        operation_id: proof.operation_id.clone(),
+        operation_version: proof.operation_version,
+        boot_id: proof.boot_id.0,
+        before: encode_boot_order_snapshot(&proof.before),
+        expected_after: encode_boot_order_snapshot(&proof.expected_after),
+        observed_after: proof
+            .observed_after
+            .as_ref()
+            .map(encode_boot_order_snapshot),
+    })
+}
+
+fn encode_boot_order_snapshot(snapshot: &BootOrderSnapshot) -> WireBootOrderSnapshot {
+    WireBootOrderSnapshot {
+        attributes: snapshot.attributes,
+        ids: snapshot.ids.iter().map(|id| id.0).collect(),
+    }
+}
+
+fn validate_uninstall_boot_order_proof(
+    operation_id: &str,
+    operation_version: u64,
+    entry: &OwnedArchEntry,
+    step: UninstallingStep,
+    proof: Option<&BootOrderRemovalProof>,
+) -> Result<(), Error> {
+    match step {
+        UninstallingStep::Started => {
+            if proof.is_some() {
+                return Err(Error::CorruptRecord);
+            }
+        }
+        UninstallingStep::BootOrderRemovalAttempted
+        | UninstallingStep::BootOrderRemovalWriteCompleted => {
+            let Some(proof) = proof else {
+                return Err(Error::CorruptRecord);
+            };
+            proof.validate_binding(operation_id, operation_version, entry)?;
+            if proof.observed_after.is_some() {
+                return Err(Error::CorruptRecord);
+            }
+        }
+        _ => {
+            let Some(proof) = proof else {
+                return Err(Error::CorruptRecord);
+            };
+            proof.validate_binding(operation_id, operation_version, entry)?;
+            if proof.observed_after.as_ref() != Some(&proof.expected_after) {
+                return Err(Error::CorruptRecord);
+            }
+        }
+    }
+    Ok(())
+}
+
+impl BootOrderSnapshot {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.attributes != BOOT_ORDER_ATTRIBUTES || self.ids.len() > MAX_BOOT_ORDER_ITEMS {
+            return Err(Error::UnsupportedFormat);
+        }
+        let mut seen = vec![false; 65_536];
+        for id in &self.ids {
+            let slot = &mut seen[id.0 as usize];
+            if *slot {
+                return Err(Error::UnsupportedFormat);
+            }
+            *slot = true;
+        }
+        Ok(())
+    }
+}
+
+impl BootOrderRemovalProof {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_operation(&self.operation_id, self.operation_version)?;
+        self.before.validate()?;
+        self.expected_after.validate()?;
+        if self.before.attributes != self.expected_after.attributes
+            || !self.before.ids.contains(&self.boot_id)
+            || self.expected_after.ids.contains(&self.boot_id)
+        {
+            return Err(Error::CorruptRecord);
+        }
+        let expected = BootOrderSnapshot {
+            attributes: self.before.attributes,
+            ids: self
+                .before
+                .ids
+                .iter()
+                .copied()
+                .filter(|id| *id != self.boot_id)
+                .collect(),
+        };
+        if self.expected_after != expected {
+            return Err(Error::CorruptRecord);
+        }
+        if let Some(observed_after) = &self.observed_after
+            && observed_after != &self.expected_after
+        {
+            return Err(Error::CorruptRecord);
+        }
+        Ok(())
+    }
+
+    fn validate_binding(
+        &self,
+        operation_id: &str,
+        operation_version: u64,
+        entry: &OwnedArchEntry,
+    ) -> Result<(), Error> {
+        self.validate()?;
+        if self.operation_id != operation_id
+            || self.operation_version != operation_version
+            || self.boot_id != entry.boot_id
+        {
+            return Err(Error::IdentityMismatch);
+        }
+        Ok(())
+    }
 }
 
 fn validate_operation(id: &str, version: u64) -> Result<(), Error> {

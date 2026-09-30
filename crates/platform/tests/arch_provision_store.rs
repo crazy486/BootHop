@@ -2,8 +2,8 @@
 mod support;
 
 use boothop_core::{
-    ArchProvisionState, Error, PlatformOperation, ProvisioningRecord, ProvisioningStep, Residual,
-    UninstalledRecord, UninstallingStep,
+    ArchProvisionState, BootOrderRemovalProof, BootOrderSnapshot, Error, PlatformOperation,
+    ProvisioningRecord, ProvisioningStep, Residual, UninstalledRecord, UninstallingStep,
 };
 use boothop_platform::linux::{
     arch_provision_store::ArchProvisionStore, boot_order::begin_uninstall,
@@ -90,6 +90,10 @@ fn ready_allows_uninstall_intent_but_not_unverified_progress_or_metadata_changes
                 owned_entry: ready_entry_for_tombstone(),
                 step: UninstallingStep::UkiRemoved,
                 residual: Vec::new(),
+                boot_order_proof: Some(removal_proof(
+                    "test-uninstall",
+                    ready_entry_for_tombstone().boot_id,
+                )),
             }
         )),
         Err(Error::NotConfigured)
@@ -100,6 +104,26 @@ fn ready_entry_for_tombstone() -> boothop_core::OwnedArchEntry {
     match ready_state() {
         ArchProvisionState::Ready(entry) => entry,
         _ => unreachable!(),
+    }
+}
+
+fn removal_proof(operation_id: &str, boot_id: boothop_core::BootId) -> BootOrderRemovalProof {
+    BootOrderRemovalProof {
+        operation_id: operation_id.into(),
+        operation_version: 1,
+        boot_id,
+        before: BootOrderSnapshot {
+            attributes: 7,
+            ids: vec![boot_id],
+        },
+        expected_after: BootOrderSnapshot {
+            attributes: 7,
+            ids: vec![],
+        },
+        observed_after: Some(BootOrderSnapshot {
+            attributes: 7,
+            ids: vec![],
+        }),
     }
 }
 
@@ -128,6 +152,37 @@ fn provisioning_after_tombstone_requires_a_new_operation_id() {
     store.save(&replay).unwrap();
     assert_eq!(store.load(), Ok(replay));
     assert!(fs.journal().is_some());
+}
+
+#[test]
+fn generic_journal_save_cannot_alter_durable_boot_order_proof() {
+    let fs = FakeFs::installed();
+    let entry = ready_entry_for_tombstone();
+    let state = ArchProvisionState::Uninstalling(boothop_core::UninstallingRecord {
+        operation_id: "proof-op".into(),
+        operation_version: 1,
+        owned_entry: entry.clone(),
+        step: UninstallingStep::BootOrderRemoved,
+        residual: Vec::new(),
+        boot_order_proof: Some(removal_proof("proof-op", entry.boot_id)),
+    });
+    fs.set_journal(boothop_core::encode_arch_provision_state(&state).unwrap());
+    let original = fs.journal();
+    let mut forged = state.clone();
+    if let ArchProvisionState::Uninstalling(record) = &mut forged {
+        record
+            .boot_order_proof
+            .as_mut()
+            .unwrap()
+            .observed_after
+            .as_mut()
+            .unwrap()
+            .ids
+            .push(boothop_core::BootId(99));
+    }
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    assert_eq!(store.save(&forged), Err(Error::NotConfigured));
+    assert_eq!(fs.journal(), original);
 }
 
 fn pending_state() -> ArchProvisionState {

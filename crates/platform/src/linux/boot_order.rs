@@ -165,6 +165,7 @@ pub fn begin_uninstall(
         owned_entry: entry,
         step: UninstallingStep::Started,
         residual: Vec::new(),
+        boot_order_proof: None,
     }))
 }
 

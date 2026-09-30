@@ -270,6 +270,7 @@ fn validate_arch_provision_transition(
         (Ready(entry), Uninstalling(record)) => {
             record.step == UninstallingStep::Started
                 && record.residual.is_empty()
+                && record.boot_order_proof.is_none()
                 && record.owned_entry == *entry
         }
         // Ready metadata changes require a UKI readback proof bound to the journal
@@ -281,6 +282,7 @@ fn validate_arch_provision_transition(
                 && old.operation_version == new.operation_version
                 && old.owned_entry == new.owned_entry
                 && old.step == new.step
+                && old.boot_order_proof == new.boot_order_proof
                 && residuals_only_added(&old.residual, &new.residual)
         }
         // Uninstalled is written only by `complete_arch_uninstall`, after verifying the

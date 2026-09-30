@@ -1,8 +1,8 @@
 use boothop_core::{
-    ArchProvisionState, BootId, BuildMetadata, CanonicalDevicePathNode, CanonicalIdentity,
-    OwnedArchEntry, ProvisioningRecord, ProvisioningStep, PublishMetadata, Residual,
-    UninstalledRecord, UninstallingRecord, UninstallingStep, decode_arch_provision_state,
-    encode_arch_provision_state,
+    ArchProvisionState, BootId, BootOrderRemovalProof, BootOrderSnapshot, BuildMetadata,
+    CanonicalDevicePathNode, CanonicalIdentity, OwnedArchEntry, ProvisioningRecord,
+    ProvisioningStep, PublishMetadata, Residual, UninstalledRecord, UninstallingRecord,
+    UninstallingStep, decode_arch_provision_state, encode_arch_provision_state,
 };
 
 fn identity(path: &str) -> CanonicalIdentity {
@@ -49,6 +49,26 @@ fn ready() -> OwnedArchEntry {
     }
 }
 
+fn removal_proof(operation_id: &str, observed: bool) -> BootOrderRemovalProof {
+    BootOrderRemovalProof {
+        operation_id: operation_id.into(),
+        operation_version: 1,
+        boot_id: BootId(0x1234),
+        before: BootOrderSnapshot {
+            attributes: 7,
+            ids: vec![BootId(8), BootId(0x1234), BootId(9)],
+        },
+        expected_after: BootOrderSnapshot {
+            attributes: 7,
+            ids: vec![BootId(8), BootId(9)],
+        },
+        observed_after: observed.then_some(BootOrderSnapshot {
+            attributes: 7,
+            ids: vec![BootId(8), BootId(9)],
+        }),
+    }
+}
+
 #[test]
 fn unprovisioned_is_only_absent_journal() {
     assert_eq!(
@@ -78,6 +98,7 @@ fn lifecycle_records_roundtrip() {
             owned_entry: ready(),
             step: UninstallingStep::UkiRemoved,
             residual: vec![Residual::BootEntryMayExist],
+            boot_order_proof: Some(removal_proof("op-2", true)),
         }),
         ArchProvisionState::Uninstalled(UninstalledRecord {
             operation_id: "op-3".into(),
@@ -89,6 +110,75 @@ fn lifecycle_records_roundtrip() {
         let bytes = encode_arch_provision_state(&state).unwrap();
         assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(state));
     }
+}
+
+#[test]
+fn uninstall_boot_order_proof_roundtrips_complete_before_and_after_evidence() {
+    let entry = ready();
+    let state = ArchProvisionState::Uninstalling(UninstallingRecord {
+        operation_id: "op-proof".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: UninstallingStep::BootOrderRemoved,
+        residual: vec![],
+        boot_order_proof: Some(BootOrderRemovalProof {
+            operation_id: "op-proof".into(),
+            operation_version: 1,
+            boot_id: BootId(0x1234),
+            before: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![BootId(8), BootId(0x1234), BootId(9)],
+            },
+            expected_after: BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![BootId(8), BootId(9)],
+            },
+            observed_after: Some(BootOrderSnapshot {
+                attributes: 7,
+                ids: vec![BootId(8), BootId(9)],
+            }),
+        }),
+    });
+    let bytes = encode_arch_provision_state(&state).unwrap();
+    assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(state));
+}
+
+#[test]
+fn uninstall_boot_order_proof_rejects_missing_or_drifted_evidence() {
+    let ArchProvisionState::Ready(entry) = ArchProvisionState::Ready(ready()) else {
+        unreachable!()
+    };
+    let mut state = ArchProvisionState::Uninstalling(UninstallingRecord {
+        operation_id: "op-proof".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: UninstallingStep::BootOrderRemoved,
+        residual: vec![],
+        boot_order_proof: Some(removal_proof("op-proof", true)),
+    });
+    if let ArchProvisionState::Uninstalling(record) = &mut state {
+        record.boot_order_proof = None;
+    }
+    assert_eq!(
+        encode_arch_provision_state(&state),
+        Err(boothop_core::Error::CorruptRecord)
+    );
+
+    let ArchProvisionState::Uninstalling(record) = &mut state else {
+        unreachable!()
+    };
+    record.boot_order_proof = Some(removal_proof("op-proof", true));
+    record
+        .boot_order_proof
+        .as_mut()
+        .unwrap()
+        .expected_after
+        .ids
+        .reverse();
+    assert_eq!(
+        encode_arch_provision_state(&state),
+        Err(boothop_core::Error::CorruptRecord)
+    );
 }
 
 #[test]
@@ -110,6 +200,7 @@ fn state_specific_steps_and_complete_ownership_survive_roundtrip() {
         owned_entry: entry.clone(),
         step: UninstallingStep::BootOrderRemovalReadBackVerified,
         residual: vec![Residual::UkiMayRemain],
+        boot_order_proof: Some(removal_proof("remove-owned-entry", true)),
     });
 
     for state in [provisioning, uninstalling] {
@@ -176,6 +267,14 @@ fn every_provisioning_and_uninstall_step_roundtrips() {
             owned_entry: ready(),
             step,
             residual: vec![Residual::BootEntryMayExist, Residual::UkiMayRemain],
+            boot_order_proof: match step {
+                UninstallingStep::Started => None,
+                UninstallingStep::BootOrderRemovalAttempted
+                | UninstallingStep::BootOrderRemovalWriteCompleted => {
+                    Some(removal_proof("op-uninstall", false))
+                }
+                _ => Some(removal_proof("op-uninstall", true)),
+            },
         });
         let bytes = encode_arch_provision_state(&state).unwrap();
         assert_eq!(decode_arch_provision_state(Some(&bytes)), Ok(state));
@@ -264,6 +363,7 @@ fn intermediate_states_require_complete_owned_metadata() {
         owned_entry: entry,
         step: UninstallingStep::UkiRemovalAttempted,
         residual: vec![],
+        boot_order_proof: Some(removal_proof("op-2", true)),
     });
     assert_eq!(
         encode_arch_provision_state(&provisioning),
