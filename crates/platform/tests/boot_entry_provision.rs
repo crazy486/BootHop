@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::{
     ArchProvisionState, BootId, BuildMetadata, OwnedArchEntry, ProvisioningRecord,
     ProvisioningStep, PublishMetadata, Residual, arch_uki_load_option, canonicalize,

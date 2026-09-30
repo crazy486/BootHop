@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::{BootId, Error};
 use boothop_platform::linux::boot_order::decode_boot_order;
 

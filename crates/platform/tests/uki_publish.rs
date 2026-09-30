@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::{
     ArchProvisionState, ProvisioningRecord, ProvisioningStep, PublishMetadata, Residual,
     UninstallingRecord, UninstallingStep,

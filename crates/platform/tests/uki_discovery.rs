@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_platform::linux::uki::{
     ArchConfigFs, CmdlineSource, UkiInput, UkiPolicy, discover_uki_plan,
 };

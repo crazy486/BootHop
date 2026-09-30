@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_platform::linux::esp_identity::{
     BlockNode, DeviceNumber, EspIdentityError, EspIdentitySource, LinuxEspIdentitySource,
     MountedEsp, ReadOnlyLinuxFs, discover_esp_identity, parse_guid_uefi_bytes,
