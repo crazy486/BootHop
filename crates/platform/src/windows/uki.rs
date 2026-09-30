@@ -195,6 +195,9 @@ fn pe_sections(image: &[u8]) -> Result<Vec<PeSection<'_>>, UkiPreflightError> {
         return Err(malformed());
     }
     let pe_offset = read_u32(image, 0x3c).ok_or_else(malformed)? as usize;
+    if pe_offset < 0x40 {
+        return Err(malformed());
+    }
     let coff = pe_offset.checked_add(4).ok_or_else(malformed)?;
     if image.get(pe_offset..coff) != Some(b"PE\0\0") {
         return Err(malformed());
@@ -205,10 +208,10 @@ fn pe_sections(image: &[u8]) -> Result<Vec<PeSection<'_>>, UkiPreflightError> {
     let optional = coff.checked_add(20).ok_or_else(malformed)?;
     let optional_end = optional.checked_add(optional_size).ok_or_else(malformed)?;
     let magic = read_u16(image, optional).ok_or_else(malformed)?;
-    let minimum_optional_size = match magic {
-        0x10b => 96,
-        0x20b => 112,
-        _ => return Err(malformed()),
+    let minimum_optional_size = if magic == 0x20b {
+        112
+    } else {
+        return Err(malformed());
     };
     if machine != 0x8664
         || section_count == 0
@@ -237,7 +240,7 @@ fn pe_sections(image: &[u8]) -> Result<Vec<PeSection<'_>>, UkiPreflightError> {
         let raw_size = read_u32(image, header + 16).ok_or_else(malformed)? as usize;
         let raw_offset = read_u32(image, header + 20).ok_or_else(malformed)? as usize;
         let raw_end = raw_offset.checked_add(raw_size).ok_or_else(malformed)?;
-        if raw_size != 0 && raw_end > image.len() {
+        if raw_size != 0 && (raw_offset < table_end || raw_end > image.len()) {
             return Err(malformed());
         }
         sections.push(PeSection {

@@ -86,8 +86,11 @@ fn volume(partition: GptPartition) -> EfiVolume {
 
 // A small structurally valid PE32+ image containing non-empty UKI sections.
 fn valid_uki() -> Vec<u8> {
+    valid_uki_at(0x80)
+}
+
+fn valid_uki_at(pe_offset: usize) -> Vec<u8> {
     let names = [b".linux".as_slice(), b".osrel", b".cmdline", b".initrd"];
-    let pe_offset = 0x80;
     let section_count = names.len();
     let optional_size = 0xf0;
     let table = pe_offset + 4 + 20 + optional_size;
@@ -274,6 +277,37 @@ fn rejects_corrupt_pe_headers_and_truncated_section_data() {
     unsupported_machine[0x84..0x86].copy_from_slice(&0xaa64_u16.to_le_bytes());
     assert_eq!(
         preflight_uki(&fake(Ok(unsupported_machine)), &identity()),
+        Err(UkiPreflightError::MalformedPe)
+    );
+}
+
+#[test]
+fn rejects_pe32_optional_headers_for_x86_64_uki() {
+    let mut pe32 = valid_uki();
+    pe32[0x98..0x9a].copy_from_slice(&0x10b_u16.to_le_bytes());
+    assert_eq!(
+        preflight_uki(&fake(Ok(pe32)), &identity()),
+        Err(UkiPreflightError::MalformedPe)
+    );
+}
+
+#[test]
+fn rejects_pe_signature_offsets_inside_the_dos_header() {
+    assert_eq!(
+        preflight_uki(&fake(Ok(valid_uki_at(0x20))), &identity()),
+        Err(UkiPreflightError::MalformedPe)
+    );
+}
+
+#[test]
+fn rejects_section_data_overlapping_pe_headers_or_section_table() {
+    let mut overlapping_section = valid_uki();
+    let section_table_end = 0x80 + 4 + 20 + 0xf0 + 4 * 40;
+    let first_section = 0x80 + 4 + 20 + 0xf0;
+    overlapping_section[first_section + 20..first_section + 24]
+        .copy_from_slice(&((section_table_end - 1) as u32).to_le_bytes());
+    assert_eq!(
+        preflight_uki(&fake(Ok(overlapping_section)), &identity()),
         Err(UkiPreflightError::MalformedPe)
     );
 }
