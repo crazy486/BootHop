@@ -1,3 +1,4 @@
+pub mod arch_config_fs;
 pub mod arch_provision_store;
 pub mod boot_entry;
 pub mod boot_order;
