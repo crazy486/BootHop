@@ -102,6 +102,96 @@ pub fn production_lifecycle(_operation: protocol::LifecycleOperation) -> protoco
     protocol::LifecycleStatus::Failed
 }
 
+/// Run an injected Linux lifecycle request while holding the same ownership-journal lock from
+/// the initial state read through coordinator status mapping. The derivation callbacks are
+/// trusted helper inputs and are called only after lock acquisition and a successful initial
+/// journal read. Production dispatch deliberately does not call this until trusted system
+/// adapters are available.
+#[cfg(target_os = "linux")]
+pub fn run_lifecycle_with<F, B, P, U>(
+    operation: protocol::LifecycleOperation,
+    fs: F,
+    backend: &mut B,
+    derive_provision_intent: P,
+    derive_uninstall_id: U,
+) -> protocol::LifecycleStatus
+where
+    F: boothop_platform::linux::store::Filesystem,
+    B: boothop_platform::linux::coordinator::LifecycleBackend,
+    P: FnOnce(
+        &boothop_core::ArchProvisionState,
+    ) -> Result<boothop_platform::linux::coordinator::ProvisionIntent, Error>,
+    U: FnOnce(&boothop_core::ArchProvisionState) -> Result<String, Error>,
+{
+    use boothop_core::ArchProvisionState;
+    use boothop_platform::linux::{arch_provision_store::ArchProvisionStore, coordinator};
+
+    let mut store = match ArchProvisionStore::acquire(fs) {
+        Ok(store) => store,
+        Err(Error::Busy) => return protocol::LifecycleStatus::Failed,
+        Err(_) => return protocol::LifecycleStatus::RecoveryRequired,
+    };
+    let initial = match store.load() {
+        Ok(state) => state,
+        Err(_) => return protocol::LifecycleStatus::RecoveryRequired,
+    };
+
+    match (&operation, &initial) {
+        (protocol::LifecycleOperation::ProvisionArchEntry, ArchProvisionState::Ready(_)) => {
+            return protocol::LifecycleStatus::AlreadyPresent;
+        }
+        (
+            protocol::LifecycleOperation::UninstallArchEntry,
+            ArchProvisionState::Unprovisioned | ArchProvisionState::Uninstalled(_),
+        ) => return protocol::LifecycleStatus::NotPresent,
+        (
+            protocol::LifecycleOperation::ProvisionArchEntry,
+            ArchProvisionState::Unprovisioned | ArchProvisionState::Uninstalled(_),
+        )
+        | (protocol::LifecycleOperation::UninstallArchEntry, ArchProvisionState::Ready(_)) => {}
+        (_, ArchProvisionState::Provisioning(_) | ArchProvisionState::Uninstalling(_)) => {
+            return protocol::LifecycleStatus::RecoveryRequired;
+        }
+    }
+
+    let result = match operation {
+        protocol::LifecycleOperation::ProvisionArchEntry => {
+            let intent = match derive_provision_intent(&initial) {
+                Ok(intent) => intent,
+                Err(_) => return protocol::LifecycleStatus::Failed,
+            };
+            coordinator::provision(&mut store, backend, intent)
+        }
+        protocol::LifecycleOperation::UninstallArchEntry => {
+            let operation_id = match derive_uninstall_id(&initial) {
+                Ok(operation_id) => operation_id,
+                Err(_) => return protocol::LifecycleStatus::Failed,
+            };
+            coordinator::uninstall(&mut store, backend, operation_id)
+        }
+    };
+
+    match result {
+        Ok(ArchProvisionState::Ready(_))
+            if matches!(operation, protocol::LifecycleOperation::ProvisionArchEntry) =>
+        {
+            protocol::LifecycleStatus::Succeeded
+        }
+        Ok(ArchProvisionState::Uninstalled(_))
+            if matches!(operation, protocol::LifecycleOperation::UninstallArchEntry) =>
+        {
+            protocol::LifecycleStatus::Succeeded
+        }
+        Ok(_) => protocol::LifecycleStatus::RecoveryRequired,
+        Err(_) => match store.load() {
+            // A clean rejection with an unchanged terminal record has no residual to recover.
+            // Any changed/nonterminal state or unreadable journal is fail-closed.
+            Ok(current) if current == initial => protocol::LifecycleStatus::Failed,
+            Ok(_) | Err(_) => protocol::LifecycleStatus::RecoveryRequired,
+        },
+    }
+}
+
 /// Complete one authenticated Windows operation. The operation guard is
 /// acquired before platform construction and remains in scope until the
 /// terminal `send` attempt has returned.
