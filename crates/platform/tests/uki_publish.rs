@@ -486,6 +486,23 @@ fn missing_or_unknown_journal_state_fails_closed() {
 }
 
 #[test]
+fn residual_pending_checkpoint_cannot_restart_publication() {
+    let plan = plan();
+    let mut state = provisioning_state();
+    if let ArchProvisionState::Provisioning(record) = &mut state {
+        record.residual.push(Residual::UkiMayRemain);
+    }
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut journal = fake_journal(state.clone(), events.clone());
+    let mut fs = fake_publish_fs(BTreeMap::new(), FailAt::None, events);
+    let mut builder = FakeBuilder::new(FailAt::None);
+
+    assert!(build_and_publish_uki(&plan, &state, &mut journal, &mut builder, &mut fs).is_err());
+    assert_eq!(builder.build_calls, 0);
+    assert!(fs.files.is_empty());
+}
+
+#[test]
 fn interrupted_initial_publication_is_reconciliation_only() {
     let plan = plan();
     let pending = provisioning_state();

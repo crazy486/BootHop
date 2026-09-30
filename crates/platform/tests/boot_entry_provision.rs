@@ -343,6 +343,16 @@ fn provisioning_blocks_when_bootnext_is_already_set_or_appears_during_recheck() 
     assert_eq!(result.error, boothop_core::Error::Busy);
     assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
     assert!(!raced.contains(spec.boot_id.0));
+
+    let (esp, mut uncertain, spec) = crate_test_state();
+    if let ArchProvisionState::Provisioning(record) = &mut uncertain {
+        record.residual.push(Residual::BootEntryMayExist);
+    }
+    let mut calls = FakeCalls::new();
+    let result = create_and_verify_entry(&mut calls, &esp, &spec, &uncertain).unwrap_err();
+    assert_eq!(result.error, boothop_core::Error::NotConfigured);
+    assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
+    assert!(!calls.contains(spec.boot_id.0));
 }
 
 #[test]
@@ -455,7 +465,7 @@ fn crate_test_state() -> (EspPartitionIdentity, ArchProvisionState, BootEntrySpe
         operation_version: 1,
         owned_entry: entry,
         step: ProvisioningStep::BootEntryCreateAttempted,
-        residual: vec![Residual::UkiMayRemain],
+        residual: Vec::new(),
     });
     (esp, state, spec)
 }

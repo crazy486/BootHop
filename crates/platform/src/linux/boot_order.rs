@@ -7,7 +7,7 @@
 
 use boothop_core::{
     ArchProvisionState, BootId, CanonicalIdentity, Error, OwnedArchEntry, ProvisioningStep,
-    Residual, UninstallingRecord, UninstallingStep, arch_uki_load_option_from_identity,
+    UninstallingRecord, UninstallingStep, arch_uki_load_option_from_identity,
     serialize_load_option,
 };
 
@@ -73,6 +73,43 @@ impl BootOrderValue {
     }
 }
 
+/// Decode the raw efivarfs representation of BootOrder.
+///
+/// efivarfs prefixes the variable payload with its four-byte EFI attributes field. This
+/// parser accepts only the attributes and payload shape used by firmware BootOrder values;
+/// malformed or ambiguous values are rejected before they can enter lifecycle operations.
+pub fn decode_boot_order(raw: &[u8]) -> Result<BootOrderValue, Error> {
+    let attributes = raw
+        .get(..4)
+        .and_then(|header| <[u8; 4]>::try_from(header).ok())
+        .map(u32::from_le_bytes)
+        .ok_or(Error::UnsupportedFormat)?;
+    if attributes != BOOT_ATTRIBUTES {
+        return Err(Error::UnsupportedFormat);
+    }
+
+    let payload = &raw[4..];
+    if !payload.len().is_multiple_of(2) {
+        return Err(Error::UnsupportedFormat);
+    }
+    let count = payload.len() / 2;
+    if count > MAX_BOOT_ORDER_ITEMS {
+        return Err(Error::ResourceLimit);
+    }
+
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(count)
+        .map_err(|_| Error::ResourceLimit)?;
+    ids.extend(
+        payload
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| BootId(u16::from_le_bytes([pair[0], pair[1]]))),
+    );
+    BootOrderValue::new(attributes, ids)
+}
+
 /// The only firmware capabilities required by the BootOrder use case.
 pub trait BootOrderIo {
     fn read_boot_next(&mut self) -> Result<Option<BootId>, Error>;
@@ -116,7 +153,8 @@ pub fn append_owned_entry<I: BootOrderIo>(
 ) -> Result<(), Error> {
     let id = match state {
         ArchProvisionState::Provisioning(record)
-            if record.step == ProvisioningStep::BootOrderAppendAttempted =>
+            if record.step == ProvisioningStep::BootOrderAppendAttempted
+                && record.residual.is_empty() =>
         {
             record.owned_entry.boot_id
         }
@@ -143,9 +181,6 @@ pub fn append_owned_entry<I: BootOrderIo>(
         return Err(Error::Busy);
     }
     io.write_boot_order(&expected)?;
-    if let ArchProvisionState::Provisioning(record) = state {
-        record.step = ProvisioningStep::BootOrderAppendWriteCompleted;
-    }
     let actual = io.read_boot_order()?;
     actual.validate()?;
     if actual != expected {
@@ -153,9 +188,6 @@ pub fn append_owned_entry<I: BootOrderIo>(
     }
     if let ArchProvisionState::Provisioning(record) = state {
         record.step = ProvisioningStep::BootOrderReadBackVerified;
-        record
-            .residual
-            .retain(|residual| *residual != Residual::BootOrderMayContainEntry);
     }
     Ok(())
 }
@@ -215,9 +247,6 @@ pub fn remove_owned_from_order<I: BootOrderIo>(
         return Err(Error::Busy);
     }
     io.write_boot_order(&expected)?;
-    if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::BootOrderRemovalWriteCompleted;
-    }
     let actual = io.read_boot_order()?;
     actual.validate()?;
     if actual != expected {
@@ -225,9 +254,6 @@ pub fn remove_owned_from_order<I: BootOrderIo>(
     }
     if let ArchProvisionState::Uninstalling(record) = state {
         record.step = UninstallingStep::BootOrderRemovalReadBackVerified;
-        record
-            .residual
-            .retain(|residual| *residual != Residual::BootOrderMayContainEntry);
     }
     Ok(())
 }
@@ -251,7 +277,9 @@ pub fn verify_order_absent_before_entry_delete<I: BootOrderIo>(
 
 fn uninstall_id(state: &ArchProvisionState, expected: UninstallingStep) -> Result<BootId, Error> {
     match state {
-        ArchProvisionState::Uninstalling(record) if record.step == expected => {
+        ArchProvisionState::Uninstalling(record)
+            if record.step == expected && record.residual.is_empty() =>
+        {
             Ok(record.owned_entry.boot_id)
         }
         _ => Err(Error::NotConfigured),
@@ -268,7 +296,8 @@ pub fn remove_owned_entry<I: OwnedBootEntryIo, B: BootOrderIo>(
 ) -> Result<(), Error> {
     let (entry_id, entry_identity) = match state {
         ArchProvisionState::Uninstalling(record)
-            if record.step == UninstallingStep::BootEntryRemovalAttempted =>
+            if record.step == UninstallingStep::BootEntryRemovalAttempted
+                && record.residual.is_empty() =>
         {
             (
                 record.owned_entry.boot_id,
@@ -306,17 +335,11 @@ pub fn remove_owned_entry<I: OwnedBootEntryIo, B: BootOrderIo>(
         return Err(Error::Busy);
     }
     io.delete_boot_entry_if_exact(entry_id, &expected)?;
-    if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::BootEntryDeleteCompleted;
-    }
     if io.read_boot_entry(entry_id)?.is_some() {
         return Err(Error::ReadbackFailed);
     }
     if let ArchProvisionState::Uninstalling(record) = state {
         record.step = UninstallingStep::BootEntryRemovalReadBackVerified;
-        record
-            .residual
-            .retain(|residual| *residual != Residual::BootEntryMayExist);
     }
     Ok(())
 }

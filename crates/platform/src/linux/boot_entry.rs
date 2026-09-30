@@ -162,7 +162,8 @@ pub fn create_and_verify_entry<C: LinuxCalls>(
 ) -> Result<(), BootEntryFailure> {
     let state_entry = match state {
         ArchProvisionState::Provisioning(record)
-            if record.step == ProvisioningStep::BootEntryCreateAttempted =>
+            if record.step == ProvisioningStep::BootEntryCreateAttempted
+                && record.residual.is_empty() =>
         {
             &record.owned_entry
         }

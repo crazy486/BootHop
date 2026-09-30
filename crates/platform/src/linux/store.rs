@@ -1,7 +1,8 @@
 use crate::ProtectedStore;
 use boothop_core::{
-    ArchProvisionState, Error, PlatformOperation, RecordState, TargetRecord,
-    decode_arch_provision_state, decode_record, encode_arch_provision_state, encode_record,
+    ArchProvisionState, Error, PlatformOperation, ProvisioningStep, RecordState, TargetRecord,
+    UninstallingStep, decode_arch_provision_state, decode_record, encode_arch_provision_state,
+    encode_record,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -105,7 +106,8 @@ impl<F: Filesystem> LockedStore<F> {
 
     /// Atomically saves the Arch ownership journal without touching targets.json.
     pub fn save_arch_provision_state(&mut self, state: &ArchProvisionState) -> Result<(), Error> {
-        self.load_arch_provision_state()?;
+        let current = self.load_arch_provision_state()?;
+        validate_arch_provision_transition(&current, state)?;
         let bytes = encode_arch_provision_state(state)?;
         self.atomic_replace(ARCH_RECORD, ".arch-provision", &bytes)
     }
@@ -222,6 +224,75 @@ impl<F: Filesystem> LockedStore<F> {
             .map_err(|raw_code| Error::StoreDurabilityUnknown { raw_code })
     }
 }
+
+/// The generic save API persists lifecycle intent and same-checkpoint residuals only. A
+/// readback-verified checkpoint needs a future proof-bound commit API; accepting it here would
+/// let any caller manufacture ownership by writing a syntactically valid state.
+fn validate_arch_provision_transition(
+    current: &ArchProvisionState,
+    next: &ArchProvisionState,
+) -> Result<(), Error> {
+    use ArchProvisionState::{Provisioning, Ready, Uninstalled, Uninstalling, Unprovisioned};
+
+    if current == next {
+        // A fully identical retry is safe after an uncertain fsync result.
+        return Ok(());
+    }
+
+    let allowed = match (current, next) {
+        (Unprovisioned, Provisioning(record)) => {
+            record.step == ProvisioningStep::UkiPublicationPending && record.residual.is_empty()
+        }
+        (Uninstalled(old), Provisioning(record)) => {
+            record.step == ProvisioningStep::UkiPublicationPending
+                && record.residual.is_empty()
+                && record.operation_id != old.operation_id
+        }
+        (Provisioning(old), Provisioning(new)) => {
+            old.operation_id == new.operation_id
+                && old.operation_version == new.operation_version
+                && old.owned_entry == new.owned_entry
+                && old.step == new.step
+                && residuals_only_added(&old.residual, &new.residual)
+        }
+        (Ready(entry), Uninstalling(record)) => {
+            record.step == UninstallingStep::Started
+                && record.residual.is_empty()
+                && record.owned_entry == *entry
+        }
+        // Ready metadata changes require a UKI readback proof bound to the journal
+        // transaction. Generic state saves do not carry that proof, so they cannot
+        // transfer ownership to newly published bytes.
+        (Ready(_), Ready(_)) => false,
+        (Uninstalling(old), Uninstalling(new)) => {
+            old.operation_id == new.operation_id
+                && old.operation_version == new.operation_version
+                && old.owned_entry == new.owned_entry
+                && old.step == new.step
+                && residuals_only_added(&old.residual, &new.residual)
+        }
+        // Uninstalled is written only by `complete_arch_uninstall`, after verifying the
+        // terminal cleanup checkpoint. Do not permit callers to manufacture it via save.
+        (_, Uninstalled(_)) => false,
+        _ => false,
+    };
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(Error::NotConfigured)
+    }
+}
+
+fn residuals_only_added(old: &[boothop_core::Residual], new: &[boothop_core::Residual]) -> bool {
+    old.len() <= new.len()
+        && old.iter().all(|residual| new.contains(residual))
+        && new
+            .iter()
+            .enumerate()
+            .all(|(index, residual)| !new[..index].contains(residual))
+}
+
 impl<F: Filesystem> ProtectedStore for LockedStore<F> {
     fn load(&mut self) -> Result<RecordState, Error> {
         let mut file = match self.fs.open(&self.dir, RECORD, OpenKind::ExistingFile) {

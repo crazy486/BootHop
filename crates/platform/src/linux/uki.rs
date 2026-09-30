@@ -602,7 +602,8 @@ pub fn build_and_publish_uki(
         ArchProvisionState::Provisioning(record)
             if record.owned_entry.uki_path == FINAL_UKI_PATH
                 && record.owned_entry.publish.is_none()
-                && record.step == boothop_core::ProvisioningStep::UkiPublicationPending =>
+                && record.step == boothop_core::ProvisioningStep::UkiPublicationPending
+                && record.residual.is_empty() =>
         {
             publish_initial_uki(plan, journal, builder, publisher)
         }

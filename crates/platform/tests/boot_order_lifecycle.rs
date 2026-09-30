@@ -30,7 +30,7 @@ fn provisioning(step: ProvisioningStep) -> ArchProvisionState {
         operation_version: 1,
         owned_entry: entry(),
         step,
-        residual: vec![Residual::BootOrderMayContainEntry],
+        residual: Vec::new(),
     })
 }
 
@@ -40,11 +40,7 @@ fn uninstall(step: UninstallingStep) -> ArchProvisionState {
         operation_version: 1,
         owned_entry: entry(),
         step,
-        residual: vec![
-            Residual::BootOrderMayContainEntry,
-            Residual::BootEntryMayExist,
-            Residual::UkiMayRemain,
-        ],
+        residual: Vec::new(),
     })
 }
 
@@ -181,8 +177,41 @@ fn append_readback_mismatch_is_residual_and_is_never_retried() {
     );
     assert_eq!(firmware.writes, 1);
     assert!(
-        matches!(state, ArchProvisionState::Provisioning(ref record) if record.step == ProvisioningStep::BootOrderAppendWriteCompleted)
+        matches!(state, ArchProvisionState::Provisioning(ref record) if record.step == ProvisioningStep::BootOrderAppendAttempted)
     );
+    if let ArchProvisionState::Provisioning(record) = &mut state {
+        record.residual.push(Residual::BootOrderMayContainEntry);
+    }
+    assert_eq!(
+        append_owned_entry(&mut firmware, &mut state),
+        Err(boothop_core::Error::NotConfigured)
+    );
+    assert_eq!(firmware.writes, 1);
+}
+
+#[test]
+fn residual_checkpoint_blocks_bootorder_write_and_removal_retry() {
+    let mut firmware = FakeFirmware::with_order(&[1, 2]);
+    let mut append_state = provisioning(ProvisioningStep::BootOrderAppendAttempted);
+    if let ArchProvisionState::Provisioning(record) = &mut append_state {
+        record.residual.push(Residual::BootOrderMayContainEntry);
+    }
+    assert_eq!(
+        append_owned_entry(&mut firmware, &mut append_state),
+        Err(boothop_core::Error::NotConfigured)
+    );
+    assert_eq!(firmware.writes, 0);
+
+    let mut removal_firmware = FakeFirmware::with_order(&[9, 0x1234]);
+    let mut removal_state = uninstall(UninstallingStep::BootOrderRemovalAttempted);
+    if let ArchProvisionState::Uninstalling(record) = &mut removal_state {
+        record.residual.push(Residual::BootOrderMayContainEntry);
+    }
+    assert_eq!(
+        remove_owned_from_order(&mut removal_firmware, &mut removal_state),
+        Err(boothop_core::Error::NotConfigured)
+    );
+    assert_eq!(removal_firmware.writes, 0);
 }
 
 #[test]
@@ -364,8 +393,11 @@ fn entry_delete_requires_exact_owned_bytes_and_exact_readback() {
     );
     assert_eq!(retained.deletes, 1);
     assert!(
-        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::BootEntryDeleteCompleted)
+        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::BootEntryRemovalAttempted)
     );
+    if let ArchProvisionState::Uninstalling(record) = &mut retained_state {
+        record.residual.push(Residual::BootEntryMayExist);
+    }
     assert_eq!(
         remove_owned_entry(&mut retained, &mut firmware, &mut retained_state),
         Err(boothop_core::Error::NotConfigured)
@@ -502,8 +534,11 @@ fn uki_delete_requires_regular_exact_hash_and_size() {
     );
     assert_eq!(retained.removes, 1);
     assert!(
-        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::UkiDeleteCompleted)
+        matches!(retained_state, ArchProvisionState::Uninstalling(ref record) if record.step == UninstallingStep::UkiRemovalAttempted)
     );
+    if let ArchProvisionState::Uninstalling(record) = &mut retained_state {
+        record.residual.push(Residual::UkiMayRemain);
+    }
     assert_eq!(
         remove_owned_uki(&mut retained, &mut retained_state),
         Err(boothop_core::Error::NotConfigured)
@@ -533,7 +568,9 @@ fn journal_is_removed_only_after_the_final_uki_checkpoint() {
     if let ArchProvisionState::Uninstalling(record) = &mut complete {
         record.residual.clear();
     }
-    store.save(&complete).unwrap();
+    // Seed the already verified terminal checkpoint; the transition guard is covered by the
+    // ArchProvisionStore tests, while this test focuses on tombstone replacement.
+    fs.set_journal(boothop_core::encode_arch_provision_state(&complete).unwrap());
     store.complete_uninstall(&complete).unwrap();
     assert!(matches!(
         store.load(),
@@ -549,7 +586,7 @@ fn tombstone_survives_directory_sync_uncertainty() {
     if let ArchProvisionState::Uninstalling(record) = &mut complete {
         record.residual.clear();
     }
-    store.save(&complete).unwrap();
+    fs.set_journal(boothop_core::encode_arch_provision_state(&complete).unwrap());
     fs.0.borrow_mut().fail = Some(("dir_fsync", 5));
     assert_eq!(
         store.complete_uninstall(&complete),

@@ -1,6 +1,6 @@
 //! Exact-path, journal-hash-gated UKI cleanup boundary.
 
-use boothop_core::{ArchProvisionState, Error, Residual, UninstallingStep};
+use boothop_core::{ArchProvisionState, Error, UninstallingStep};
 use sha2::{Digest, Sha256};
 
 const FIXED_UKI_PATH: &str = "EFI/BootHop/arch.efi";
@@ -33,7 +33,8 @@ pub fn remove_owned_uki<I: OwnedUkiIo>(
 ) -> Result<(), Error> {
     let expected = match state {
         ArchProvisionState::Uninstalling(record)
-            if record.step == UninstallingStep::UkiRemovalAttempted =>
+            if record.step == UninstallingStep::UkiRemovalAttempted
+                && record.residual.is_empty() =>
         {
             record
                 .owned_entry
@@ -52,17 +53,11 @@ pub fn remove_owned_uki<I: OwnedUkiIo>(
         OwnedUkiState::Symlink | OwnedUkiState::Other => return Err(Error::IdentityMismatch),
     }
     io.remove_fixed_if_expected(FIXED_UKI_PATH, expected.0, expected.1)?;
-    if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::UkiDeleteCompleted;
-    }
     if io.inspect_fixed(FIXED_UKI_PATH)? != OwnedUkiState::Missing {
         return Err(Error::ReadbackFailed);
     }
     if let ArchProvisionState::Uninstalling(record) = state {
         record.step = UninstallingStep::UkiRemoved;
-        record
-            .residual
-            .retain(|residual| *residual != Residual::UkiMayRemain);
     }
     Ok(())
 }
