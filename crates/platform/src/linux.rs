@@ -1,6 +1,7 @@
 pub mod arch_provision_store;
 pub mod boot_entry;
 pub mod boot_order;
+pub mod coordinator;
 pub mod esp_identity;
 pub mod firmware;
 pub mod owned_uki;

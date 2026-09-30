@@ -26,4 +26,14 @@ impl<F: Filesystem> ArchProvisionStore<F> {
     pub fn complete_uninstall(&mut self, state: &ArchProvisionState) -> Result<(), Error> {
         self.locked.complete_arch_uninstall(state)
     }
+
+    /// Commit a coordinator proof while retaining the same operation.lock guard.  The proof
+    /// type and constructor are crate-private so callers cannot manufacture lifecycle
+    /// checkpoints through this API.
+    pub(crate) fn commit_proof(
+        &mut self,
+        proof: &super::coordinator::LifecycleProof,
+    ) -> Result<(), Error> {
+        self.locked.commit_arch_provision_proof(proof)
+    }
 }

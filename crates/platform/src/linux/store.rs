@@ -112,6 +112,18 @@ impl<F: Filesystem> LockedStore<F> {
         self.atomic_replace(ARCH_RECORD, ".arch-provision", &bytes)
     }
 
+    /// Commit a lifecycle transition only from a proof created by the trusted coordinator.
+    /// Generic saves intentionally cannot advance a mutation checkpoint.
+    pub(crate) fn commit_arch_provision_proof(
+        &mut self,
+        proof: &super::coordinator::LifecycleProof,
+    ) -> Result<(), Error> {
+        let current = self.load_arch_provision_state()?;
+        proof.validate(&current)?;
+        let bytes = encode_arch_provision_state(proof.next())?;
+        self.atomic_replace(ARCH_RECORD, ".arch-provision", &bytes)
+    }
+
     /// Replace the completed uninstall record with a terminal ownership tombstone. The
     /// journaled metadata remains available if directory durability becomes uncertain.
     pub fn complete_arch_uninstall(&mut self, expected: &ArchProvisionState) -> Result<(), Error> {
