@@ -210,6 +210,7 @@ fn lifecycle_client_maps_mismatched_response_id_to_non_retryable_unknown() {
     struct MismatchedResponseFake {
         events: VecDeque<Result<Event, TransportError>>,
         now: Duration,
+        response_id: boothop_protocol::RequestId,
     }
 
     impl Boundary for MismatchedResponseFake {
@@ -228,7 +229,9 @@ fn lifecycle_client_maps_mismatched_response_id_to_non_retryable_unknown() {
                 .unwrap_or(Err(TransportError::Timeout))
         }
 
-        fn send(&mut self, _: &[u8], _: Duration) -> Result<(), TransportError> {
+        fn send(&mut self, request: &[u8], _: Duration) -> Result<(), TransportError> {
+            let request = boothop_protocol::decode_lifecycle_request_envelope(request).unwrap();
+            assert_ne!(request.request_id, self.response_id);
             Ok(())
         }
 
@@ -246,6 +249,7 @@ fn lifecycle_client_maps_mismatched_response_id_to_non_retryable_unknown() {
             Ok(Event::Exit(0)),
         ]),
         now: Duration::ZERO,
+        response_id: wrong_id,
     };
     let mut client = LifecycleClient::new(fake);
 
