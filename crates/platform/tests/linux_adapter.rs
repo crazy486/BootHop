@@ -962,6 +962,12 @@ fn switch_write_readback_and_reboot_evidence_matrix() {
         assert_eq!(calls.0.borrow().writes, [(0, vec![7, 0, 0, 0, 7, 0])]);
         assert_eq!(calls.0.borrow().flags, [1]);
         let s = calls.0.borrow();
+        assert!(
+            s.events.iter().all(|event| !event.contains("CreateEntry")
+                && !event.contains("DeleteEntry")
+                && (!event.contains(":CreateNext") || event.contains(&name("BootNext")))),
+            "ordinary Linux Switch must not invoke Boot####, BootOrder, or UKI lifecycle mutations"
+        );
         let write = s.events.iter().position(|e| e == "write").unwrap();
         let reboot = s.events.iter().position(|e| e == "reboot").unwrap();
         assert!(

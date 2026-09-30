@@ -301,7 +301,13 @@ impl Filesystem for FakeFs {
         self.stage("rename")?;
         let mut s = self.0.borrow_mut();
         let node = s.nodes.remove(&format!("{}/{from}", dir.path)).ok_or(2)?;
+        let journal_bytes = (to == "arch-provision.json").then(|| node.borrow().bytes.clone());
         s.nodes.insert(format!("{}/{to}", dir.path), node);
+        if let Some(bytes) = journal_bytes
+            && let Ok(state) = boothop_core::decode_arch_provision_state(Some(&bytes))
+        {
+            s.events.push(journal_event(&state).to_owned());
+        }
         Ok(())
     }
     fn unlink(&self, dir: &Handle, name: &str) -> Result<(), i32> {
@@ -311,5 +317,48 @@ impl Filesystem for FakeFs {
             .nodes
             .remove(&format!("{}/{name}", dir.path));
         Ok(())
+    }
+}
+
+fn journal_event(state: &ArchProvisionState) -> &'static str {
+    use boothop_core::{ProvisioningStep as P, UninstallingStep as U};
+    match state {
+        ArchProvisionState::Unprovisioned => "journal:unprovisioned",
+        ArchProvisionState::Ready(_) => "journal:ready",
+        ArchProvisionState::Uninstalled(_) => "journal:uninstalled",
+        ArchProvisionState::Provisioning(record) => match record.step {
+            P::UkiPublicationPending => "journal:provisioning:uki_publication_pending",
+            P::UkiPublicationAttempted => "journal:provisioning:uki_publication_attempted",
+            P::UkiPublished => "journal:provisioning:uki_published",
+            P::BootEntryCreateAttempted => "journal:provisioning:boot_entry_create_attempted",
+            P::BootEntryCreated => "journal:provisioning:boot_entry_created",
+            P::BootEntryReadBackVerified => "journal:provisioning:boot_entry_read_back_verified",
+            P::BootOrderAppendAttempted => "journal:provisioning:boot_order_append_attempted",
+            P::BootOrderAppendWriteCompleted => {
+                "journal:provisioning:boot_order_append_write_completed"
+            }
+            P::BootOrderAppended => "journal:provisioning:boot_order_appended",
+            P::BootOrderReadBackVerified => "journal:provisioning:boot_order_read_back_verified",
+        },
+        ArchProvisionState::Uninstalling(record) => match record.step {
+            U::Started => "journal:uninstalling:started",
+            U::BootOrderRemovalAttempted => "journal:uninstalling:boot_order_removal_attempted",
+            U::BootOrderRemovalWriteCompleted => {
+                "journal:uninstalling:boot_order_removal_write_completed"
+            }
+            U::BootOrderRemoved => "journal:uninstalling:boot_order_removed",
+            U::BootOrderRemovalReadBackVerified => {
+                "journal:uninstalling:boot_order_removal_read_back_verified"
+            }
+            U::BootEntryRemovalAttempted => "journal:uninstalling:boot_entry_removal_attempted",
+            U::BootEntryDeleteCompleted => "journal:uninstalling:boot_entry_delete_completed",
+            U::BootEntryRemoved => "journal:uninstalling:boot_entry_removed",
+            U::BootEntryRemovalReadBackVerified => {
+                "journal:uninstalling:boot_entry_removal_read_back_verified"
+            }
+            U::UkiRemovalAttempted => "journal:uninstalling:uki_removal_attempted",
+            U::UkiDeleteCompleted => "journal:uninstalling:uki_delete_completed",
+            U::UkiRemoved => "journal:uninstalling:uki_removed",
+        },
     }
 }

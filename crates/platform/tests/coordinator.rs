@@ -22,6 +22,7 @@ struct FakeBackend {
     fs: support::FakeFs,
     fail: FailAt,
     mismatch: FailAt,
+    observe_absent: FailAt,
     uki_mismatch: bool,
     mutations: Vec<&'static str>,
     events: Vec<&'static str>,
@@ -34,6 +35,7 @@ impl FakeBackend {
             fs,
             fail: FailAt::None,
             mismatch: FailAt::None,
+            observe_absent: FailAt::None,
             uki_mismatch: false,
             mutations: Vec::new(),
             events: Vec::new(),
@@ -276,9 +278,19 @@ impl LifecycleBackend for FakeBackend {
                     })
                 }
                 ProvisioningStep::BootEntryCreateAttempted => {
-                    LifecycleReadback::BootEntryPresent(record.owned_entry.identity.clone())
+                    if self.observe_absent == FailAt::Entry {
+                        LifecycleReadback::BootEntryAbsent
+                    } else {
+                        LifecycleReadback::BootEntryPresent(record.owned_entry.identity.clone())
+                    }
                 }
-                ProvisioningStep::BootOrderAppendAttempted => LifecycleReadback::BootOrderContains,
+                ProvisioningStep::BootOrderAppendAttempted => {
+                    if self.observe_absent == FailAt::Order {
+                        LifecycleReadback::BootOrderAbsent
+                    } else {
+                        LifecycleReadback::BootOrderContains
+                    }
+                }
                 _ => LifecycleReadback::UkiAbsent,
             },
             ArchProvisionState::Uninstalling(record) => match record.step {
@@ -333,7 +345,23 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
         ]
     );
     let journal_events = fs.0.borrow().events.clone();
-    for stage in ["uki", "entry", "order"] {
+    for (stage, attempted, verified) in [
+        (
+            "uki",
+            "journal:provisioning:uki_publication_attempted",
+            "journal:provisioning:uki_published",
+        ),
+        (
+            "entry",
+            "journal:provisioning:boot_entry_create_attempted",
+            "journal:provisioning:boot_entry_read_back_verified",
+        ),
+        (
+            "order",
+            "journal:provisioning:boot_order_append_attempted",
+            "journal:provisioning:boot_order_read_back_verified",
+        ),
+    ] {
         let mutation = journal_events
             .iter()
             .position(|event| event == &format!("external-mutate-{stage}"))
@@ -342,19 +370,17 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
             .iter()
             .position(|event| event == &format!("external-readback-{stage}"))
             .unwrap();
-        assert!(
-            journal_events[..mutation]
-                .iter()
-                .rev()
-                .any(|event| event == "rename"),
-            "attempt checkpoint must precede {stage} mutation"
-        );
-        assert!(
-            journal_events[readback + 1..]
-                .iter()
-                .any(|event| event == "rename"),
-            "verified checkpoint must follow {stage} readback"
-        );
+        let durable_attempt = journal_events[..mutation]
+            .iter()
+            .rposition(|event| event.starts_with("journal:"))
+            .unwrap();
+        assert_eq!(journal_events[durable_attempt], attempted);
+        let durable_verified = journal_events[readback + 1..]
+            .iter()
+            .position(|event| event.starts_with("journal:"))
+            .map(|index| readback + 1 + index)
+            .unwrap();
+        assert_eq!(journal_events[durable_verified], verified);
     }
     let tombstone = uninstall(&mut store, &mut backend, "uninstall-1".into()).unwrap();
     assert!(matches!(tombstone, ArchProvisionState::Uninstalled(_)));
@@ -362,6 +388,38 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
         backend.mutations,
         ["uki", "entry", "order", "order", "entry", "uki"]
     );
+    let all_events = fs.0.borrow().events.clone();
+    let ready = all_events
+        .iter()
+        .rposition(|event| event == "journal:ready")
+        .unwrap();
+    let uninstall_trace: Vec<_> = all_events[ready + 1..]
+        .iter()
+        .filter(|event| event.starts_with("journal:") || event.starts_with("external-"))
+        .map(String::as_str)
+        .collect();
+    let uninstall_events = [
+        "journal:uninstalling:started",
+        "external-read-order",
+        "journal:uninstalling:boot_order_removal_attempted",
+        "external-mutate-order",
+        "external-readback-order",
+        "journal:uninstalling:boot_order_removed",
+        "journal:uninstalling:boot_order_removal_read_back_verified",
+        "external-read-entry",
+        "journal:uninstalling:boot_entry_removal_attempted",
+        "external-mutate-entry",
+        "external-readback-entry",
+        "journal:uninstalling:boot_entry_removed",
+        "journal:uninstalling:boot_entry_removal_read_back_verified",
+        "external-read-uki",
+        "journal:uninstalling:uki_removal_attempted",
+        "external-mutate-uki",
+        "external-readback-uki",
+        "journal:uninstalling:uki_removed",
+        "journal:uninstalled",
+    ];
+    assert_eq!(uninstall_trace, uninstall_events);
     assert!(fs.0.borrow().held);
     drop(store);
     assert!(!fs.0.borrow().held);
@@ -437,7 +495,23 @@ fn restart_recovery_observes_attempt_only_and_never_mutates_or_advances() {
 
 #[test]
 fn every_attempted_checkpoint_recovers_read_only_and_keeps_checkpoint() {
-    for fail in [FailAt::Uki, FailAt::Entry, FailAt::Order] {
+    for (fail, expected_step, expected_residual) in [
+        (
+            FailAt::Uki,
+            ProvisioningStep::UkiPublicationAttempted,
+            Residual::UkiMayRemain,
+        ),
+        (
+            FailAt::Entry,
+            ProvisioningStep::BootEntryCreateAttempted,
+            Residual::BootEntryMayExist,
+        ),
+        (
+            FailAt::Order,
+            ProvisioningStep::BootOrderAppendAttempted,
+            Residual::BootOrderMayContainEntry,
+        ),
+    ] {
         let fs = support::FakeFs::installed();
         let mut backend = FakeBackend::new(fs.clone());
         backend.fail = fail;
@@ -448,13 +522,29 @@ fn every_attempted_checkpoint_recovers_read_only_and_keeps_checkpoint() {
         let after = recover(&mut store, &mut backend).unwrap();
         assert_eq!(backend.mutations.len(), mutations);
         assert_eq!(backend.observations, 1);
-        assert_eq!(
-            matches!(before, ArchProvisionState::Provisioning(_)),
-            matches!(after, ArchProvisionState::Provisioning(_))
-        );
+        assert!(matches!(before, ArchProvisionState::Provisioning(ref r)
+            if r.step == expected_step && r.residual == vec![expected_residual]));
+        assert!(matches!(after, ArchProvisionState::Provisioning(ref r)
+            if r.step == expected_step && r.residual == vec![expected_residual]));
     }
 
-    for fail in [FailAt::Order, FailAt::Entry, FailAt::Uki] {
+    for (fail, expected_step, expected_residual) in [
+        (
+            FailAt::Order,
+            UninstallingStep::BootOrderRemovalAttempted,
+            Residual::BootOrderMayContainEntry,
+        ),
+        (
+            FailAt::Entry,
+            UninstallingStep::BootEntryRemovalAttempted,
+            Residual::BootEntryMayExist,
+        ),
+        (
+            FailAt::Uki,
+            UninstallingStep::UkiRemovalAttempted,
+            Residual::UkiMayRemain,
+        ),
+    ] {
         let fs = support::FakeFs::installed();
         let mut backend = FakeBackend::new(fs.clone());
         let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
@@ -466,10 +556,50 @@ fn every_attempted_checkpoint_recovers_read_only_and_keeps_checkpoint() {
         let after = recover(&mut store, &mut backend).unwrap();
         assert_eq!(backend.mutations.len(), mutations);
         assert_eq!(backend.observations, 1);
-        assert_eq!(
-            matches!(before, ArchProvisionState::Uninstalling(_)),
-            matches!(after, ArchProvisionState::Uninstalling(_))
+        assert!(matches!(before, ArchProvisionState::Uninstalling(ref r)
+            if r.step == expected_step && r.residual == vec![expected_residual]));
+        assert!(matches!(after, ArchProvisionState::Uninstalling(ref r)
+            if r.step == expected_step && r.residual == vec![expected_residual]));
+    }
+}
+
+#[test]
+fn absent_attempt_postconditions_are_retained_as_residual_evidence() {
+    for (stage, step, residual) in [
+        (
+            FailAt::Entry,
+            ProvisioningStep::BootEntryCreateAttempted,
+            Residual::BootEntryMayExist,
+        ),
+        (
+            FailAt::Order,
+            ProvisioningStep::BootOrderAppendAttempted,
+            Residual::BootOrderMayContainEntry,
+        ),
+    ] {
+        let fs = support::FakeFs::installed();
+        let ArchProvisionState::Ready(entry) = support::ready_state() else {
+            unreachable!()
+        };
+        let state = ArchProvisionState::Provisioning(boothop_core::ProvisioningRecord {
+            operation_id: "provision-1".into(),
+            operation_version: 1,
+            owned_entry: entry,
+            step,
+            residual: vec![],
+        });
+        fs.insert(
+            "/var/lib/boothop/arch-provision.json",
+            0o100600,
+            boothop_core::encode_arch_provision_state(&state).unwrap(),
         );
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.observe_absent = stage;
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        let recovered = recover(&mut store, &mut backend).unwrap();
+        assert!(matches!(recovered, ArchProvisionState::Provisioning(ref r)
+            if r.step == step && r.residual == vec![residual]));
+        assert_eq!(backend.mutations, Vec::<&'static str>::new());
     }
 }
 

@@ -684,14 +684,18 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
                     add_residual(&mut retained, Residual::UkiMayRemain)?;
                 }
                 ProvisioningStep::BootEntryCreateAttempted => {
-                    if matches!(readback, LifecycleReadback::BootEntryPresent(_)) {
-                        add_residual(&mut retained, Residual::BootEntryMayExist)?;
-                    }
+                    // A restart observation cannot prove that the attempted create did not
+                    // happen. Preserve the attempted checkpoint and record uncertainty even
+                    // when Boot#### is currently absent.
+                    let _ = readback;
+                    add_residual(&mut retained, Residual::BootEntryMayExist)?;
                 }
                 ProvisioningStep::BootOrderAppendAttempted => {
-                    if matches!(readback, LifecycleReadback::BootOrderContains) {
-                        add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
-                    }
+                    // The append result is never inferred from a restart observation. An
+                    // absent BootOrder entry is still a postcondition mismatch for the
+                    // attempted checkpoint and must remain visible to later recovery.
+                    let _ = readback;
+                    add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
                 _ => {}
             },
