@@ -5,6 +5,7 @@ mod support;
 
 use boothop_core::{ArchProvisionState, Error, ProvisioningStep, Residual, UninstallingStep};
 use boothop_platform::linux::arch_provision_store::ArchProvisionStore;
+use boothop_platform::linux::boot_order::BootOrderValue;
 use boothop_platform::linux::coordinator::{
     LifecycleBackend, LifecycleFailure, LifecycleReadback, ProvisionIntent, provision, recover,
     uninstall,
@@ -18,12 +19,26 @@ enum FailAt {
     Order,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderShape {
+    Reordered,
+    PrefixOmitted,
+    DuplicateOwned,
+    ForeignId,
+    WrongAttributes,
+}
+
 struct FakeBackend {
     fs: support::FakeFs,
     fail: FailAt,
     mismatch: FailAt,
+    prepare_fail: FailAt,
+    prepare_mismatch: FailAt,
     observe_absent: FailAt,
+    observe_error: bool,
     uki_mismatch: bool,
+    uninstalling: bool,
+    order_shape: Option<OrderShape>,
     mutations: Vec<&'static str>,
     events: Vec<&'static str>,
     observations: usize,
@@ -35,8 +50,13 @@ impl FakeBackend {
             fs,
             fail: FailAt::None,
             mismatch: FailAt::None,
+            prepare_fail: FailAt::None,
+            prepare_mismatch: FailAt::None,
             observe_absent: FailAt::None,
+            observe_error: false,
             uki_mismatch: false,
+            uninstalling: false,
+            order_shape: None,
             mutations: Vec::new(),
             events: Vec::new(),
             observations: 0,
@@ -101,7 +121,56 @@ impl FakeBackend {
                     identity.file_path_list_length = identity.file_path_list_length.wrapping_add(1);
                     LifecycleReadback::BootEntryPresent(identity)
                 }
-                "order" => LifecycleReadback::BootOrderAbsent,
+                "order" => LifecycleReadback::BootOrder(match self.order_shape {
+                    Some(OrderShape::DuplicateOwned) => BootOrderValue {
+                        attributes: 7,
+                        ids: vec![
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(8),
+                            boothop_core::BootId(0x1234),
+                            boothop_core::BootId(0x1234),
+                        ],
+                    },
+                    Some(OrderShape::WrongAttributes) => BootOrderValue {
+                        attributes: 0,
+                        ids: vec![
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(8),
+                            boothop_core::BootId(0x1234),
+                        ],
+                    },
+                    Some(OrderShape::PrefixOmitted) => {
+                        BootOrderValue::new(7, vec![boothop_core::BootId(0x1234)]).unwrap()
+                    }
+                    Some(OrderShape::ForeignId) => BootOrderValue::new(
+                        7,
+                        vec![
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(8),
+                            boothop_core::BootId(0x1234),
+                            boothop_core::BootId(9),
+                        ],
+                    )
+                    .unwrap(),
+                    Some(OrderShape::Reordered) | None if self.uninstalling => BootOrderValue::new(
+                        7,
+                        vec![
+                            boothop_core::BootId(8),
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(0x1234),
+                        ],
+                    )
+                    .unwrap(),
+                    Some(OrderShape::Reordered) | None => BootOrderValue::new(
+                        7,
+                        vec![
+                            boothop_core::BootId(0x1234),
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(8),
+                        ],
+                    )
+                    .unwrap(),
+                }),
                 _ => unreachable!(),
             });
         }
@@ -125,7 +194,21 @@ impl FakeBackend {
             "entry" => LifecycleReadback::BootEntryPresent(
                 entry.expect("entry readback identity").identity.clone(),
             ),
-            "order" => LifecycleReadback::BootOrderContains,
+            "order" => LifecycleReadback::BootOrder(
+                BootOrderValue::new(
+                    7,
+                    if self.uninstalling {
+                        vec![boothop_core::BootId(7), boothop_core::BootId(8)]
+                    } else {
+                        vec![
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(8),
+                            boothop_core::BootId(0x1234),
+                        ]
+                    },
+                )
+                .unwrap(),
+            ),
             _ => unreachable!(),
         })
     }
@@ -137,8 +220,23 @@ impl LifecycleBackend for FakeBackend {
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<(boothop_core::PublishMetadata, LifecycleReadback), Error> {
         self.assert_lock();
+        if self.prepare_fail == FailAt::Uki {
+            return Err(Error::Busy);
+        }
         self.trace("external-read-uki");
         self.events.push("read-uki");
+        if self.prepare_mismatch == FailAt::Uki {
+            return Ok((
+                boothop_core::PublishMetadata {
+                    sha256: [0x22; 32],
+                    size: 42,
+                },
+                LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
+                    sha256: [0x33; 32],
+                    size: 43,
+                }),
+            ));
+        }
         Ok((
             boothop_core::PublishMetadata {
                 sha256: [0x22; 32],
@@ -159,8 +257,16 @@ impl LifecycleBackend for FakeBackend {
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        if self.prepare_fail == FailAt::Entry {
+            return Err(Error::Busy);
+        }
         self.trace("external-read-entry");
         self.events.push("read-entry");
+        if self.prepare_mismatch == FailAt::Entry {
+            let mut identity = _entry.identity.clone();
+            identity.file_path_list_length = identity.file_path_list_length.wrapping_add(1);
+            return Ok(LifecycleReadback::BootEntryPresent(identity));
+        }
         Ok(LifecycleReadback::BootEntryAbsent)
     }
     fn create_boot_entry(
@@ -171,12 +277,30 @@ impl LifecycleBackend for FakeBackend {
     }
     fn prepare_boot_order_append(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        if self.prepare_fail == FailAt::Order {
+            return Err(Error::Busy);
+        }
         self.trace("external-read-order");
         self.events.push("read-order");
-        Ok(LifecycleReadback::BootOrderAbsent)
+        if self.prepare_mismatch == FailAt::Order {
+            return Ok(LifecycleReadback::BootOrder(
+                BootOrderValue::new(
+                    7,
+                    vec![
+                        boothop_core::BootId(7),
+                        boothop_core::BootId(8),
+                        entry.boot_id,
+                    ],
+                )
+                .unwrap(),
+            ));
+        }
+        Ok(LifecycleReadback::BootOrder(
+            BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)]).unwrap(),
+        ))
     }
     fn append_boot_order(
         &mut self,
@@ -189,32 +313,58 @@ impl LifecycleBackend for FakeBackend {
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.uninstalling = true;
+        if self.prepare_fail == FailAt::Order {
+            return Err(Error::Busy);
+        }
         self.trace("external-read-order");
         self.events.push("read-order");
-        Ok(LifecycleReadback::BootOrderContains)
+        if self.prepare_mismatch == FailAt::Order {
+            return Ok(LifecycleReadback::BootOrder(
+                BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)])
+                    .unwrap(),
+            ));
+        }
+        Ok(LifecycleReadback::BootOrder(
+            BootOrderValue::new(
+                7,
+                vec![
+                    boothop_core::BootId(7),
+                    boothop_core::BootId(8),
+                    boothop_core::BootId(0x1234),
+                ],
+            )
+            .unwrap(),
+        ))
     }
     fn remove_boot_order(
         &mut self,
-        entry: &boothop_core::OwnedArchEntry,
+        _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("order", Residual::BootOrderMayContainEntry, None)
-            .map(|_| {
-                if self.mismatch == FailAt::Order {
-                    LifecycleReadback::BootOrderContains
-                } else {
-                    let _ = entry;
-                    LifecycleReadback::BootOrderAbsent
-                }
-            })
+        let observed = self.mutation("order", Residual::BootOrderMayContainEntry, None)?;
+        if self.mismatch == FailAt::Order {
+            Ok(observed)
+        } else {
+            Ok(LifecycleReadback::BootOrder(
+                BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)])
+                    .unwrap(),
+            ))
+        }
     }
     fn prepare_boot_entry_remove(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        if self.prepare_fail == FailAt::Entry {
+            return Err(Error::Busy);
+        }
         self.trace("external-read-entry");
         self.events.push("read-entry");
-        Ok(LifecycleReadback::BootEntryPresent(_entry.identity.clone()))
+        if self.prepare_mismatch == FailAt::Entry {
+            return Ok(LifecycleReadback::BootEntryAbsent);
+        }
+        Ok(LifecycleReadback::BootEntryPresent(entry.identity.clone()))
     }
     fn remove_boot_entry(
         &mut self,
@@ -231,16 +381,19 @@ impl LifecycleBackend for FakeBackend {
     }
     fn prepare_uki_remove(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        if self.prepare_fail == FailAt::Uki {
+            return Err(Error::Busy);
+        }
         self.trace("external-read-uki");
         self.events.push("read-uki");
+        if self.prepare_mismatch == FailAt::Uki {
+            return Ok(LifecycleReadback::UkiAbsent);
+        }
         Ok(LifecycleReadback::UkiPresent(
-            boothop_core::PublishMetadata {
-                sha256: [0x22; 32],
-                size: 42,
-            },
+            entry.publish.clone().expect("published fixture"),
         ))
     }
     fn remove_uki(
@@ -269,6 +422,9 @@ impl LifecycleBackend for FakeBackend {
     fn observe(&mut self, state: &ArchProvisionState) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
         self.observations += 1;
+        if self.observe_error {
+            return Err(Error::Busy);
+        }
         Ok(match state {
             ArchProvisionState::Provisioning(record) => match record.step {
                 ProvisioningStep::UkiPublicationAttempted => {
@@ -286,15 +442,41 @@ impl LifecycleBackend for FakeBackend {
                 }
                 ProvisioningStep::BootOrderAppendAttempted => {
                     if self.observe_absent == FailAt::Order {
-                        LifecycleReadback::BootOrderAbsent
+                        LifecycleReadback::BootOrder(
+                            BootOrderValue::new(
+                                7,
+                                vec![boothop_core::BootId(7), boothop_core::BootId(8)],
+                            )
+                            .unwrap(),
+                        )
                     } else {
-                        LifecycleReadback::BootOrderContains
+                        LifecycleReadback::BootOrder(
+                            BootOrderValue::new(
+                                7,
+                                vec![
+                                    boothop_core::BootId(7),
+                                    boothop_core::BootId(8),
+                                    boothop_core::BootId(0x1234),
+                                ],
+                            )
+                            .unwrap(),
+                        )
                     }
                 }
                 _ => LifecycleReadback::UkiAbsent,
             },
             ArchProvisionState::Uninstalling(record) => match record.step {
-                UninstallingStep::BootOrderRemovalAttempted => LifecycleReadback::BootOrderContains,
+                UninstallingStep::BootOrderRemovalAttempted => LifecycleReadback::BootOrder(
+                    BootOrderValue::new(
+                        7,
+                        vec![
+                            boothop_core::BootId(7),
+                            boothop_core::BootId(8),
+                            boothop_core::BootId(0x1234),
+                        ],
+                    )
+                    .unwrap(),
+                ),
                 UninstallingStep::BootEntryRemovalAttempted => {
                     LifecycleReadback::BootEntryPresent(record.owned_entry.identity.clone())
                 }
@@ -662,6 +844,223 @@ fn uninstall_post_mutation_readback_mismatch_retains_cleanup_attempt() {
                     | UninstallingStep::UkiRemovalAttempted))
         );
     }
+}
+
+#[test]
+fn provision_prepare_errors_and_mismatches_retain_the_prior_checkpoint() {
+    for (stage, expected_step, residual) in [
+        (
+            FailAt::Uki,
+            ProvisioningStep::UkiPublicationPending,
+            Residual::UkiMayRemain,
+        ),
+        (
+            FailAt::Entry,
+            ProvisioningStep::UkiPublished,
+            Residual::BootEntryMayExist,
+        ),
+        (
+            FailAt::Order,
+            ProvisioningStep::BootEntryReadBackVerified,
+            Residual::BootOrderMayContainEntry,
+        ),
+    ] {
+        for mismatch in [false, true] {
+            let fs = support::FakeFs::installed();
+            let mut backend = FakeBackend::new(fs.clone());
+            if mismatch {
+                backend.prepare_mismatch = stage;
+            } else {
+                backend.prepare_fail = stage;
+            }
+            let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+            assert_eq!(
+                provision(&mut store, &mut backend, pending_intent()),
+                Err(if mismatch {
+                    Error::ReadbackFailed
+                } else {
+                    Error::Busy
+                })
+            );
+            assert!(
+                matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+                if record.step == expected_step && record.residual == vec![residual])
+            );
+            assert_eq!(
+                backend.mutations,
+                match stage {
+                    FailAt::Uki => Vec::<&'static str>::new(),
+                    FailAt::Entry => vec!["uki"],
+                    FailAt::Order => vec!["uki", "entry"],
+                    FailAt::None => unreachable!(),
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn uninstall_prepare_errors_and_mismatches_retain_the_prior_checkpoint() {
+    for (stage, expected_step, residual) in [
+        (
+            FailAt::Order,
+            UninstallingStep::Started,
+            Residual::BootOrderMayContainEntry,
+        ),
+        (
+            FailAt::Entry,
+            UninstallingStep::BootOrderRemovalReadBackVerified,
+            Residual::BootEntryMayExist,
+        ),
+        (
+            FailAt::Uki,
+            UninstallingStep::BootEntryRemovalReadBackVerified,
+            Residual::UkiMayRemain,
+        ),
+    ] {
+        for mismatch in [false, true] {
+            let fs = support::FakeFs::installed();
+            let mut backend = FakeBackend::new(fs.clone());
+            let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+            provision(&mut store, &mut backend, pending_intent()).unwrap();
+            if mismatch {
+                backend.prepare_mismatch = stage;
+            } else {
+                backend.prepare_fail = stage;
+            }
+            assert_eq!(
+                uninstall(&mut store, &mut backend, "uninstall-1".into()),
+                Err(if mismatch {
+                    Error::ReadbackFailed
+                } else {
+                    Error::Busy
+                })
+            );
+            assert!(
+                matches!(store.load().unwrap(), ArchProvisionState::Uninstalling(ref record)
+                if record.step == expected_step && record.residual == vec![residual])
+            );
+        }
+    }
+}
+
+#[test]
+fn boot_order_proofs_reject_reordering_omission_duplicates_and_foreign_ids() {
+    for shape in [
+        OrderShape::Reordered,
+        OrderShape::PrefixOmitted,
+        OrderShape::DuplicateOwned,
+        OrderShape::ForeignId,
+        OrderShape::WrongAttributes,
+    ] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.mismatch = FailAt::Order;
+        backend.order_shape = Some(shape);
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        assert_eq!(
+            provision(&mut store, &mut backend, pending_intent()),
+            Err(Error::ReadbackFailed)
+        );
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+            if record.step == ProvisioningStep::BootOrderAppendAttempted
+                && record.residual == vec![Residual::BootOrderMayContainEntry])
+        );
+
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        provision(&mut store, &mut backend, pending_intent()).unwrap();
+        backend.mismatch = FailAt::Order;
+        backend.order_shape = Some(shape);
+        assert_eq!(
+            uninstall(&mut store, &mut backend, "uninstall-1".into()),
+            Err(Error::ReadbackFailed)
+        );
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Uninstalling(ref record)
+            if record.step == UninstallingStep::BootOrderRemovalAttempted
+                && record.residual == vec![Residual::BootOrderMayContainEntry])
+        );
+    }
+}
+
+#[test]
+fn recovery_observes_nonterminal_verified_checkpoints_without_advancing() {
+    for (step, residual) in [
+        (
+            ProvisioningStep::BootEntryReadBackVerified,
+            Residual::BootEntryMayExist,
+        ),
+        (
+            ProvisioningStep::BootOrderAppended,
+            Residual::BootOrderMayContainEntry,
+        ),
+    ] {
+        let fs = support::FakeFs::installed();
+        let ArchProvisionState::Ready(mut entry) = support::ready_state() else {
+            unreachable!()
+        };
+        entry.publish = Some(boothop_core::PublishMetadata {
+            sha256: [0x22; 32],
+            size: 42,
+        });
+        let state = ArchProvisionState::Provisioning(boothop_core::ProvisioningRecord {
+            operation_id: "provision-1".into(),
+            operation_version: 1,
+            owned_entry: entry,
+            step,
+            residual: vec![],
+        });
+        fs.insert(
+            "/var/lib/boothop/arch-provision.json",
+            0o100600,
+            boothop_core::encode_arch_provision_state(&state).unwrap(),
+        );
+        let mut backend = FakeBackend::new(fs.clone());
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        let recovered = recover(&mut store, &mut backend).unwrap();
+        assert!(
+            matches!(recovered, ArchProvisionState::Provisioning(ref record)
+            if record.step == step && record.residual == vec![residual])
+        );
+        assert!(backend.mutations.is_empty());
+    }
+}
+
+#[test]
+fn recovery_observation_errors_retain_resource_specific_residuals() {
+    let fs = support::FakeFs::installed();
+    let ArchProvisionState::Ready(mut entry) = support::ready_state() else {
+        unreachable!()
+    };
+    entry.publish = Some(boothop_core::PublishMetadata {
+        sha256: [0x22; 32],
+        size: 42,
+    });
+    let state = ArchProvisionState::Provisioning(boothop_core::ProvisioningRecord {
+        operation_id: "provision-1".into(),
+        operation_version: 1,
+        owned_entry: entry,
+        step: ProvisioningStep::BootEntryReadBackVerified,
+        residual: vec![],
+    });
+    fs.insert(
+        "/var/lib/boothop/arch-provision.json",
+        0o100600,
+        boothop_core::encode_arch_provision_state(&state).unwrap(),
+    );
+    let mut backend = FakeBackend::new(fs.clone());
+    backend.observe_error = true;
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    let recovered = recover(&mut store, &mut backend).unwrap();
+    assert!(
+        matches!(recovered, ArchProvisionState::Provisioning(ref record)
+        if record.step == ProvisioningStep::BootEntryReadBackVerified
+            && record.residual == vec![Residual::BootEntryMayExist])
+    );
+    assert!(backend.mutations.is_empty());
 }
 
 #[test]

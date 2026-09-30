@@ -47,7 +47,7 @@ impl BootOrderValue {
         Ok(())
     }
 
-    fn appended(&self, id: BootId) -> Result<Self, Error> {
+    pub(crate) fn appended(&self, id: BootId) -> Result<Self, Error> {
         self.validate()?;
         if self.ids.contains(&id) || self.ids.len() == MAX_BOOT_ORDER_ITEMS {
             return Err(Error::Busy);
@@ -57,7 +57,7 @@ impl BootOrderValue {
         Self::new(self.attributes, ids)
     }
 
-    fn without(&self, id: BootId) -> Result<Self, Error> {
+    pub(crate) fn without(&self, id: BootId) -> Result<Self, Error> {
         self.validate()?;
         if !self.ids.contains(&id) {
             return Err(Error::TargetMissing);

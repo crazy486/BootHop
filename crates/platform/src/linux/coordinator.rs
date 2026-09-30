@@ -5,6 +5,7 @@
 //! No implementation in this module opens firmware, an ESP, or a system configuration file.
 
 use super::arch_provision_store::ArchProvisionStore;
+use super::boot_order::BootOrderValue;
 use super::store::Filesystem;
 use boothop_core::{
     ArchProvisionState, Error, OwnedArchEntry, ProvisioningRecord, ProvisioningStep,
@@ -21,8 +22,7 @@ pub enum LifecycleReadback {
     UkiPresent(PublishMetadata),
     BootEntryAbsent,
     BootEntryPresent(boothop_core::CanonicalIdentity),
-    BootOrderContains,
-    BootOrderAbsent,
+    BootOrder(BootOrderValue),
 }
 
 /// A mutation failure says whether the mutation was rejected before its write boundary or may
@@ -123,8 +123,11 @@ pub(crate) enum ProofBinding {
     Uki(PublishMetadata),
     BootEntryAbsent,
     BootEntryPresent,
-    BootOrderContains,
-    BootOrderAbsent,
+    BootOrderBefore(BootOrderValue),
+    BootOrderTransition {
+        before: BootOrderValue,
+        after: BootOrderValue,
+    },
 }
 
 /// Private proof object.  Its fields and constructor are crate-private; callers can only obtain
@@ -208,23 +211,61 @@ fn proof_bindings_valid(
                 matches!(expected, ProofBinding::BootEntryPresent) && same
             }
             ProvisioningStep::BootOrderAppendAttempted => {
-                matches!(expected, ProofBinding::BootOrderContains)
-                    && matches!(observed, ProofBinding::BootOrderAbsent)
+                matches!(
+                    (expected, observed),
+                    (ProofBinding::BootOrderBefore(before), ProofBinding::BootOrderBefore(observed))
+                        if before == observed
+                            && boot_order_append_precondition(before, record.owned_entry.boot_id)
+                )
             }
             ProvisioningStep::BootOrderAppended | ProvisioningStep::BootOrderReadBackVerified => {
-                matches!(expected, ProofBinding::BootOrderContains) && same
+                matches!(
+                    (expected, observed),
+                    (
+                        ProofBinding::BootOrderTransition { before, after },
+                        ProofBinding::BootOrderTransition {
+                            before: observed_before,
+                            after: observed_after,
+                        },
+                    ) if before == observed_before
+                        && after == observed_after
+                        && boot_order_append_transition(
+                            before,
+                            after,
+                            record.owned_entry.boot_id,
+                        )
+                )
             }
             ProvisioningStep::BootOrderAppendWriteCompleted => same,
             ProvisioningStep::UkiPublicationPending => false,
         },
         ArchProvisionState::Uninstalling(record) => match record.step {
             UninstallingStep::BootOrderRemovalAttempted => {
-                matches!(expected, ProofBinding::BootOrderAbsent)
-                    && matches!(observed, ProofBinding::BootOrderContains)
+                matches!(
+                    (expected, observed),
+                    (ProofBinding::BootOrderBefore(before), ProofBinding::BootOrderBefore(observed))
+                        if before == observed
+                            && boot_order_remove_precondition(before, record.owned_entry.boot_id)
+                )
             }
             UninstallingStep::BootOrderRemoved
             | UninstallingStep::BootOrderRemovalReadBackVerified => {
-                matches!(expected, ProofBinding::BootOrderAbsent) && same
+                matches!(
+                    (expected, observed),
+                    (
+                        ProofBinding::BootOrderTransition { before, after },
+                        ProofBinding::BootOrderTransition {
+                            before: observed_before,
+                            after: observed_after,
+                        },
+                    ) if before == observed_before
+                        && after == observed_after
+                        && boot_order_remove_transition(
+                            before,
+                            after,
+                            record.owned_entry.boot_id,
+                        )
+                )
             }
             UninstallingStep::BootEntryRemovalAttempted => {
                 matches!(expected, ProofBinding::BootEntryAbsent)
@@ -248,7 +289,18 @@ fn proof_bindings_valid(
             | UninstallingStep::BootEntryDeleteCompleted
             | UninstallingStep::UkiDeleteCompleted => same,
         },
-        ArchProvisionState::Ready(_) => matches!(expected, ProofBinding::BootOrderContains) && same,
+        ArchProvisionState::Ready(entry) => matches!(
+            (expected, observed),
+            (
+                ProofBinding::BootOrderTransition { before, after },
+                ProofBinding::BootOrderTransition {
+                    before: observed_before,
+                    after: observed_after,
+                },
+            ) if before == observed_before
+                && after == observed_after
+                && boot_order_append_transition(before, after, entry.boot_id)
+        ),
         ArchProvisionState::Unprovisioned | ArchProvisionState::Uninstalled(_) => false,
     }
 }
@@ -276,20 +328,38 @@ fn same_owned_identity(left: &OwnedArchEntry, right: &OwnedArchEntry) -> bool {
         && left.build == right.build
 }
 
-fn is_attempted_step(state: &ArchProvisionState) -> bool {
+fn boot_order_append_precondition(before: &BootOrderValue, id: boothop_core::BootId) -> bool {
+    before.validate().is_ok() && !before.ids.contains(&id)
+}
+
+fn boot_order_append_transition(
+    before: &BootOrderValue,
+    after: &BootOrderValue,
+    id: boothop_core::BootId,
+) -> bool {
+    boot_order_append_precondition(before, id)
+        && after.validate().is_ok()
+        && before.appended(id).is_ok_and(|expected| expected == *after)
+}
+
+fn boot_order_remove_precondition(before: &BootOrderValue, id: boothop_core::BootId) -> bool {
+    before.validate().is_ok() && before.ids.contains(&id)
+}
+
+fn boot_order_remove_transition(
+    before: &BootOrderValue,
+    after: &BootOrderValue,
+    id: boothop_core::BootId,
+) -> bool {
+    boot_order_remove_precondition(before, id)
+        && after.validate().is_ok()
+        && before.without(id).is_ok_and(|expected| expected == *after)
+}
+
+fn is_nonterminal_state(state: &ArchProvisionState) -> bool {
     matches!(
         state,
-        ArchProvisionState::Provisioning(ProvisioningRecord {
-            step: ProvisioningStep::UkiPublicationAttempted
-                | ProvisioningStep::BootEntryCreateAttempted
-                | ProvisioningStep::BootOrderAppendAttempted,
-            ..
-        }) | ArchProvisionState::Uninstalling(UninstallingRecord {
-            step: UninstallingStep::BootOrderRemovalAttempted
-                | UninstallingStep::BootEntryRemovalAttempted
-                | UninstallingStep::UkiRemovalAttempted,
-            ..
-        })
+        ArchProvisionState::Provisioning(_) | ArchProvisionState::Uninstalling(_)
     )
 }
 
@@ -384,8 +454,17 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
     let ArchProvisionState::Provisioning(record) = &pending else {
         unreachable!()
     };
-    let (metadata, observed) = backend.prepare_uki_publication(&record.owned_entry)?;
-    require_readback(&observed, &LifecycleReadback::UkiAbsent)?;
+    let (metadata, observed) = match backend.prepare_uki_publication(&record.owned_entry) {
+        Ok(value) => value,
+        Err(error) => return fail_precondition(store, &pending, Residual::UkiMayRemain, error),
+    };
+    require_precondition_at(
+        store,
+        &pending,
+        &observed,
+        &LifecycleReadback::UkiAbsent,
+        Residual::UkiMayRemain,
+    )?;
     let attempt = provisioning_step(
         &pending,
         ProvisioningStep::UkiPublicationAttempted,
@@ -420,8 +499,19 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
     )?;
 
     let entry = owned_entry(&published)?;
-    let observed = backend.prepare_boot_entry(entry)?;
-    require_readback(&observed, &LifecycleReadback::BootEntryAbsent)?;
+    let observed = match backend.prepare_boot_entry(entry) {
+        Ok(observed) => observed,
+        Err(error) => {
+            return fail_precondition(store, &published, Residual::BootEntryMayExist, error);
+        }
+    };
+    require_precondition_at(
+        store,
+        &published,
+        &observed,
+        &LifecycleReadback::BootEntryAbsent,
+        Residual::BootEntryMayExist,
+    )?;
     let attempt = provisioning_step(
         &published,
         ProvisioningStep::BootEntryCreateAttempted,
@@ -460,8 +550,27 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
     )?;
 
     let entry = owned_entry(&verified)?;
-    let observed = backend.prepare_boot_order_append(entry)?;
-    require_readback(&observed, &LifecycleReadback::BootOrderAbsent)?;
+    let observed = match backend.prepare_boot_order_append(entry) {
+        Ok(observed) => observed,
+        Err(error) => {
+            return fail_precondition(store, &verified, Residual::BootOrderMayContainEntry, error);
+        }
+    };
+    let before = match observed {
+        LifecycleReadback::BootOrder(before)
+            if boot_order_append_precondition(&before, entry.boot_id) =>
+        {
+            before
+        }
+        _ => {
+            return fail_precondition(
+                store,
+                &verified,
+                Residual::BootOrderMayContainEntry,
+                Error::ReadbackFailed,
+            );
+        }
+    };
     let attempt = provisioning_step(
         &verified,
         ProvisioningStep::BootOrderAppendAttempted,
@@ -471,18 +580,35 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         store,
         verified.clone(),
         attempt.clone(),
-        ProofBinding::BootOrderContains,
-        ProofBinding::BootOrderAbsent,
+        ProofBinding::BootOrderBefore(before.clone()),
+        ProofBinding::BootOrderBefore(before.clone()),
     )?;
     let observed = match backend.append_boot_order(entry) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
+    let after = match observed {
+        LifecycleReadback::BootOrder(after) => after,
+        _ => {
+            return fail_precondition(
+                store,
+                &attempt,
+                Residual::BootOrderMayContainEntry,
+                Error::ReadbackFailed,
+            );
+        }
+    };
+    let expected_after = match before.appended(entry.boot_id) {
+        Ok(expected_after) => expected_after,
+        Err(error) => {
+            return fail_precondition(store, &attempt, Residual::BootOrderMayContainEntry, error);
+        }
+    };
     require_readback_at(
         store,
         &attempt,
-        &observed,
-        &LifecycleReadback::BootOrderContains,
+        &LifecycleReadback::BootOrder(after.clone()),
+        &LifecycleReadback::BootOrder(expected_after.clone()),
         Residual::BootOrderMayContainEntry,
     )?;
     let verified = provisioning_step(
@@ -490,12 +616,16 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         ProvisioningStep::BootOrderReadBackVerified,
         published_publish_opt(&attempt)?,
     )?;
+    let transition = ProofBinding::BootOrderTransition {
+        before,
+        after: expected_after,
+    };
     commit_after_mutation(
         store,
         &attempt,
         verified.clone(),
-        ProofBinding::BootOrderContains,
-        ProofBinding::BootOrderContains,
+        transition.clone(),
+        transition.clone(),
         Residual::BootOrderMayContainEntry,
     )?;
     let ready = ArchProvisionState::Ready(owned_entry(&verified)?.clone());
@@ -503,8 +633,8 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         store,
         &verified,
         ready.clone(),
-        ProofBinding::BootOrderContains,
-        ProofBinding::BootOrderContains,
+        transition.clone(),
+        transition,
     )?;
     Ok(ready)
 }
@@ -522,34 +652,74 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
     let started = super::boot_order::begin_uninstall(entry.clone(), operation_id)?;
     store.save(&started)?;
 
-    let observed = backend.prepare_boot_order_remove(&entry)?;
-    require_readback(&observed, &LifecycleReadback::BootOrderContains)?;
+    let observed = match backend.prepare_boot_order_remove(&entry) {
+        Ok(observed) => observed,
+        Err(error) => {
+            return fail_precondition(store, &started, Residual::BootOrderMayContainEntry, error);
+        }
+    };
+    let before = match observed {
+        LifecycleReadback::BootOrder(before)
+            if boot_order_remove_precondition(&before, entry.boot_id) =>
+        {
+            before
+        }
+        _ => {
+            return fail_precondition(
+                store,
+                &started,
+                Residual::BootOrderMayContainEntry,
+                Error::ReadbackFailed,
+            );
+        }
+    };
     let attempt = uninstall_step(&started, UninstallingStep::BootOrderRemovalAttempted)?;
     commit(
         store,
         started.clone(),
         attempt.clone(),
-        ProofBinding::BootOrderAbsent,
-        ProofBinding::BootOrderContains,
+        ProofBinding::BootOrderBefore(before.clone()),
+        ProofBinding::BootOrderBefore(before.clone()),
     )?;
     let observed = match backend.remove_boot_order(&entry) {
         Ok(observed) => observed,
         Err(failure) => return fail_at(store, &attempt, failure),
     };
+    let after = match observed {
+        LifecycleReadback::BootOrder(after) => after,
+        _ => {
+            return fail_precondition(
+                store,
+                &attempt,
+                Residual::BootOrderMayContainEntry,
+                Error::ReadbackFailed,
+            );
+        }
+    };
+    let expected_after = match before.without(entry.boot_id) {
+        Ok(expected_after) => expected_after,
+        Err(error) => {
+            return fail_precondition(store, &attempt, Residual::BootOrderMayContainEntry, error);
+        }
+    };
     require_readback_at(
         store,
         &attempt,
-        &observed,
-        &LifecycleReadback::BootOrderAbsent,
+        &LifecycleReadback::BootOrder(after),
+        &LifecycleReadback::BootOrder(expected_after.clone()),
         Residual::BootOrderMayContainEntry,
     )?;
     let removed = uninstall_step(&attempt, UninstallingStep::BootOrderRemoved)?;
+    let transition = ProofBinding::BootOrderTransition {
+        before,
+        after: expected_after,
+    };
     commit_after_mutation(
         store,
         &attempt,
         removed.clone(),
-        ProofBinding::BootOrderAbsent,
-        ProofBinding::BootOrderAbsent,
+        transition.clone(),
+        transition.clone(),
         Residual::BootOrderMayContainEntry,
     )?;
     let verified = uninstall_step(&removed, UninstallingStep::BootOrderRemovalReadBackVerified)?;
@@ -557,14 +727,22 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         store,
         &removed,
         verified.clone(),
-        ProofBinding::BootOrderAbsent,
-        ProofBinding::BootOrderAbsent,
+        transition.clone(),
+        transition,
     )?;
 
-    let observed = backend.prepare_boot_entry_remove(&entry)?;
-    require_readback(
+    let observed = match backend.prepare_boot_entry_remove(&entry) {
+        Ok(observed) => observed,
+        Err(error) => {
+            return fail_precondition(store, &verified, Residual::BootEntryMayExist, error);
+        }
+    };
+    require_precondition_at(
+        store,
+        &verified,
         &observed,
         &LifecycleReadback::BootEntryPresent(entry.identity.clone()),
+        Residual::BootEntryMayExist,
     )?;
     let attempt = uninstall_step(&verified, UninstallingStep::BootEntryRemovalAttempted)?;
     commit(
@@ -603,11 +781,17 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         ProofBinding::BootEntryAbsent,
     )?;
 
-    let observed = backend.prepare_uki_remove(&entry)?;
+    let observed = match backend.prepare_uki_remove(&entry) {
+        Ok(observed) => observed,
+        Err(error) => return fail_precondition(store, &verified, Residual::UkiMayRemain, error),
+    };
     let expected_uki = entry.publish.clone().ok_or(Error::CorruptRecord)?;
-    require_readback(
+    require_precondition_at(
+        store,
+        &verified,
         &observed,
         &LifecycleReadback::UkiPresent(expected_uki.clone()),
+        Residual::UkiMayRemain,
     )?;
     let attempt = uninstall_step(&verified, UninstallingStep::UkiRemovalAttempted)?;
     commit(
@@ -647,21 +831,23 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
     backend: &mut B,
 ) -> Result<ArchProvisionState, Error> {
     let state = store.load()?;
-    if !is_attempted_step(&state) {
+    if !is_nonterminal_state(&state) {
         return Ok(state);
     }
     let mut retained = state.clone();
     let needs_uki_check = matches!(
         &state,
         ArchProvisionState::Provisioning(ProvisioningRecord {
-            step: ProvisioningStep::BootEntryCreateAttempted
-                | ProvisioningStep::BootOrderAppendAttempted,
+            step: ProvisioningStep::UkiPublished
+                | ProvisioningStep::BootEntryCreateAttempted
+                | ProvisioningStep::BootEntryCreated
+                | ProvisioningStep::BootEntryReadBackVerified
+                | ProvisioningStep::BootOrderAppendAttempted
+                | ProvisioningStep::BootOrderAppendWriteCompleted
+                | ProvisioningStep::BootOrderAppended
+                | ProvisioningStep::BootOrderReadBackVerified,
             ..
-        }) | ArchProvisionState::Uninstalling(UninstallingRecord {
-            step: UninstallingStep::BootOrderRemovalAttempted
-                | UninstallingStep::BootEntryRemovalAttempted,
-            ..
-        })
+        }) | ArchProvisionState::Uninstalling(_)
     );
     if needs_uki_check {
         let entry = match &state {
@@ -678,39 +864,79 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
     match backend.observe(&state) {
         Ok(readback) => match &state {
             ArchProvisionState::Provisioning(record) => match record.step {
-                ProvisioningStep::UkiPublicationAttempted
-                    if !uki_matches(&record.owned_entry, &readback) =>
+                ProvisioningStep::UkiPublicationPending
+                | ProvisioningStep::UkiPublicationAttempted
+                    if !matches!(readback, LifecycleReadback::UkiAbsent) =>
                 {
                     add_residual(&mut retained, Residual::UkiMayRemain)?;
                 }
+                ProvisioningStep::UkiPublicationAttempted => {
+                    add_residual(&mut retained, Residual::UkiMayRemain)?;
+                }
+                ProvisioningStep::UkiPublished if !uki_matches(&record.owned_entry, &readback) => {
+                    add_residual(&mut retained, Residual::UkiMayRemain)?;
+                }
                 ProvisioningStep::BootEntryCreateAttempted => {
-                    // A restart observation cannot prove that the attempted create did not
-                    // happen. Preserve the attempted checkpoint and record uncertainty even
-                    // when Boot#### is currently absent.
-                    let _ = readback;
                     add_residual(&mut retained, Residual::BootEntryMayExist)?;
                 }
-                ProvisioningStep::BootOrderAppendAttempted => {
-                    // The append result is never inferred from a restart observation. An
-                    // absent BootOrder entry is still a postcondition mismatch for the
-                    // attempted checkpoint and must remain visible to later recovery.
-                    let _ = readback;
+                ProvisioningStep::BootEntryCreated
+                | ProvisioningStep::BootEntryReadBackVerified
+                    if !matches!(
+                        readback,
+                        LifecycleReadback::BootEntryPresent(ref identity)
+                            if identity == &record.owned_entry.identity
+                    ) =>
+                {
+                    add_residual(&mut retained, Residual::BootEntryMayExist)?;
+                }
+                ProvisioningStep::BootOrderAppendAttempted
+                | ProvisioningStep::BootOrderAppendWriteCompleted
+                | ProvisioningStep::BootOrderAppended
+                | ProvisioningStep::BootOrderReadBackVerified => {
                     add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
                 _ => {}
             },
             ArchProvisionState::Uninstalling(record) => match record.step {
-                UninstallingStep::BootOrderRemovalAttempted => {
-                    if matches!(readback, LifecycleReadback::BootOrderContains) {
-                        add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
-                    }
+                UninstallingStep::Started
+                    if !matches!(
+                        readback,
+                        LifecycleReadback::BootOrder(ref order)
+                            if order.validate().is_ok()
+                                && order.ids.contains(&record.owned_entry.boot_id)
+                    ) =>
+                {
+                    add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
-                UninstallingStep::BootEntryRemovalAttempted => {
-                    if matches!(readback, LifecycleReadback::BootEntryPresent(_)) {
-                        add_residual(&mut retained, Residual::BootEntryMayExist)?;
-                    }
+                UninstallingStep::BootOrderRemovalAttempted
+                | UninstallingStep::BootOrderRemovalWriteCompleted => {
+                    add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
-                UninstallingStep::UkiRemovalAttempted
+                UninstallingStep::BootOrderRemoved
+                | UninstallingStep::BootOrderRemovalReadBackVerified
+                    if !matches!(
+                        readback,
+                        LifecycleReadback::BootOrder(ref order)
+                            if order.validate().is_ok()
+                                && !order.ids.contains(&record.owned_entry.boot_id)
+                    ) =>
+                {
+                    add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
+                }
+                UninstallingStep::BootEntryRemovalAttempted
+                | UninstallingStep::BootEntryDeleteCompleted => {
+                    add_residual(&mut retained, Residual::BootEntryMayExist)?;
+                }
+                UninstallingStep::BootEntryRemoved
+                | UninstallingStep::BootEntryRemovalReadBackVerified
+                    if !matches!(readback, LifecycleReadback::BootEntryAbsent) =>
+                {
+                    add_residual(&mut retained, Residual::BootEntryMayExist)?;
+                }
+                UninstallingStep::UkiRemovalAttempted | UninstallingStep::UkiDeleteCompleted => {
+                    add_residual(&mut retained, Residual::UkiMayRemain)?;
+                }
+                UninstallingStep::UkiRemoved
                     if !matches!(readback, LifecycleReadback::UkiAbsent) =>
                 {
                     add_residual(&mut retained, Residual::UkiMayRemain)?;
@@ -719,7 +945,11 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
             },
             _ => {}
         },
-        Err(_) => add_residual(&mut retained, Residual::ConfigurationMayRemain)?,
+        Err(_) => {
+            if let Some(residual) = residual_for_state(&state) {
+                add_residual(&mut retained, residual)?;
+            }
+        }
     }
     if retained != state {
         store.save(&retained)?;
@@ -806,12 +1036,70 @@ fn add_residual(state: &mut ArchProvisionState, residual: Residual) -> Result<()
     Ok(())
 }
 
-fn require_readback(actual: &LifecycleReadback, expected: &LifecycleReadback) -> Result<(), Error> {
+fn residual_for_state(state: &ArchProvisionState) -> Option<Residual> {
+    match state {
+        ArchProvisionState::Provisioning(record) => match record.step {
+            ProvisioningStep::UkiPublicationPending
+            | ProvisioningStep::UkiPublicationAttempted
+            | ProvisioningStep::UkiPublished => Some(Residual::UkiMayRemain),
+            ProvisioningStep::BootEntryCreateAttempted
+            | ProvisioningStep::BootEntryCreated
+            | ProvisioningStep::BootEntryReadBackVerified => Some(Residual::BootEntryMayExist),
+            ProvisioningStep::BootOrderAppendAttempted
+            | ProvisioningStep::BootOrderAppendWriteCompleted
+            | ProvisioningStep::BootOrderAppended
+            | ProvisioningStep::BootOrderReadBackVerified => {
+                Some(Residual::BootOrderMayContainEntry)
+            }
+        },
+        ArchProvisionState::Uninstalling(record) => match record.step {
+            UninstallingStep::Started
+            | UninstallingStep::BootOrderRemovalAttempted
+            | UninstallingStep::BootOrderRemovalWriteCompleted
+            | UninstallingStep::BootOrderRemoved
+            | UninstallingStep::BootOrderRemovalReadBackVerified => {
+                Some(Residual::BootOrderMayContainEntry)
+            }
+            UninstallingStep::BootEntryRemovalAttempted
+            | UninstallingStep::BootEntryDeleteCompleted
+            | UninstallingStep::BootEntryRemoved
+            | UninstallingStep::BootEntryRemovalReadBackVerified => {
+                Some(Residual::BootEntryMayExist)
+            }
+            UninstallingStep::UkiRemovalAttempted
+            | UninstallingStep::UkiDeleteCompleted
+            | UninstallingStep::UkiRemoved => Some(Residual::UkiMayRemain),
+        },
+        ArchProvisionState::Unprovisioned
+        | ArchProvisionState::Ready(_)
+        | ArchProvisionState::Uninstalled(_) => None,
+    }
+}
+
+fn require_precondition_at<F: Filesystem>(
+    store: &mut ArchProvisionStore<F>,
+    prior: &ArchProvisionState,
+    actual: &LifecycleReadback,
+    expected: &LifecycleReadback,
+    residual: Residual,
+) -> Result<(), Error> {
     if actual == expected {
         Ok(())
     } else {
-        Err(Error::ReadbackFailed)
+        fail_precondition(store, prior, residual, Error::ReadbackFailed)
     }
+}
+
+fn fail_precondition<F: Filesystem, T>(
+    store: &mut ArchProvisionStore<F>,
+    prior: &ArchProvisionState,
+    residual: Residual,
+    error: Error,
+) -> Result<T, Error> {
+    let mut retained = prior.clone();
+    add_residual(&mut retained, residual)?;
+    store.save(&retained)?;
+    Err(error)
 }
 
 fn require_readback_at<F: Filesystem>(
@@ -1070,8 +1358,8 @@ mod tests {
         let forged_appended = LifecycleProof::new(
             order_attempt.clone(),
             appended,
-            ProofBinding::BootOrderAbsent,
-            ProofBinding::BootOrderAbsent,
+            ProofBinding::BootOrderBefore(BootOrderValue::new(7, vec![BootId(7)]).unwrap()),
+            ProofBinding::BootOrderBefore(BootOrderValue::new(7, vec![BootId(7)]).unwrap()),
         )
         .unwrap();
         assert_eq!(
