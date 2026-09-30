@@ -50,6 +50,27 @@ Verification:
 
 No real EFI/NVRAM, ESP, system configuration, mkinitcpio, or reboot path was used.
 
+## Final review-fix wave
+
+Status: DONE_WITH_CONCERNS
+
+Implementation commit: `aa4a692`
+
+Fixes:
+
+- Lifecycle readbacks and private proofs now carry complete validated `BootOrderValue` snapshots. Append proofs require exact tail append preserving attributes and every prior ID/order; uninstall proofs require exact removal of only the owned ID. Fake coverage rejects reorder, prefix omission, duplicate, foreign-ID, and attribute mutations.
+- Prepare/read errors and precondition mismatches now persist deduplicated resource-specific residuals at the current durable checkpoint under the held lock before returning. Recovery observes every provisioning/uninstalling nonterminal state read-only and retains resource-specific residual evidence on errors or mismatches without advancing.
+- Added fake coverage for every provision/uninstall precondition checkpoint, nonterminal recovery, and observation errors.
+
+Verification:
+
+- `cargo test -p boothop-platform --all-targets --quiet` — passed.
+- `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
+- `cargo fmt --all -- --check` — passed.
+- `git diff --check` — passed.
+
+No real EFI/NVRAM, ESP, system configuration, mkinitcpio, or reboot path was used.
+
 ## Review-fix round 2
 
 Status: DONE_WITH_CONCERNS
