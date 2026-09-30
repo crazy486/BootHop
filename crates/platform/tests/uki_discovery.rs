@@ -1,17 +1,17 @@
 #![cfg(target_os = "linux")]
 
 use boothop_platform::linux::uki::{
-    ArchConfigFs, CmdlineSource, UkiInput, UkiPolicy, discover_uki_plan,
+    CmdlineSource, UkiConfigSnapshot, UkiInput, UkiPolicy, plan_uki_snapshot,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
-struct FixtureFs {
+struct FixtureConfig {
     files: BTreeMap<String, String>,
     directories: Vec<String>,
 }
 
-impl FixtureFs {
+impl FixtureConfig {
     fn arch() -> Self {
         let mut fs = Self::default();
         fs.directories.extend([
@@ -50,33 +50,32 @@ impl FixtureFs {
             *preset = preset.replace("ALL_config='/etc/mkinitcpio.conf'\n", "");
         }
     }
-}
 
-impl ArchConfigFs for FixtureFs {
-    fn read_text(&self, path: &str) -> Result<Option<String>, String> {
-        Ok(self.files.get(path).cloned())
-    }
-
-    fn is_file(&self, path: &str) -> bool {
-        self.files.contains_key(path)
-    }
-
-    fn is_directory(&self, path: &str) -> bool {
-        self.directories.iter().any(|dir| dir == path)
-    }
-
-    fn is_mounted_esp(&self, mount_path: &str) -> bool {
-        mount_path == "/boot"
-    }
-
-    fn files_in_directory(&self, path: &str) -> Result<Vec<String>, String> {
-        let prefix = format!("{}/", path.trim_end_matches('/'));
-        Ok(self
-            .files
-            .keys()
-            .filter(|file| file.starts_with(&prefix) && !file[prefix.len()..].contains('/'))
-            .cloned()
-            .collect())
+    fn snapshot(&self) -> UkiConfigSnapshot {
+        let mut directory_entries: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for path in self.files.keys() {
+            if let Some((parent, _)) = path.rsplit_once('/') {
+                directory_entries
+                    .entry(parent.to_owned())
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+        UkiConfigSnapshot {
+            mounted_esp: self
+                .directories
+                .iter()
+                .any(|directory| directory == "/boot")
+                .then(|| "/boot".into()),
+            esp_efi_directory: self.directories.iter().any(|dir| dir == "/boot/EFI"),
+            esp_boothop_directory: self
+                .directories
+                .iter()
+                .any(|dir| dir == "/boot/EFI/BootHop"),
+            regular_files: self.files.keys().cloned().collect::<BTreeSet<_>>(),
+            text_files: self.files.clone(),
+            directory_entries,
+        }
     }
 }
 
@@ -89,11 +88,21 @@ fn policy() -> UkiPolicy {
     }
 }
 
+fn plan_fixture(
+    fs: &FixtureConfig,
+    policy: &UkiPolicy,
+) -> Result<
+    boothop_platform::linux::uki::UkiBuildPlan,
+    boothop_platform::linux::uki::UkiDiscoveryError,
+> {
+    plan_uki_snapshot(&fs.snapshot(), policy)
+}
+
 #[test]
 fn discovers_active_preset_and_complete_fixed_path_plan() {
-    let fs = FixtureFs::arch();
+    let fs = FixtureConfig::arch();
 
-    let plan = discover_uki_plan(&fs, &policy()).unwrap();
+    let plan = plan_fixture(&fs, &policy()).unwrap();
 
     assert_eq!(plan.kernel_flavor, "linux");
     assert_eq!(plan.kernel_image, "/boot/vmlinuz-linux");
@@ -125,7 +134,7 @@ fn discovers_active_preset_and_complete_fixed_path_plan() {
 
 #[test]
 fn preset_specific_kernel_and_config_override_all_values() {
-    let mut fs = FixtureFs::arch();
+    let mut fs = FixtureConfig::arch();
     fs.insert("/boot/vmlinuz-linux-default", "selected kernel");
     fs.insert("/boot/initramfs-linux-default.img", "selected initramfs");
     fs.insert(
@@ -141,7 +150,7 @@ fn preset_specific_kernel_and_config_override_all_values() {
         "HOOKS=(base udev microcode block filesystems)\n",
     );
 
-    let plan = discover_uki_plan(&fs, &policy()).unwrap();
+    let plan = plan_fixture(&fs, &policy()).unwrap();
 
     assert_eq!(plan.kernel_image, "/boot/vmlinuz-linux-default");
     assert_eq!(plan.config_path, "/etc/mkinitcpio-default.conf");
@@ -151,7 +160,7 @@ fn preset_specific_kernel_and_config_override_all_values() {
 
 #[test]
 fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
-    let mut added = FixtureFs::arch();
+    let mut added = FixtureConfig::arch();
     added.use_default_mkinitcpio_config();
     added.insert(
         "/etc/mkinitcpio.conf",
@@ -161,13 +170,9 @@ fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
         "/etc/mkinitcpio.conf.d/20-boothop.conf",
         "HOOKS=(base udev microcode block filesystems)\n",
     );
-    assert!(
-        discover_uki_plan(&added, &policy())
-            .unwrap()
-            .includes_microcode
-    );
+    assert!(plan_fixture(&added, &policy()).unwrap().includes_microcode);
 
-    let mut removed = FixtureFs::arch();
+    let mut removed = FixtureConfig::arch();
     removed.use_default_mkinitcpio_config();
     removed.insert(
         "/etc/mkinitcpio.conf.d/10-no-microcode.conf",
@@ -182,7 +187,7 @@ fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
         "HOOKS=(base udev block filesystems)\n",
     );
     assert!(
-        !discover_uki_plan(&removed, &policy())
+        !plan_fixture(&removed, &policy())
             .unwrap()
             .includes_microcode
     );
@@ -190,14 +195,14 @@ fn static_dropins_add_or_remove_microcode_in_sorted_override_order() {
 
 #[test]
 fn unsupported_or_dynamic_mkinitcpio_dropin_fails_closed() {
-    let mut fs = FixtureFs::arch();
+    let mut fs = FixtureConfig::arch();
     fs.use_default_mkinitcpio_config();
     fs.insert(
         "/etc/mkinitcpio.conf.d/20-dynamic.conf",
         "HOOKS+=(microcode)\n",
     );
 
-    let error = discover_uki_plan(&fs, &policy()).unwrap_err();
+    let error = plan_fixture(&fs, &policy()).unwrap_err();
     assert!(
         error
             .to_string()
@@ -207,7 +212,7 @@ fn unsupported_or_dynamic_mkinitcpio_dropin_fails_closed() {
 
 #[test]
 fn rejects_ambiguous_installed_kernel_flavors_without_policy_selection() {
-    let mut fs = FixtureFs::arch();
+    let mut fs = FixtureConfig::arch();
     fs.insert(
         "/etc/mkinitcpio.d/linux-zen.preset",
         "ALL_kver='/boot/vmlinuz-linux-zen'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux-zen.img'\ndefault_cmdline='root=UUID=abc rw'\n",
@@ -217,7 +222,7 @@ fn rejects_ambiguous_installed_kernel_flavors_without_policy_selection() {
 
     let mut choice = policy();
     choice.selected_flavor = None;
-    let error = discover_uki_plan(&fs, &choice).unwrap_err();
+    let error = plan_fixture(&fs, &choice).unwrap_err();
 
     assert!(error.to_string().contains("select"));
     assert!(error.to_string().contains("linux-zen"));
@@ -225,20 +230,20 @@ fn rejects_ambiguous_installed_kernel_flavors_without_policy_selection() {
 
 #[test]
 fn rejects_unsupported_preset_layout_and_unmounted_or_unsafe_esp_paths() {
-    let mut fs = FixtureFs::arch();
+    let mut fs = FixtureConfig::arch();
     fs.insert(
         "/etc/mkinitcpio.d/linux.preset",
         "default_image='/boot/initramfs-linux.img'\ndefault_cmdline='root=UUID=abc rw'\n",
     );
-    assert!(discover_uki_plan(&fs, &policy()).is_err());
+    assert!(plan_fixture(&fs, &policy()).is_err());
 
-    let fs = FixtureFs::arch();
-    let mut direct_to_stable = FixtureFs::arch();
+    let fs = FixtureConfig::arch();
+    let mut direct_to_stable = FixtureConfig::arch();
     direct_to_stable.insert(
         "/etc/mkinitcpio.d/linux.preset",
         "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi'\ndefault_cmdline='/etc/boothop/cmdline'\n",
     );
-    let error = discover_uki_plan(&direct_to_stable, &policy()).unwrap_err();
+    let error = plan_fixture(&direct_to_stable, &policy()).unwrap_err();
     assert!(
         error
             .to_string()
@@ -247,31 +252,31 @@ fn rejects_unsupported_preset_layout_and_unmounted_or_unsafe_esp_paths() {
 
     let mut unmounted = policy();
     unmounted.esp_mount = "/efi".into();
-    assert!(discover_uki_plan(&fs, &unmounted).is_err());
+    assert!(plan_fixture(&fs, &unmounted).is_err());
 
     let mut unsafe_path = policy();
     unsafe_path.esp_mount = "/boot/../etc".into();
-    assert!(discover_uki_plan(&fs, &unsafe_path).is_err());
+    assert!(plan_fixture(&fs, &unsafe_path).is_err());
 }
 
 #[test]
 fn preset_cmdline_precedes_static_file_and_proc_only_fallback_is_rejected() {
-    let mut fs = FixtureFs::arch();
+    let mut fs = FixtureConfig::arch();
     fs.insert("/etc/kernel/cmdline", "root=UUID=deadbeef quiet");
     fs.insert("/proc/cmdline", "root=UUID=proc");
     assert_eq!(
-        discover_uki_plan(&fs, &policy()).unwrap().command_line,
+        plan_fixture(&fs, &policy()).unwrap().command_line,
         "root=UUID=abc rw"
     );
 
-    let mut no_preset_cmdline = FixtureFs::arch();
+    let mut no_preset_cmdline = FixtureConfig::arch();
     no_preset_cmdline.insert(
         "/etc/mkinitcpio.d/linux.preset",
         "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\n",
     );
     no_preset_cmdline.insert("/etc/kernel/cmdline", "root=UUID=deadbeef quiet");
     assert_eq!(
-        discover_uki_plan(&no_preset_cmdline, &policy())
+        plan_fixture(&no_preset_cmdline, &policy())
             .unwrap()
             .command_line,
         "root=UUID=deadbeef quiet"
@@ -280,21 +285,21 @@ fn preset_cmdline_precedes_static_file_and_proc_only_fallback_is_rejected() {
     no_preset_cmdline.remove("/etc/kernel/cmdline");
     no_preset_cmdline.insert("/etc/cmdline.d/boothop.conf", "root=PARTUUID=def rw");
     assert_eq!(
-        discover_uki_plan(&no_preset_cmdline, &policy())
+        plan_fixture(&no_preset_cmdline, &policy())
             .unwrap()
             .command_line,
         "root=PARTUUID=def rw"
     );
     no_preset_cmdline.remove("/etc/cmdline.d/boothop.conf");
     no_preset_cmdline.insert("/proc/cmdline", "root=UUID=proc");
-    let error = discover_uki_plan(&no_preset_cmdline, &policy()).unwrap_err();
+    let error = plan_fixture(&no_preset_cmdline, &policy()).unwrap_err();
     assert!(error.to_string().contains("persistent"));
 }
 
 #[test]
 fn preset_cmdline_must_be_an_absolute_regular_file_path() {
     for cmdline_value in ["root=UUID=inline rw", "cmdline", "/etc/boothop/cmdline.d"] {
-        let mut fs = FixtureFs::arch();
+        let mut fs = FixtureConfig::arch();
         if cmdline_value == "cmdline" {
             fs.insert("cmdline", "root=UUID=relative rw");
         }
@@ -304,7 +309,7 @@ fn preset_cmdline_must_be_an_absolute_regular_file_path() {
         );
 
         assert!(
-            discover_uki_plan(&fs, &policy()).is_err(),
+            plan_fixture(&fs, &policy()).is_err(),
             "preset cmdline value {cmdline_value:?} must be rejected"
         );
     }
@@ -312,18 +317,18 @@ fn preset_cmdline_must_be_an_absolute_regular_file_path() {
 
 #[test]
 fn secure_boot_requires_an_existing_signer_and_records_verification_expectations() {
-    let fs = FixtureFs::arch();
+    let fs = FixtureConfig::arch();
     let mut secure = policy();
     secure.secure_boot_required = true;
     assert!(
-        discover_uki_plan(&fs, &secure)
+        plan_fixture(&fs, &secure)
             .unwrap_err()
             .to_string()
             .contains("already-configured")
     );
 
     secure.signer_configured = true;
-    let plan = discover_uki_plan(&fs, &secure).unwrap();
+    let plan = plan_fixture(&fs, &secure).unwrap();
     assert!(plan.secure_boot.signing_required);
     assert!(plan.secure_boot.signer_already_configured);
     assert!(plan.validation.verify_after_signing);
@@ -331,20 +336,20 @@ fn secure_boot_requires_an_existing_signer_and_records_verification_expectations
 
 #[test]
 fn rejects_dynamic_cmdline_and_missing_kernel_or_initramfs() {
-    let mut dynamic = FixtureFs::arch();
+    let mut dynamic = FixtureConfig::arch();
     dynamic.insert(
         "/etc/mkinitcpio.d/linux.preset",
         "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline=\"$(cat /proc/cmdline)\"\n",
     );
-    assert!(discover_uki_plan(&dynamic, &policy()).is_err());
+    assert!(plan_fixture(&dynamic, &policy()).is_err());
 
-    let mut missing_kernel = FixtureFs::arch();
+    let mut missing_kernel = FixtureConfig::arch();
     missing_kernel.remove("/boot/vmlinuz-linux");
-    assert!(discover_uki_plan(&missing_kernel, &policy()).is_err());
+    assert!(plan_fixture(&missing_kernel, &policy()).is_err());
 
-    let mut missing_initramfs = FixtureFs::arch();
+    let mut missing_initramfs = FixtureConfig::arch();
     missing_initramfs.remove("/boot/initramfs-linux.img");
-    assert!(discover_uki_plan(&missing_initramfs, &policy()).is_err());
+    assert!(plan_fixture(&missing_initramfs, &policy()).is_err());
 }
 
 #[test]
@@ -353,13 +358,13 @@ fn rejects_unsupported_root_and_crypt_configuration() {
         "root=/dev/nfs ip=dhcp",
         "cryptdevice=UUID=abc:cryptroot root=/dev/mapper/cryptroot",
     ] {
-        let mut fs = FixtureFs::arch();
+        let mut fs = FixtureConfig::arch();
         fs.insert(
             "/etc/mkinitcpio.d/linux.preset",
             "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
         );
         fs.insert("/etc/boothop/cmdline", cmdline);
-        assert!(discover_uki_plan(&fs, &policy()).is_err(), "{cmdline}");
+        assert!(plan_fixture(&fs, &policy()).is_err(), "{cmdline}");
     }
 }
 
@@ -378,13 +383,13 @@ fn root_identifier_must_be_unique_nonempty_and_conservatively_valid() {
         "root=UUID=abc- rw",
         "root=UUID=ab--cd rw",
     ] {
-        let mut fs = FixtureFs::arch();
+        let mut fs = FixtureConfig::arch();
         fs.insert(
             "/etc/mkinitcpio.d/linux.preset",
             "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
         );
         fs.insert("/etc/boothop/cmdline", cmdline);
-        assert!(discover_uki_plan(&fs, &policy()).is_err(), "{cmdline}");
+        assert!(plan_fixture(&fs, &policy()).is_err(), "{cmdline}");
     }
 
     for cmdline in [
@@ -393,12 +398,12 @@ fn root_identifier_must_be_unique_nonempty_and_conservatively_valid() {
         "root=PARTUUID=123e4567-e89b-12d3-a456-426614174000 rw",
         "root=PARTUUID=12345678-01 rw",
     ] {
-        let mut fs = FixtureFs::arch();
+        let mut fs = FixtureConfig::arch();
         fs.insert(
             "/etc/mkinitcpio.d/linux.preset",
             "ALL_kver='/boot/vmlinuz-linux'\nALL_config='/etc/mkinitcpio.conf'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\ndefault_uki='/boot/EFI/BootHop/arch.efi.staging'\ndefault_cmdline='/etc/boothop/cmdline'\n",
         );
         fs.insert("/etc/boothop/cmdline", cmdline);
-        assert!(discover_uki_plan(&fs, &policy()).is_ok(), "{cmdline}");
+        assert!(plan_fixture(&fs, &policy()).is_ok(), "{cmdline}");
     }
 }

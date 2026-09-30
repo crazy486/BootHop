@@ -5,22 +5,26 @@ use boothop_core::{
     UninstallingRecord, UninstallingStep,
 };
 use boothop_platform::linux::uki::{
-    UkiBuildBackend, UkiBuildError, UkiBuildPlan, UkiFinalPathState, UkiPolicy,
+    UkiBuildBackend, UkiBuildError, UkiBuildPlan, UkiConfigSnapshot, UkiFinalPathState, UkiPolicy,
     UkiPublicationAuthority, UkiPublishFs, UkiPublishJournal, build_and_publish_uki,
-    discover_uki_plan, verify_interrupted_initial_publication,
+    plan_uki_snapshot, verify_interrupted_initial_publication,
 };
 use sha2::{Digest, Sha256};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 #[allow(dead_code)]
 mod support;
 
 #[derive(Default)]
-struct FixtureFs {
+struct FixtureConfig {
     files: BTreeMap<String, String>,
 }
 
-impl FixtureFs {
+impl FixtureConfig {
     fn ready() -> Self {
         let mut fs = Self::default();
         fs.files.insert(
@@ -39,29 +43,23 @@ impl FixtureFs {
             .insert("/boot/initramfs-linux.img".into(), "initramfs".into());
         fs
     }
-}
 
-impl boothop_platform::linux::uki::ArchConfigFs for FixtureFs {
-    fn read_text(&self, path: &str) -> Result<Option<String>, String> {
-        Ok(self.files.get(path).cloned())
-    }
-    fn is_file(&self, path: &str) -> bool {
-        self.files.contains_key(path)
-    }
-    fn is_directory(&self, path: &str) -> bool {
-        matches!(path, "/boot" | "/boot/EFI" | "/boot/EFI/BootHop")
-    }
-    fn is_mounted_esp(&self, mount_path: &str) -> bool {
-        mount_path == "/boot"
-    }
-    fn files_in_directory(&self, _: &str) -> Result<Vec<String>, String> {
-        Ok(Vec::new())
+    fn snapshot(&self) -> UkiConfigSnapshot {
+        UkiConfigSnapshot {
+            mounted_esp: Some("/boot".into()),
+            esp_efi_directory: true,
+            esp_boothop_directory: true,
+            regular_files: self.files.keys().cloned().collect::<BTreeSet<_>>(),
+            text_files: self.files.clone(),
+            directory_entries: BTreeMap::new(),
+        }
     }
 }
 
 fn plan() -> UkiBuildPlan {
-    discover_uki_plan(
-        &FixtureFs::ready(),
+    let fixture = FixtureConfig::ready();
+    plan_uki_snapshot(
+        &fixture.snapshot(),
         &UkiPolicy {
             selected_flavor: Some("linux".into()),
             esp_mount: "/boot".into(),
@@ -309,7 +307,7 @@ fn ready_state_for(contents: &[u8]) -> ArchProvisionState {
     ArchProvisionState::Ready(entry)
 }
 
-fn run(fail_at: FailAt) -> FakePublishFs {
+fn run_fake_publication(fail_at: FailAt) -> FakePublishFs {
     let mut plan = plan();
     if fail_at == FailAt::Sign {
         plan.secure_boot.signing_required = true;
@@ -725,7 +723,7 @@ fn every_build_validation_signing_and_stage_failure_keeps_previous_stable_uki() 
         FailAt::StageWrite,
         FailAt::DiskFull,
     ] {
-        let fs = run(fail_at);
+        let fs = run_fake_publication(fail_at);
         assert_eq!(
             fs.files.get("EFI/BootHop/arch.efi").unwrap(),
             b"previous UKI",
@@ -736,7 +734,7 @@ fn every_build_validation_signing_and_stage_failure_keeps_previous_stable_uki() 
 
 #[test]
 fn successful_publication_uses_fixed_final_path_and_atomic_replace() {
-    let fs = run(FailAt::None);
+    let fs = run_fake_publication(FailAt::None);
     assert_eq!(
         fs.files.get("EFI/BootHop/arch.efi").unwrap(),
         b"new verified UKI"
@@ -747,7 +745,7 @@ fn successful_publication_uses_fixed_final_path_and_atomic_replace() {
 
 #[test]
 fn failed_atomic_rename_keeps_previous_stable_uki_and_staging_is_separate() {
-    let fs = run(FailAt::Rename);
+    let fs = run_fake_publication(FailAt::Rename);
     assert_eq!(
         fs.files.get("EFI/BootHop/arch.efi").unwrap(),
         b"previous UKI"

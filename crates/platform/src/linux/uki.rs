@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use boothop_core::{ArchProvisionState, PublishMetadata};
 use sha2::{Digest, Sha256};
@@ -15,6 +18,19 @@ pub trait ArchConfigFs {
     fn is_directory(&self, path: &str) -> bool;
     fn is_mounted_esp(&self, mount_path: &str) -> bool;
     fn files_in_directory(&self, path: &str) -> Result<Vec<String>, String>;
+}
+
+/// Immutable read-only inputs for the pure UKI planner. The production entry point builds this
+/// snapshot from the standard Arch paths; tests can exercise all selection and validation logic
+/// without calling a filesystem-boundary function.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UkiConfigSnapshot {
+    pub mounted_esp: Option<String>,
+    pub esp_efi_directory: bool,
+    pub esp_boothop_directory: bool,
+    pub regular_files: BTreeSet<String>,
+    pub text_files: BTreeMap<String, String>,
+    pub directory_entries: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,14 +129,28 @@ pub fn discover_uki_plan(
     fs: &impl ArchConfigFs,
     policy: &UkiPolicy,
 ) -> Result<UkiBuildPlan, UkiDiscoveryError> {
-    validate_esp(fs, &policy.esp_mount)?;
+    let snapshot = capture_arch_config(fs, policy)?;
+    plan_uki_snapshot(&snapshot, policy)
+}
+
+/// Purely computes the fixed-path UKI plan from an immutable view of already-read Arch inputs.
+/// It does not access a filesystem, execute commands, invoke mkinitcpio, or write the ESP.
+pub fn plan_uki_snapshot(
+    snapshot: &UkiConfigSnapshot,
+    policy: &UkiPolicy,
+) -> Result<UkiBuildPlan, UkiDiscoveryError> {
+    validate_esp_snapshot(snapshot, &policy.esp_mount)?;
     if policy.secure_boot_required && !policy.signer_configured {
         return Err(UkiDiscoveryError::SigningNotConfigured);
     }
 
     let flavors = ["linux", "linux-zen"]
         .into_iter()
-        .filter(|flavor| fs.is_file(&format!("/etc/mkinitcpio.d/{flavor}.preset")))
+        .filter(|flavor| {
+            snapshot
+                .regular_files
+                .contains(&format!("/etc/mkinitcpio.d/{flavor}.preset"))
+        })
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if flavors.is_empty() {
@@ -141,7 +171,7 @@ pub fn discover_uki_plan(
     };
 
     let preset_path = format!("/etc/mkinitcpio.d/{flavor}.preset");
-    let preset = read_required(fs, &preset_path)?;
+    let preset = read_required_snapshot(snapshot, &preset_path)?;
     let values = parse_assignments(&preset);
     let kernel_image = value(&values, "default_kver")
         .or_else(|| value(&values, "ALL_kver"))
@@ -166,34 +196,38 @@ pub fn discover_uki_plan(
             "selected preset must write its UKI to the staging path {expected_staged_output}; the stable path is never a build target"
         )));
     }
-    if !fs.is_file(&kernel_image) {
+    if !snapshot.regular_files.contains(&kernel_image) {
         return Err(unsupported(format!(
             "selected kernel image is missing: {kernel_image}"
         )));
     }
-    if !fs.is_file(&initramfs_image) {
+    if !snapshot.regular_files.contains(&initramfs_image) {
         return Err(unsupported(format!(
             "selected initramfs image is missing: {initramfs_image}"
         )));
     }
-    let config = read_required(fs, &config_path)?;
+    let config = read_required_snapshot(snapshot, &config_path)?;
     let includes_microcode =
-        discover_microcode_hook(fs, &config_path, &config, !config_is_explicit)?;
+        discover_microcode_hook(snapshot, &config_path, &config, !config_is_explicit)?;
 
-    let (command_line_source, command_line) = discover_cmdline(fs, &values)?;
+    let (command_line_source, command_line) = discover_cmdline(snapshot, &values)?;
     validate_cmdline(&command_line)?;
 
     let signing_required = policy.secure_boot_required;
-    let mut inputs = vec![
-        UkiInput::Kernel(kernel_image.clone()),
-        UkiInput::Initramfs(initramfs_image.clone()),
-    ];
-    if includes_microcode {
-        inputs.push(UkiInput::EarlyMicrocodeFromInitramfs(
-            initramfs_image.clone(),
-        ));
-    }
-    inputs.push(UkiInput::ConfirmedCommandLine(command_line.clone()));
+    let inputs = if includes_microcode {
+        vec![
+            UkiInput::Kernel(kernel_image.clone()),
+            UkiInput::Initramfs(initramfs_image.clone()),
+            UkiInput::EarlyMicrocodeFromInitramfs(initramfs_image.clone()),
+            UkiInput::ConfirmedCommandLine(command_line.clone()),
+        ]
+    } else {
+        vec![
+            UkiInput::Kernel(kernel_image.clone()),
+            UkiInput::Initramfs(initramfs_image.clone()),
+            UkiInput::ConfirmedCommandLine(command_line.clone()),
+        ]
+    };
 
     Ok(UkiBuildPlan {
         kernel_flavor: flavor.to_owned(),
@@ -221,16 +255,148 @@ pub fn discover_uki_plan(
     })
 }
 
-fn validate_esp(fs: &impl ArchConfigFs, mount: &str) -> Result<(), UkiDiscoveryError> {
-    if !mount.starts_with('/')
-        || mount
-            .split('/')
-            .any(|component| component == ".." || component == ".")
+fn capture_arch_config(
+    fs: &impl ArchConfigFs,
+    policy: &UkiPolicy,
+) -> Result<UkiConfigSnapshot, UkiDiscoveryError> {
+    validate_esp_fs(fs, &policy.esp_mount)?;
+    if policy.secure_boot_required && !policy.signer_configured {
+        return Err(UkiDiscoveryError::SigningNotConfigured);
+    }
+
+    let mut snapshot = UkiConfigSnapshot {
+        mounted_esp: Some(policy.esp_mount.clone()),
+        esp_efi_directory: true,
+        esp_boothop_directory: true,
+        ..UkiConfigSnapshot::default()
+    };
+    let mut flavors = Vec::new();
+    for flavor in ["linux", "linux-zen"] {
+        let path = format!("/etc/mkinitcpio.d/{flavor}.preset");
+        if fs.is_file(&path) {
+            snapshot.regular_files.insert(path);
+            flavors.push(flavor);
+        }
+    }
+    let selected = match policy.selected_flavor.as_deref() {
+        Some(selected) if flavors.contains(&selected) => selected,
+        Some(selected) => {
+            return Err(UkiDiscoveryError::UnsupportedLayout(format!(
+                "selected kernel flavor {selected:?} has no supported mkinitcpio preset"
+            )));
+        }
+        None if flavors.len() == 1 => flavors[0],
+        None if flavors.is_empty() => return Ok(snapshot),
+        None => {
+            return Err(UkiDiscoveryError::FlavorSelectionRequired(
+                flavors.into_iter().map(str::to_owned).collect(),
+            ));
+        }
+    };
+    let preset_path = format!("/etc/mkinitcpio.d/{selected}.preset");
+    let preset = read_required(fs, &preset_path)?;
+    snapshot
+        .text_files
+        .insert(preset_path.clone(), preset.clone());
+    let values = parse_assignments(&preset);
+    let kernel_image = value(&values, "default_kver")
+        .or_else(|| value(&values, "ALL_kver"))
+        .ok_or_else(|| unsupported("preset must define ALL_kver or default_kver"))?;
+    let initramfs_image = value(&values, "default_image")
+        .or_else(|| value(&values, "ALL_image"))
+        .ok_or_else(|| {
+            unsupported("preset must define default_image or ALL_image for UKI input")
+        })?;
+    let staged_output = value(&values, "default_uki").or_else(|| value(&values, "ALL_uki"));
+    let expected_staged_output = format!(
+        "{}/{}",
+        policy.esp_mount.trim_end_matches('/'),
+        STAGED_UKI_PATH
+    );
+    if staged_output.as_deref() != Some(expected_staged_output.as_str()) {
+        return Err(unsupported(format!(
+            "selected preset must write its UKI to the staging path {expected_staged_output}; the stable path is never a build target"
+        )));
+    }
+    for (path, label) in [(&kernel_image, "kernel"), (&initramfs_image, "initramfs")] {
+        if !fs.is_file(path) {
+            return Err(unsupported(format!(
+                "selected {label} image is missing: {path}"
+            )));
+        }
+        snapshot.regular_files.insert(path.clone());
+    }
+
+    let explicit_config = value(&values, "default_config").or_else(|| value(&values, "ALL_config"));
+    let include_dropins = explicit_config.is_none();
+    let config_path = explicit_config.unwrap_or_else(|| "/etc/mkinitcpio.conf".into());
+    capture_text_file(fs, &mut snapshot, &config_path)?;
+
+    if include_dropins {
+        let dir = "/etc/mkinitcpio.conf.d";
+        let paths = validated_dropin_paths(
+            fs.files_in_directory(dir).map_err(UkiDiscoveryError::Io)?,
+            dir,
+        )?;
+        snapshot.directory_entries.insert(dir.into(), paths.clone());
+        for path in paths {
+            capture_text_file(fs, &mut snapshot, &path)?;
+        }
+    }
+
+    if let Some(path) = value(&values, "default_cmdline").or_else(|| value(&values, "ALL_cmdline"))
     {
+        // Dynamic and non-absolute values are rejected by the pure planner before file lookup.
+        if path.starts_with('/') && !is_dynamic(&path) && fs.is_file(&path) {
+            snapshot.regular_files.insert(path.clone());
+            if let Some(text) = fs.read_text(&path).map_err(UkiDiscoveryError::Io)? {
+                snapshot.text_files.insert(path, text);
+            }
+        }
+    } else {
+        for path in ["/etc/kernel/cmdline", "/etc/cmdline.d/boothop.conf"] {
+            if let Some(text) = fs.read_text(path).map_err(UkiDiscoveryError::Io)? {
+                snapshot.regular_files.insert(path.into());
+                snapshot.text_files.insert(path.into(), text);
+                break;
+            }
+        }
+    }
+
+    Ok(snapshot)
+}
+
+fn capture_text_file(
+    fs: &impl ArchConfigFs,
+    snapshot: &mut UkiConfigSnapshot,
+    path: &str,
+) -> Result<(), UkiDiscoveryError> {
+    let text = read_required(fs, path)?;
+    snapshot.regular_files.insert(path.into());
+    snapshot.text_files.insert(path.into(), text);
+    Ok(())
+}
+
+fn validate_esp_snapshot(
+    snapshot: &UkiConfigSnapshot,
+    mount: &str,
+) -> Result<(), UkiDiscoveryError> {
+    validate_esp_path(mount)?;
+    if snapshot.mounted_esp.as_deref() != Some(mount) {
+        return Err(UkiDiscoveryError::InvalidEsp(format!(
+            "configured ESP path {mount} is not a mounted ESP"
+        )));
+    }
+    if !snapshot.esp_efi_directory || !snapshot.esp_boothop_directory {
         return Err(UkiDiscoveryError::InvalidEsp(
-            "ESP mount path must be an absolute normalized path".into(),
+            "mounted ESP must already contain EFI/BootHop; discovery does not create it".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_esp_fs(fs: &impl ArchConfigFs, mount: &str) -> Result<(), UkiDiscoveryError> {
+    validate_esp_path(mount)?;
     if !fs.is_mounted_esp(mount) {
         return Err(UkiDiscoveryError::InvalidEsp(format!(
             "configured ESP path {mount} is not a mounted ESP"
@@ -245,14 +411,38 @@ fn validate_esp(fs: &impl ArchConfigFs, mount: &str) -> Result<(), UkiDiscoveryE
     Ok(())
 }
 
+fn validate_esp_path(mount: &str) -> Result<(), UkiDiscoveryError> {
+    if !mount.starts_with('/')
+        || mount
+            .split('/')
+            .any(|component| component == ".." || component == ".")
+    {
+        return Err(UkiDiscoveryError::InvalidEsp(
+            "ESP mount path must be an absolute normalized path".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn read_required(fs: &impl ArchConfigFs, path: &str) -> Result<String, UkiDiscoveryError> {
     fs.read_text(path)
         .map_err(UkiDiscoveryError::Io)?
         .ok_or_else(|| unsupported(format!("required Arch input is missing: {path}")))
 }
 
+fn read_required_snapshot(
+    snapshot: &UkiConfigSnapshot,
+    path: &str,
+) -> Result<String, UkiDiscoveryError> {
+    snapshot
+        .text_files
+        .get(path)
+        .cloned()
+        .ok_or_else(|| unsupported(format!("required Arch input is missing: {path}")))
+}
+
 fn discover_microcode_hook(
-    fs: &impl ArchConfigFs,
+    snapshot: &UkiConfigSnapshot,
     config_path: &str,
     main_config: &str,
     include_default_dropins: bool,
@@ -263,17 +453,37 @@ fn discover_microcode_hook(
         return Ok(hooks.iter().any(|hook| hook == "microcode"));
     }
     let dropin_dir = "/etc/mkinitcpio.conf.d";
-    let mut dropins = fs
-        .files_in_directory(dropin_dir)
-        .map_err(UkiDiscoveryError::Io)?
+    let mut dropins = validated_dropin_paths(
+        snapshot
+            .directory_entries
+            .get(dropin_dir)
+            .cloned()
+            .unwrap_or_default(),
+        dropin_dir,
+    )?;
+    dropins.sort();
+    for path in dropins {
+        let text = read_required_snapshot(snapshot, &path)?;
+        if let Some(override_hooks) = parse_static_config_hooks(&text, &path)? {
+            hooks = override_hooks;
+        }
+    }
+    Ok(hooks.iter().any(|hook| hook == "microcode"))
+}
+
+fn validated_dropin_paths(
+    paths: Vec<String>,
+    dropin_dir: &str,
+) -> Result<Vec<String>, UkiDiscoveryError> {
+    let mut dropins = paths
         .into_iter()
         .filter(|path| path.ends_with(".conf"))
         .collect::<Vec<_>>();
     if dropins.len() > 64 {
         return Err(unsupported("too many mkinitcpio config drop-ins"));
     }
+    let prefix = format!("{dropin_dir}/");
     for path in &dropins {
-        let prefix = format!("{dropin_dir}/");
         if !path.starts_with(&prefix)
             || path[prefix.len()..].is_empty()
             || path[prefix.len()..].contains('/')
@@ -284,13 +494,7 @@ fn discover_microcode_hook(
         }
     }
     dropins.sort();
-    for path in dropins {
-        let text = read_required(fs, &path)?;
-        if let Some(override_hooks) = parse_static_config_hooks(&text, &path)? {
-            hooks = override_hooks;
-        }
-    }
-    Ok(hooks.iter().any(|hook| hook == "microcode"))
+    Ok(dropins)
 }
 
 /// Parse only bounded static assignments. This intentionally does not interpret shell syntax,
@@ -379,7 +583,7 @@ fn value(values: &std::collections::BTreeMap<String, String>, key: &str) -> Opti
 }
 
 fn discover_cmdline(
-    fs: &impl ArchConfigFs,
+    snapshot: &UkiConfigSnapshot,
     preset: &std::collections::BTreeMap<String, String>,
 ) -> Result<(CmdlineSource, String), UkiDiscoveryError> {
     if let Some(value) = value(preset, "default_cmdline").or_else(|| value(preset, "ALL_cmdline")) {
@@ -393,19 +597,16 @@ fn discover_cmdline(
                 "preset cmdline must name an absolute regular file path".into(),
             ));
         }
-        if !fs.is_file(&value) {
+        if !snapshot.regular_files.contains(&value) {
             return Err(UkiDiscoveryError::InvalidCommandLine(format!(
                 "preset cmdline is not an existing regular file: {value}"
             )));
         }
-        let resolved = fs
-            .read_text(&value)
-            .map_err(UkiDiscoveryError::Io)?
-            .ok_or_else(|| {
-                UkiDiscoveryError::InvalidCommandLine(format!(
-                    "preset command-line file is missing: {value}"
-                ))
-            })?;
+        let resolved = snapshot.text_files.get(&value).cloned().ok_or_else(|| {
+            UkiDiscoveryError::InvalidCommandLine(format!(
+                "preset command-line file is missing: {value}"
+            ))
+        })?;
         if is_dynamic(&resolved) {
             return Err(UkiDiscoveryError::InvalidCommandLine(
                 "preset command line is dynamic; configure a static persistent command line".into(),
@@ -420,8 +621,8 @@ fn discover_cmdline(
             CmdlineSource::BootHopCmdlineFile,
         ),
     ] {
-        if let Some(value) = fs.read_text(path).map_err(UkiDiscoveryError::Io)? {
-            if is_dynamic(&value) {
+        if let Some(value) = snapshot.text_files.get(path) {
+            if is_dynamic(value) {
                 return Err(UkiDiscoveryError::InvalidCommandLine(format!(
                     "{path} contains dynamic command-line content; use a static persistent source"
                 )));
