@@ -343,9 +343,6 @@ fn journal_event(state: &ArchProvisionState) -> &'static str {
         ArchProvisionState::Uninstalling(record) => match record.step {
             U::Started => "journal:uninstalling:started",
             U::BootOrderRemovalAttempted => "journal:uninstalling:boot_order_removal_attempted",
-            U::BootOrderRemovalWriteCompleted => {
-                "journal:uninstalling:boot_order_removal_write_completed"
-            }
             U::BootOrderRemoved => "journal:uninstalling:boot_order_removed",
             U::BootOrderRemovalReadBackVerified => {
                 "journal:uninstalling:boot_order_removal_read_back_verified"

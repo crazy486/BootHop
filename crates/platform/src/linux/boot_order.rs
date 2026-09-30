@@ -233,7 +233,6 @@ pub fn observe_order_removal<I: BootOrderIo>(
             if matches!(
                 record.step,
                 UninstallingStep::BootOrderRemovalAttempted
-                    | UninstallingStep::BootOrderRemovalWriteCompleted
                     | UninstallingStep::BootOrderRemoved
                     | UninstallingStep::BootOrderRemovalReadBackVerified
             ) =>

@@ -301,7 +301,7 @@ fn reconciliation_paths_are_read_only_and_never_retry_mutations() {
     assert!(!observe_append_only(&mut firmware, BootId(0x1234)).unwrap());
     assert_eq!(firmware.writes, 0);
 
-    let order_state = uninstall(UninstallingStep::BootOrderRemovalWriteCompleted);
+    let order_state = uninstall(UninstallingStep::BootOrderRemoved);
     assert!(observe_order_removal(&mut firmware, &order_state).unwrap());
     assert_eq!(firmware.writes, 0);
 

@@ -249,7 +249,6 @@ fn every_provisioning_and_uninstall_step_roundtrips() {
     let uninstall_steps = [
         UninstallingStep::Started,
         UninstallingStep::BootOrderRemovalAttempted,
-        UninstallingStep::BootOrderRemovalWriteCompleted,
         UninstallingStep::BootOrderRemoved,
         UninstallingStep::BootOrderRemovalReadBackVerified,
         UninstallingStep::BootEntryRemovalAttempted,
@@ -269,8 +268,7 @@ fn every_provisioning_and_uninstall_step_roundtrips() {
             residual: vec![Residual::BootEntryMayExist, Residual::UkiMayRemain],
             boot_order_proof: match step {
                 UninstallingStep::Started => None,
-                UninstallingStep::BootOrderRemovalAttempted
-                | UninstallingStep::BootOrderRemovalWriteCompleted => {
+                UninstallingStep::BootOrderRemovalAttempted => {
                     Some(removal_proof("op-uninstall", false))
                 }
                 _ => Some(removal_proof("op-uninstall", true)),

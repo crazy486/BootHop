@@ -118,7 +118,6 @@ pub enum ProvisioningStep {
 pub enum UninstallingStep {
     Started,
     BootOrderRemovalAttempted,
-    BootOrderRemovalWriteCompleted,
     BootOrderRemoved,
     BootOrderRemovalReadBackVerified,
     BootEntryRemovalAttempted,
@@ -439,8 +438,7 @@ fn validate_uninstall_boot_order_proof(
                 return Err(Error::CorruptRecord);
             }
         }
-        UninstallingStep::BootOrderRemovalAttempted
-        | UninstallingStep::BootOrderRemovalWriteCompleted => {
+        UninstallingStep::BootOrderRemovalAttempted => {
             let Some(proof) = proof else {
                 return Err(Error::CorruptRecord);
             };

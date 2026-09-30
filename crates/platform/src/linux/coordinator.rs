@@ -212,7 +212,9 @@ impl LifecycleProof {
         {
             return Err(Error::IdentityMismatch);
         }
-        if !proof_bindings_valid(&self.next, &self.expected, &self.observed) {
+        if !proof_bindings_valid(&self.next, &self.expected, &self.observed)
+            || !boot_order_proof_bound(&self.prior, &self.next, &self.expected, &self.observed)
+        {
             return Err(Error::ReadbackFailed);
         }
         if !valid_proof_transition(&self.prior, &self.next) {
@@ -388,7 +390,6 @@ fn mutation_action(state: &ArchProvisionState) -> Option<MutationAction> {
             UninstallingStep::BootEntryRemovalAttempted => Some(MutationAction::BootEntryRemove),
             UninstallingStep::UkiRemovalAttempted => Some(MutationAction::UkiRemove),
             UninstallingStep::Started
-            | UninstallingStep::BootOrderRemovalWriteCompleted
             | UninstallingStep::BootOrderRemoved
             | UninstallingStep::BootOrderRemovalReadBackVerified
             | UninstallingStep::BootEntryDeleteCompleted
@@ -517,7 +518,6 @@ fn proof_bindings_valid(
                 matches!(expected, LifecycleProofBinding::UkiAbsent) && same
             }
             UninstallingStep::Started
-            | UninstallingStep::BootOrderRemovalWriteCompleted
             | UninstallingStep::BootEntryDeleteCompleted
             | UninstallingStep::UkiDeleteCompleted => same,
         },
@@ -535,6 +535,102 @@ fn proof_bindings_valid(
         ),
         ArchProvisionState::Unprovisioned | ArchProvisionState::Uninstalled(_) => false,
     }
+}
+
+fn boot_order_proof_bound(
+    prior: &ArchProvisionState,
+    state: &ArchProvisionState,
+    expected: &LifecycleProofBinding,
+    observed: &LifecycleProofBinding,
+) -> bool {
+    let ArchProvisionState::Uninstalling(record) = state else {
+        return true;
+    };
+    let Some(proof) = record.boot_order_proof.as_ref() else {
+        return matches!(record.step, UninstallingStep::Started);
+    };
+    if !boot_order_proof_metadata_matches(record, proof) {
+        return false;
+    }
+    let Some(before) = boot_order_value(&proof.before) else {
+        return false;
+    };
+    match record.step {
+        UninstallingStep::BootOrderRemovalAttempted => {
+            matches!(
+                (expected, observed),
+                (
+                    LifecycleProofBinding::BootEntryAndOrderBefore { identity, order },
+                    LifecycleProofBinding::BootEntryAndOrderBefore {
+                        identity: observed_identity,
+                        order: observed_order,
+                    },
+                ) if identity == &record.owned_entry.identity
+                    && observed_identity == identity
+                    && order == &before
+                    && observed_order == order
+                    && proof.observed_after.is_none()
+            )
+        }
+        UninstallingStep::BootOrderRemoved | UninstallingStep::BootOrderRemovalReadBackVerified => {
+            let Some(after) = boot_order_value(&proof.expected_after) else {
+                return false;
+            };
+            let observed_after = proof.observed_after.as_ref().and_then(boot_order_value);
+            if observed_after.as_ref() != Some(&after)
+                || !matches!(
+                    (expected, observed),
+                    (
+                        LifecycleProofBinding::BootOrderTransition {
+                            before: expected_before,
+                            after: expected_after,
+                        },
+                        LifecycleProofBinding::BootOrderTransition {
+                            before: observed_before,
+                            after: observed_after,
+                        },
+                    ) if expected_before == &before
+                        && observed_before == expected_before
+                        && expected_after == &after
+                        && observed_after == expected_after
+                )
+            {
+                return false;
+            }
+            let ArchProvisionState::Uninstalling(prior_record) = prior else {
+                return false;
+            };
+            let Some(prior_proof) = prior_record.boot_order_proof.as_ref() else {
+                return false;
+            };
+            if !boot_order_proof_metadata_matches(prior_record, prior_proof)
+                || prior_proof.before != proof.before
+            {
+                return false;
+            }
+            match prior_record.step {
+                UninstallingStep::BootOrderRemovalAttempted => prior_proof.observed_after.is_none(),
+                UninstallingStep::BootOrderRemoved
+                | UninstallingStep::BootOrderRemovalReadBackVerified => prior_proof == proof,
+                _ => false,
+            }
+        }
+        _ => proof.validate().is_ok(),
+    }
+}
+
+fn boot_order_proof_metadata_matches(
+    record: &UninstallingRecord,
+    proof: &BootOrderRemovalProof,
+) -> bool {
+    proof.validate().is_ok()
+        && proof.operation_id == record.operation_id
+        && proof.operation_version == record.operation_version
+        && proof.boot_id == record.owned_entry.boot_id
+}
+
+fn boot_order_value(snapshot: &BootOrderSnapshot) -> Option<BootOrderValue> {
+    BootOrderValue::new(snapshot.attributes, snapshot.ids.clone()).ok()
 }
 
 fn operation_and_entry(state: &ArchProvisionState) -> Result<(String, OwnedArchEntry), Error> {
@@ -626,20 +722,12 @@ fn valid_proof_transition(prior: &ArchProvisionState, next: &ArchProvisionState)
             matches!(
                 (a.step, b.step),
                 (U::Started, U::BootOrderRemovalAttempted)
-                    | (
-                        U::BootOrderRemovalAttempted,
-                        U::BootOrderRemovalWriteCompleted
-                    )
                     | (U::BootOrderRemovalAttempted, U::BootOrderRemoved)
                     | (
                         U::BootOrderRemovalAttempted,
                         U::BootOrderRemovalReadBackVerified
                     )
                     | (U::BootOrderRemoved, U::BootOrderRemovalReadBackVerified)
-                    | (
-                        U::BootOrderRemovalWriteCompleted,
-                        U::BootOrderRemovalReadBackVerified
-                    )
                     | (
                         U::BootOrderRemovalReadBackVerified,
                         U::BootEntryRemovalAttempted
@@ -1204,8 +1292,7 @@ pub fn recover<F: Filesystem, B: LifecycleBackend>(
                 {
                     add_residual(&mut retained, Residual::BootOrderMayContainEntry)?;
                 }
-                UninstallingStep::BootOrderRemovalAttempted
-                | UninstallingStep::BootOrderRemovalWriteCompleted => {
+                UninstallingStep::BootOrderRemovalAttempted => {
                     if retained == state
                         && let LifecycleReadback::BootOrder(ref order) = readback
                         && let Some(next) = recover_boot_order_checkpoint(&state, order)?
@@ -1304,9 +1391,7 @@ fn recover_boot_order_checkpoint(
     }
     if !matches!(
         record.step,
-        UninstallingStep::BootOrderRemovalAttempted
-            | UninstallingStep::BootOrderRemovalWriteCompleted
-            | UninstallingStep::BootOrderRemoved
+        UninstallingStep::BootOrderRemovalAttempted | UninstallingStep::BootOrderRemoved
     ) {
         return Ok(None);
     }
@@ -1471,7 +1556,6 @@ fn residual_for_state(state: &ArchProvisionState) -> Option<Residual> {
         ArchProvisionState::Uninstalling(record) => match record.step {
             UninstallingStep::Started
             | UninstallingStep::BootOrderRemovalAttempted
-            | UninstallingStep::BootOrderRemovalWriteCompleted
             | UninstallingStep::BootOrderRemoved
             | UninstallingStep::BootOrderRemovalReadBackVerified => {
                 Some(Residual::BootOrderMayContainEntry)
@@ -1649,9 +1733,9 @@ fn boot_order_snapshot(order: &BootOrderValue) -> BootOrderSnapshot {
 mod tests {
     use super::*;
     use boothop_core::{
-        BootId, BuildMetadata, CanonicalDevicePathNode, CanonicalEndEntireNode,
-        CanonicalFilePathNode, CanonicalHardDriveNode, CanonicalIdentity, OpaqueAlgorithm,
-        OpaqueExactV1,
+        BootId, BootOrderRemovalProof, BootOrderSnapshot, BuildMetadata, CanonicalDevicePathNode,
+        CanonicalEndEntireNode, CanonicalFilePathNode, CanonicalHardDriveNode, CanonicalIdentity,
+        OpaqueAlgorithm, OpaqueExactV1, UninstallingRecord, UninstallingStep,
     };
 
     fn entry() -> OwnedArchEntry {
@@ -1712,6 +1796,60 @@ mod tests {
             step: ProvisioningStep::UkiPublished,
             residual: Vec::new(),
         })
+    }
+
+    fn uninstalling_state(
+        operation_id: &str,
+        step: UninstallingStep,
+        proof: BootOrderRemovalProof,
+    ) -> ArchProvisionState {
+        ArchProvisionState::Uninstalling(UninstallingRecord {
+            operation_id: operation_id.into(),
+            operation_version: 1,
+            owned_entry: entry(),
+            step,
+            residual: Vec::new(),
+            boot_order_proof: Some(proof),
+        })
+    }
+
+    fn removal_proof(operation_id: &str, before: &[u16], observed: bool) -> BootOrderRemovalProof {
+        let boot_id = BootId(7);
+        let before = BootOrderSnapshot {
+            attributes: 7,
+            ids: before.iter().copied().map(BootId).collect(),
+        };
+        let expected_after = BootOrderSnapshot {
+            attributes: before.attributes,
+            ids: before
+                .ids
+                .iter()
+                .copied()
+                .filter(|id| *id != boot_id)
+                .collect(),
+        };
+        BootOrderRemovalProof {
+            operation_id: operation_id.into(),
+            operation_version: 1,
+            boot_id,
+            before,
+            expected_after: expected_after.clone(),
+            observed_after: observed.then_some(expected_after),
+        }
+    }
+
+    fn before_binding(order: &[u16]) -> LifecycleProofBinding {
+        LifecycleProofBinding::BootEntryAndOrderBefore {
+            identity: entry().identity,
+            order: BootOrderValue::new(7, order.iter().copied().map(BootId).collect()).unwrap(),
+        }
+    }
+
+    fn transition_binding(before: &[u16], after: &[u16]) -> LifecycleProofBinding {
+        LifecycleProofBinding::BootOrderTransition {
+            before: BootOrderValue::new(7, before.iter().copied().map(BootId).collect()).unwrap(),
+            after: BootOrderValue::new(7, after.iter().copied().map(BootId).collect()).unwrap(),
+        }
     }
 
     #[test]
@@ -1837,6 +1975,110 @@ mod tests {
         .unwrap();
         assert_eq!(
             forged_appended.validate(&order_attempt),
+            Err(Error::ReadbackFailed)
+        );
+    }
+
+    #[test]
+    fn uninstall_attempt_binding_must_match_persisted_full_order_proof() {
+        let prior = ArchProvisionState::Uninstalling(UninstallingRecord {
+            operation_id: "op-1".into(),
+            operation_version: 1,
+            owned_entry: entry(),
+            step: UninstallingStep::Started,
+            residual: Vec::new(),
+            boot_order_proof: None,
+        });
+        let next = uninstalling_state(
+            "op-1",
+            UninstallingStep::BootOrderRemovalAttempted,
+            removal_proof("op-1", &[8, 7, 9], false),
+        );
+        let forged = LifecycleProof::new(
+            prior,
+            next,
+            before_binding(&[8, 9, 7]),
+            before_binding(&[8, 9, 7]),
+        )
+        .unwrap();
+        assert_eq!(forged.validate(&forged.prior), Err(Error::ReadbackFailed));
+    }
+
+    #[test]
+    fn uninstall_binding_rejects_persisted_operation_version_or_boot_id_mismatch() {
+        for mismatch in 0..3 {
+            let prior = ArchProvisionState::Uninstalling(UninstallingRecord {
+                operation_id: "op-1".into(),
+                operation_version: 1,
+                owned_entry: entry(),
+                step: UninstallingStep::Started,
+                residual: Vec::new(),
+                boot_order_proof: None,
+            });
+            let mut proof = removal_proof("op-1", &[8, 7, 9], false);
+            match mismatch {
+                0 => proof.operation_id = "other-op".into(),
+                1 => proof.operation_version = 2,
+                2 => {
+                    proof.boot_id = BootId(8);
+                    proof.expected_after.ids = vec![BootId(7), BootId(9)];
+                }
+                _ => unreachable!(),
+            }
+            let next =
+                uninstalling_state("op-1", UninstallingStep::BootOrderRemovalAttempted, proof);
+            let forged = LifecycleProof::new(
+                prior,
+                next,
+                before_binding(&[8, 7, 9]),
+                before_binding(&[8, 7, 9]),
+            )
+            .unwrap();
+            assert_eq!(
+                forged.validate(&forged.prior),
+                Err(Error::ReadbackFailed),
+                "{mismatch}"
+            );
+        }
+    }
+
+    #[test]
+    fn uninstall_transition_must_match_prior_attempt_and_persisted_write_result() {
+        let prior = uninstalling_state(
+            "op-1",
+            UninstallingStep::BootOrderRemovalAttempted,
+            removal_proof("op-1", &[8, 7, 9], false),
+        );
+        let next = uninstalling_state(
+            "op-1",
+            UninstallingStep::BootOrderRemoved,
+            removal_proof("op-1", &[8, 7, 9], true),
+        );
+        let forged_prior_mismatch = LifecycleProof::new(
+            uninstalling_state(
+                "op-1",
+                UninstallingStep::BootOrderRemovalAttempted,
+                removal_proof("op-1", &[8, 7, 6], false),
+            ),
+            next.clone(),
+            transition_binding(&[8, 7, 9], &[8, 9]),
+            transition_binding(&[8, 7, 9], &[8, 9]),
+        )
+        .unwrap();
+        assert_eq!(
+            forged_prior_mismatch.validate(&forged_prior_mismatch.prior),
+            Err(Error::ReadbackFailed)
+        );
+
+        let forged_write_result = LifecycleProof::new(
+            prior,
+            next,
+            transition_binding(&[8, 7, 9], &[8, 9]),
+            transition_binding(&[8, 7, 9], &[8, 6]),
+        )
+        .unwrap();
+        assert_eq!(
+            forged_write_result.validate(&forged_write_result.prior),
             Err(Error::ReadbackFailed)
         );
     }
