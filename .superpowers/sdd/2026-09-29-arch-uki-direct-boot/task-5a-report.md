@@ -49,3 +49,25 @@ Verification:
 - `git diff --check` — passed.
 
 No real EFI/NVRAM, ESP, system configuration, mkinitcpio, or reboot path was used.
+
+## Review-fix round 2
+
+Status: DONE_WITH_CONCERNS
+
+Implementation commit: `531fbd9`
+
+Fixes:
+
+- Restart recovery now records residual evidence for absent Boot#### and BootOrder observations at attempted create/append checkpoints while preserving the checkpoint and remaining read-only.
+- Fake journal events now decode each durable checkpoint, and tests assert exact attempted/verified ordering and residuals.
+- Linux Switch coverage explicitly rejects Boot####, BootOrder, and UKI lifecycle mutation calls while allowing its BootNext write.
+- Fake uninstall coverage asserts the complete durable lifecycle sequence through BootOrder, Boot####, UKI, and the terminal tombstone.
+
+Verification:
+
+- `cargo test -p boothop-platform --all-targets --quiet` — passed.
+- `cargo clippy -p boothop-platform --all-targets --no-deps -- -D warnings` — passed.
+- `cargo fmt --all` — passed.
+- `git diff --check` — passed.
+
+No real EFI/NVRAM, ESP, system configuration, mkinitcpio, or reboot path was used.
