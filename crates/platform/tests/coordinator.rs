@@ -58,6 +58,33 @@ struct FakeBackend {
     stale_journal: Option<ArchProvisionState>,
 }
 
+struct MutationEvidence {
+    entry: boothop_core::OwnedArchEntry,
+    operation_id: String,
+    operation_version: u64,
+    attempted_state: ArchProvisionState,
+    expected_evidence: LifecycleProofBinding,
+    precondition_evidence: LifecycleProofBinding,
+}
+
+fn mutation_evidence(
+    entry: &boothop_core::OwnedArchEntry,
+    operation_id: &str,
+    operation_version: u64,
+    attempted_state: &ArchProvisionState,
+    expected_evidence: &LifecycleProofBinding,
+    precondition_evidence: &LifecycleProofBinding,
+) -> MutationEvidence {
+    MutationEvidence {
+        entry: entry.clone(),
+        operation_id: operation_id.to_owned(),
+        operation_version,
+        attempted_state: attempted_state.clone(),
+        expected_evidence: expected_evidence.clone(),
+        precondition_evidence: precondition_evidence.clone(),
+    }
+}
+
 impl FakeBackend {
     fn new(fs: support::FakeFs) -> Self {
         Self {
@@ -97,12 +124,7 @@ impl FakeBackend {
         &mut self,
         stage: &'static str,
         residual: Residual,
-        entry: &boothop_core::OwnedArchEntry,
-        operation_id: &str,
-        operation_version: u64,
-        attempted_state: ArchProvisionState,
-        expected_evidence: LifecycleProofBinding,
-        precondition_evidence: LifecycleProofBinding,
+        evidence: MutationEvidence,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
         self.assert_lock();
         self.trace(match stage {
@@ -120,12 +142,12 @@ impl FakeBackend {
         self.mutations.push(stage);
         self.permit_evidence.push((
             stage,
-            operation_id.to_owned(),
-            operation_version,
-            attempted_state,
-            entry.clone(),
-            expected_evidence,
-            precondition_evidence,
+            evidence.operation_id.clone(),
+            evidence.operation_version,
+            evidence.attempted_state.clone(),
+            evidence.entry.clone(),
+            evidence.expected_evidence.clone(),
+            evidence.precondition_evidence.clone(),
         ));
         let fail = match stage {
             "uki" => self.fail == FailAt::Uki,
@@ -150,7 +172,7 @@ impl FakeBackend {
                     size: 43,
                 }),
                 "entry" => {
-                    let mut identity = entry.identity.clone();
+                    let mut identity = evidence.entry.identity.clone();
                     identity.file_path_list_length = identity.file_path_list_length.wrapping_add(1);
                     LifecycleReadback::BootEntryPresent(identity)
                 }
@@ -224,7 +246,7 @@ impl FakeBackend {
                 sha256: [0x22; 32],
                 size: 42,
             }),
-            "entry" => LifecycleReadback::BootEntryPresent(entry.identity.clone()),
+            "entry" => LifecycleReadback::BootEntryPresent(evidence.entry.identity.clone()),
             "order" => LifecycleReadback::BootOrder(
                 BootOrderValue::new(
                     7,
@@ -294,12 +316,14 @@ impl LifecycleBackend for FakeBackend {
         self.mutation(
             "uki",
             Residual::UkiMayRemain,
-            entry,
-            permit.operation_id(),
-            permit.operation_version(),
-            permit.attempted_state().clone(),
-            permit.expected_evidence().clone(),
-            permit.precondition_evidence().clone(),
+            mutation_evidence(
+                entry,
+                permit.operation_id(),
+                permit.operation_version(),
+                permit.attempted_state(),
+                permit.expected_evidence(),
+                permit.precondition_evidence(),
+            ),
         )
     }
     fn prepare_boot_entry(
@@ -326,12 +350,14 @@ impl LifecycleBackend for FakeBackend {
         self.mutation(
             "entry",
             Residual::BootEntryMayExist,
-            permit.owned_entry(),
-            permit.operation_id(),
-            permit.operation_version(),
-            permit.attempted_state().clone(),
-            permit.expected_evidence().clone(),
-            permit.precondition_evidence().clone(),
+            mutation_evidence(
+                permit.owned_entry(),
+                permit.operation_id(),
+                permit.operation_version(),
+                permit.attempted_state(),
+                permit.expected_evidence(),
+                permit.precondition_evidence(),
+            ),
         )
     }
     fn prepare_boot_order_append(
@@ -345,8 +371,9 @@ impl LifecycleBackend for FakeBackend {
         self.trace("external-read-order");
         self.events.push("read-order");
         if self.prepare_mismatch == FailAt::Order {
-            return Ok(LifecycleReadback::BootOrder(
-                BootOrderValue::new(
+            return Ok(LifecycleReadback::BootEntryAndOrder {
+                identity: entry.identity.clone(),
+                order: BootOrderValue::new(
                     7,
                     vec![
                         boothop_core::BootId(7),
@@ -355,11 +382,13 @@ impl LifecycleBackend for FakeBackend {
                     ],
                 )
                 .unwrap(),
-            ));
+            });
         }
-        Ok(LifecycleReadback::BootOrder(
-            BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)]).unwrap(),
-        ))
+        Ok(LifecycleReadback::BootEntryAndOrder {
+            identity: entry.identity.clone(),
+            order: BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)])
+                .unwrap(),
+        })
     }
     fn append_boot_order(
         &mut self,
@@ -368,17 +397,19 @@ impl LifecycleBackend for FakeBackend {
         self.mutation(
             "order",
             Residual::BootOrderMayContainEntry,
-            permit.owned_entry(),
-            permit.operation_id(),
-            permit.operation_version(),
-            permit.attempted_state().clone(),
-            permit.expected_evidence().clone(),
-            permit.precondition_evidence().clone(),
+            mutation_evidence(
+                permit.owned_entry(),
+                permit.operation_id(),
+                permit.operation_version(),
+                permit.attempted_state(),
+                permit.expected_evidence(),
+                permit.precondition_evidence(),
+            ),
         )
     }
     fn prepare_boot_order_remove(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
         self.uninstalling = true;
@@ -388,13 +419,18 @@ impl LifecycleBackend for FakeBackend {
         self.trace("external-read-order");
         self.events.push("read-order");
         if self.prepare_mismatch == FailAt::Order {
-            return Ok(LifecycleReadback::BootOrder(
-                BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)])
-                    .unwrap(),
-            ));
+            return Ok(LifecycleReadback::BootEntryAndOrder {
+                identity: entry.identity.clone(),
+                order: BootOrderValue::new(
+                    7,
+                    vec![boothop_core::BootId(7), boothop_core::BootId(8)],
+                )
+                .unwrap(),
+            });
         }
-        Ok(LifecycleReadback::BootOrder(
-            BootOrderValue::new(
+        Ok(LifecycleReadback::BootEntryAndOrder {
+            identity: entry.identity.clone(),
+            order: BootOrderValue::new(
                 7,
                 vec![
                     boothop_core::BootId(7),
@@ -403,7 +439,7 @@ impl LifecycleBackend for FakeBackend {
                 ],
             )
             .unwrap(),
-        ))
+        })
     }
     fn remove_boot_order(
         &mut self,
@@ -412,12 +448,14 @@ impl LifecycleBackend for FakeBackend {
         let observed = self.mutation(
             "order",
             Residual::BootOrderMayContainEntry,
-            permit.owned_entry(),
-            permit.operation_id(),
-            permit.operation_version(),
-            permit.attempted_state().clone(),
-            permit.expected_evidence().clone(),
-            permit.precondition_evidence().clone(),
+            mutation_evidence(
+                permit.owned_entry(),
+                permit.operation_id(),
+                permit.operation_version(),
+                permit.attempted_state(),
+                permit.expected_evidence(),
+                permit.precondition_evidence(),
+            ),
         )?;
         if self.mismatch == FailAt::Order {
             Ok(observed)
@@ -451,12 +489,14 @@ impl LifecycleBackend for FakeBackend {
         self.mutation(
             "entry",
             Residual::BootEntryMayExist,
-            &entry,
-            permit.operation_id(),
-            permit.operation_version(),
-            permit.attempted_state().clone(),
-            permit.expected_evidence().clone(),
-            permit.precondition_evidence().clone(),
+            mutation_evidence(
+                &entry,
+                permit.operation_id(),
+                permit.operation_version(),
+                permit.attempted_state(),
+                permit.expected_evidence(),
+                permit.precondition_evidence(),
+            ),
         )
         .map(|_| {
             if self.mismatch == FailAt::Entry {
@@ -491,12 +531,14 @@ impl LifecycleBackend for FakeBackend {
         self.mutation(
             "uki",
             Residual::UkiMayRemain,
-            &entry,
-            permit.operation_id(),
-            permit.operation_version(),
-            permit.attempted_state().clone(),
-            permit.expected_evidence().clone(),
-            permit.precondition_evidence().clone(),
+            mutation_evidence(
+                &entry,
+                permit.operation_id(),
+                permit.operation_version(),
+                permit.attempted_state(),
+                permit.expected_evidence(),
+                permit.precondition_evidence(),
+            ),
         )
         .map(|_| {
             if self.mismatch == FailAt::Uki {
@@ -659,8 +701,14 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
                     BootOrderValue::new(7, vec![boothop_core::BootId(7), boothop_core::BootId(8)])
                         .unwrap();
                 (
-                    LifecycleProofBinding::BootOrderBefore(before.clone()),
-                    LifecycleProofBinding::BootOrderBefore(before),
+                    LifecycleProofBinding::BootEntryAndOrderBefore {
+                        identity: expected_entry.identity.clone(),
+                        order: before.clone(),
+                    },
+                    LifecycleProofBinding::BootEntryAndOrderBefore {
+                        identity: expected_entry.identity.clone(),
+                        order: before,
+                    },
                 )
             }
             _ => unreachable!(),
@@ -772,11 +820,17 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
                 .unwrap();
                 assert_eq!(
                     expected,
-                    &LifecycleProofBinding::BootOrderBefore(before.clone())
+                    &LifecycleProofBinding::BootEntryAndOrderBefore {
+                        identity: expected_entry.identity.clone(),
+                        order: before.clone(),
+                    }
                 );
                 assert_eq!(
                     precondition,
-                    &LifecycleProofBinding::BootOrderBefore(before)
+                    &LifecycleProofBinding::BootEntryAndOrderBefore {
+                        identity: expected_entry.identity.clone(),
+                        order: before,
+                    }
                 );
             }
             UninstallingStep::BootEntryRemovalAttempted => {

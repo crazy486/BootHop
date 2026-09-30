@@ -1,5 +1,6 @@
 use super::{
     LinuxCalls,
+    coordinator::{BootEntryCreatePermit, LifecycleProofBinding},
     firmware::{self, Metadata, OpenKind},
 };
 use boothop_core::{
@@ -10,13 +11,6 @@ use std::fmt;
 
 const EFIVARFS: u64 = 0xde5e81e4;
 const ATTRIBUTES: u32 = 7;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BootEntrySpec {
-    pub boot_id: BootId,
-    /// This is accepted only to compare with the journaled fixed identity; it is never UI input.
-    pub identity: boothop_core::CanonicalIdentity,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CreateMutationState {
@@ -65,10 +59,9 @@ impl<'a, C: LinuxCalls> BootEntryIo<'a, C> {
     pub fn create_and_verify(
         &mut self,
         esp: &super::esp_identity::EspPartitionIdentity,
-        spec: &BootEntrySpec,
-        state: &ArchProvisionState,
+        permit: BootEntryCreatePermit<'_>,
     ) -> Result<(), BootEntryFailure> {
-        create_and_verify_entry(self.calls, esp, spec, state)
+        create_and_verify_entry(self.calls, esp, permit)
     }
 }
 
@@ -157,29 +150,21 @@ pub fn allocate_boot_id<C: LinuxCalls>(calls: &mut C) -> Result<BootId, Error> {
 pub fn create_and_verify_entry<C: LinuxCalls>(
     calls: &mut C,
     esp: &super::esp_identity::EspPartitionIdentity,
-    spec: &BootEntrySpec,
-    state: &ArchProvisionState,
+    permit: BootEntryCreatePermit<'_>,
 ) -> Result<(), BootEntryFailure> {
-    let state_entry = match state {
-        ArchProvisionState::Provisioning(record)
-            if record.step == ProvisioningStep::BootEntryCreateAttempted
-                && record.residual.is_empty() =>
-        {
-            &record.owned_entry
-        }
-        _ => return fail(Error::NotConfigured, CreateMutationState::NoEntryCreated),
+    let entry = match validate_create_permit(&permit) {
+        Ok(entry) => entry,
+        Err(error) => return fail(error, CreateMutationState::NoEntryCreated),
     };
-    if state_entry.boot_id != spec.boot_id
-        || state_entry.identity != spec.identity
-        || state_entry
-            .publish
-            .as_ref()
-            .is_none_or(|publish| publish.size == 0)
+    if entry
+        .publish
+        .as_ref()
+        .is_none_or(|publish| publish.size == 0)
     {
         return fail(Error::IdentityMismatch, CreateMutationState::NoEntryCreated);
     }
     let expected_option =
-        arch_uki_load_option_from_identity(&spec.identity).map_err(|error| BootEntryFailure {
+        arch_uki_load_option_from_identity(&entry.identity).map_err(|error| BootEntryFailure {
             error,
             mutation: CreateMutationState::NoEntryCreated,
         })?;
@@ -187,7 +172,7 @@ pub fn create_and_verify_entry<C: LinuxCalls>(
         error,
         mutation: CreateMutationState::NoEntryCreated,
     })?;
-    if expected_identity != spec.identity || !identity_matches_esp(&spec.identity, esp) {
+    if expected_identity != entry.identity || !identity_matches_esp(&entry.identity, esp) {
         return fail(Error::IdentityMismatch, CreateMutationState::NoEntryCreated);
     }
     let payload = serialize_load_option(&expected_option).map_err(|error| BootEntryFailure {
@@ -209,7 +194,7 @@ pub fn create_and_verify_entry<C: LinuxCalls>(
     if namespace.boot_next_set {
         return fail(Error::Busy, CreateMutationState::NoEntryCreated);
     }
-    if namespace.contains(spec.boot_id) {
+    if namespace.contains(entry.boot_id) {
         return fail(Error::Busy, CreateMutationState::NoEntryCreated);
     }
     // This second complete observation sits directly adjacent to exclusive create. The O_EXCL
@@ -221,13 +206,15 @@ pub fn create_and_verify_entry<C: LinuxCalls>(
     if final_check.boot_next_set {
         return fail(Error::Busy, CreateMutationState::NoEntryCreated);
     }
-    if final_check.contains(spec.boot_id) {
+    if final_check.contains(entry.boot_id) {
         return fail(Error::Busy, CreateMutationState::NoEntryCreated);
     }
-    let name = format!("Boot{:04X}-{}", spec.boot_id.0, firmware::GUID);
+    let name = format!("Boot{:04X}-{}", entry.boot_id.0, firmware::GUID);
     let mut fd = match calls.open(&dir, &name, OpenKind::CreateEntry) {
         Ok(fd) => fd,
-        Err(17) => return fail(Error::Busy, CreateMutationState::NoEntryCreated),
+        // Enumeration showed this ID free, but a concurrent creator may have installed an
+        // entry before O_EXCL. Preserve the foreign entry and leave a residual for inspection.
+        Err(17) => return fail(Error::Busy, CreateMutationState::MayExist),
         Err(raw_code) => {
             return fail(
                 firmware::io(boothop_core::PlatformOperation::Open, raw_code),
@@ -265,7 +252,7 @@ pub fn create_and_verify_entry<C: LinuxCalls>(
     }
     drop(fd);
     let readback =
-        firmware::read_variable(calls, &dir, &format!("Boot{:04X}", spec.boot_id.0), false)
+        firmware::read_variable(calls, &dir, &format!("Boot{:04X}", entry.boot_id.0), false)
             .map_err(|error| BootEntryFailure {
                 error,
                 mutation: CreateMutationState::MayExist,
@@ -286,10 +273,34 @@ pub fn create_and_verify_entry<C: LinuxCalls>(
         error,
         mutation: CreateMutationState::MayExist,
     })?;
-    if actual != payload || actual_identity != spec.identity {
+    if actual != payload || actual_identity != entry.identity {
         return fail(Error::ReadbackFailed, CreateMutationState::MayExist);
     }
     Ok(())
+}
+
+fn validate_create_permit<'permit, 'store>(
+    permit: &'permit BootEntryCreatePermit<'store>,
+) -> Result<&'permit boothop_core::OwnedArchEntry, Error> {
+    let entry = permit.owned_entry();
+    let record = match permit.attempted_state() {
+        ArchProvisionState::Provisioning(record)
+            if record.step == ProvisioningStep::BootEntryCreateAttempted
+                && record.residual.is_empty() =>
+        {
+            record
+        }
+        _ => return Err(Error::NotConfigured),
+    };
+    if record.operation_id != permit.operation_id()
+        || record.operation_version != permit.operation_version()
+        || record.owned_entry != *entry
+        || permit.expected_evidence() != &LifecycleProofBinding::BootEntryPresent
+        || permit.precondition_evidence() != &LifecycleProofBinding::BootEntryAbsent
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(entry)
 }
 
 fn identity_matches_esp(

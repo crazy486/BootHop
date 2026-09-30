@@ -1,20 +1,29 @@
 #![cfg(target_os = "linux")]
 
 use boothop_core::{
-    ArchProvisionState, BootId, BuildMetadata, OwnedArchEntry, ProvisioningRecord,
-    ProvisioningStep, PublishMetadata, Residual, arch_uki_load_option, canonicalize,
+    ArchProvisionState, BootId, BuildMetadata, OwnedArchEntry, PublishMetadata, Residual,
+    arch_uki_load_option, canonicalize,
 };
 use boothop_platform::linux::{
     LinuxCalls,
+    arch_provision_store::ArchProvisionStore,
     boot_entry::{
-        BootEntrySpec, CreateMutationState, allocate_boot_id, create_and_verify_entry,
-        inspect_boot_namespace,
+        CreateMutationState, allocate_boot_id, create_and_verify_entry, inspect_boot_namespace,
+    },
+    boot_order::BootOrderValue,
+    coordinator::{
+        BootEntryCreatePermit, BootEntryRemovePermit, BootOrderAppendPermit, BootOrderRemovePermit,
+        LifecycleBackend, LifecycleFailure, LifecycleReadback, ProvisionIntent, UkiPublishPermit,
+        UkiRemovePermit, provision,
     },
     esp_identity::EspPartitionIdentity,
     firmware::{Metadata, OpenKind},
     reboot::{Probe, Reply},
 };
 use std::{cell::RefCell, collections::BTreeMap};
+
+#[allow(dead_code)]
+mod support;
 
 const EFIVARFS: u64 = 0xde5e81e4;
 const GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -261,6 +270,158 @@ impl LinuxCalls for FakeCalls {
     }
 }
 
+struct EntryAdapterBackend {
+    calls: FakeCalls,
+    esp: EspPartitionIdentity,
+    entry: OwnedArchEntry,
+    publish: PublishMetadata,
+}
+
+impl LifecycleBackend for EntryAdapterBackend {
+    fn prepare_uki_publication(
+        &mut self,
+        _entry: &OwnedArchEntry,
+    ) -> Result<(PublishMetadata, LifecycleReadback), boothop_core::Error> {
+        Ok((self.publish.clone(), LifecycleReadback::UkiAbsent))
+    }
+
+    fn publish_uki(
+        &mut self,
+        permit: UkiPublishPermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure> {
+        Ok(LifecycleReadback::UkiPresent(
+            permit.owned_entry().publish.clone().unwrap(),
+        ))
+    }
+
+    fn prepare_boot_entry(
+        &mut self,
+        _entry: &OwnedArchEntry,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        Ok(LifecycleReadback::BootEntryAbsent)
+    }
+
+    fn create_boot_entry(
+        &mut self,
+        permit: BootEntryCreatePermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure> {
+        match create_and_verify_entry(&mut self.calls, &self.esp, permit) {
+            Ok(()) => Ok(LifecycleReadback::BootEntryPresent(
+                self.entry.identity.clone(),
+            )),
+            Err(failure) if failure.mutation == CreateMutationState::NoEntryCreated => Err(
+                LifecycleFailure::stopped(failure.error, Residual::BootEntryMayExist),
+            ),
+            Err(failure) => Err(LifecycleFailure::uncertain(
+                failure.error,
+                Residual::BootEntryMayExist,
+            )),
+        }
+    }
+
+    fn prepare_boot_order_append(
+        &mut self,
+        entry: &OwnedArchEntry,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        let actual = self
+            .calls
+            .raw(entry.boot_id.0)
+            .ok_or(boothop_core::Error::TargetMissing)?;
+        if actual != boothop_platform::linux::boot_order::owned_entry_bytes(&entry.identity)? {
+            return Err(boothop_core::Error::IdentityMismatch);
+        }
+        Ok(LifecycleReadback::BootEntryAndOrder {
+            identity: entry.identity.clone(),
+            order: BootOrderValue::new(7, vec![BootId(1), BootId(2)]).unwrap(),
+        })
+    }
+
+    fn append_boot_order(
+        &mut self,
+        permit: BootOrderAppendPermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure> {
+        let mut ids = match permit.precondition_evidence() {
+            boothop_platform::linux::coordinator::LifecycleProofBinding::BootEntryAndOrderBefore {
+                order: before,
+                ..
+            } => before.ids.clone(),
+            _ => {
+                return Err(LifecycleFailure::rejected(
+                    boothop_core::Error::NotConfigured,
+                ));
+            }
+        };
+        ids.push(permit.owned_entry().boot_id);
+        Ok(LifecycleReadback::BootOrder(
+            BootOrderValue::new(7, ids).map_err(LifecycleFailure::rejected)?,
+        ))
+    }
+
+    fn prepare_boot_order_remove(
+        &mut self,
+        _entry: &OwnedArchEntry,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        Err(boothop_core::Error::NotConfigured)
+    }
+
+    fn remove_boot_order(
+        &mut self,
+        _permit: BootOrderRemovePermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure> {
+        Err(LifecycleFailure::rejected(
+            boothop_core::Error::NotConfigured,
+        ))
+    }
+
+    fn prepare_boot_entry_remove(
+        &mut self,
+        _entry: &OwnedArchEntry,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        Err(boothop_core::Error::NotConfigured)
+    }
+
+    fn remove_boot_entry(
+        &mut self,
+        _permit: BootEntryRemovePermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure> {
+        Err(LifecycleFailure::rejected(
+            boothop_core::Error::NotConfigured,
+        ))
+    }
+
+    fn prepare_uki_remove(
+        &mut self,
+        _entry: &OwnedArchEntry,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        Err(boothop_core::Error::NotConfigured)
+    }
+
+    fn remove_uki(
+        &mut self,
+        _permit: UkiRemovePermit<'_>,
+    ) -> Result<LifecycleReadback, LifecycleFailure> {
+        Err(LifecycleFailure::rejected(
+            boothop_core::Error::NotConfigured,
+        ))
+    }
+
+    fn observe(
+        &mut self,
+        _state: &ArchProvisionState,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        Err(boothop_core::Error::NotConfigured)
+    }
+
+    fn observe_uki_ownership(
+        &mut self,
+        entry: &OwnedArchEntry,
+    ) -> Result<LifecycleReadback, boothop_core::Error> {
+        Ok(LifecycleReadback::UkiPresent(
+            entry.publish.clone().unwrap(),
+        ))
+    }
+}
+
 #[test]
 fn allocator_skips_referenced_and_orphan_entries() {
     let mut calls = FakeCalls::new();
@@ -323,73 +484,91 @@ fn namespace_candidate_reports_exhaustion() {
     );
 }
 
+fn run_provision(
+    calls: FakeCalls,
+) -> (
+    Result<ArchProvisionState, boothop_core::Error>,
+    EntryAdapterBackend,
+    ArchProvisionState,
+) {
+    let (esp, mut entry) = crate_test_state();
+    let publish = entry.publish.take().unwrap();
+    let fs = support::FakeFs::installed();
+    let mut store = ArchProvisionStore::acquire(fs).unwrap();
+    let mut backend = EntryAdapterBackend {
+        calls,
+        esp,
+        entry: entry.clone(),
+        publish,
+    };
+    let result = provision(
+        &mut store,
+        &mut backend,
+        ProvisionIntent {
+            operation_id: "entry-adapter-test".into(),
+            owned_entry: entry,
+        },
+    );
+    let state = store.load().unwrap();
+    (result, backend, state)
+}
+
 #[test]
-fn provisioning_blocks_when_bootnext_is_already_set_or_appears_during_recheck() {
-    let (esp, state, spec) = crate_test_state();
-    for target in [spec.boot_id.0, 0xbeef] {
+fn coordinator_issued_entry_permit_creates_and_verifies_the_exact_owned_entry() {
+    let (result, backend, _) = run_provision(FakeCalls::new());
+    assert!(matches!(result, Ok(ArchProvisionState::Ready(_))));
+    assert!(backend.calls.contains(4));
+    let create_count = backend
+        .calls
+        .events
+        .borrow()
+        .iter()
+        .filter(|event| event.starts_with("open:Boot0004-") && event.ends_with("CreateEntry"))
+        .count();
+    assert_eq!(create_count, 1);
+}
+
+#[test]
+fn coordinator_entry_adapter_fails_closed_on_bootnext_and_preserves_collisions() {
+    for target in [4u16, 0xbeef] {
         let mut calls = FakeCalls::new();
         calls.put(
             "BootNext",
             [7, 0, 0, 0, target as u8, (target >> 8) as u8].to_vec(),
         );
         assert_eq!(allocate_boot_id(&mut calls), Err(boothop_core::Error::Busy));
-        let result = create_and_verify_entry(&mut calls, &esp, &spec, &state).unwrap_err();
-        assert_eq!(result.error, boothop_core::Error::Busy);
-        assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
-        assert!(!calls.contains(spec.boot_id.0));
+        let (result, backend, _) = run_provision(calls);
+        assert_eq!(result, Err(boothop_core::Error::Busy));
+        assert!(!backend.calls.contains(4));
     }
 
     let mut raced = FakeCalls::new();
     raced.set_next_on_names = Some(2);
-    let result = create_and_verify_entry(&mut raced, &esp, &spec, &state).unwrap_err();
-    assert_eq!(result.error, boothop_core::Error::Busy);
-    assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
-    assert!(!raced.contains(spec.boot_id.0));
+    let (result, backend, _) = run_provision(raced);
+    assert_eq!(result, Err(boothop_core::Error::Busy));
+    assert!(!backend.calls.contains(4));
 
-    let (esp, mut uncertain, spec) = crate_test_state();
-    if let ArchProvisionState::Provisioning(record) = &mut uncertain {
-        record.residual.push(Residual::BootEntryMayExist);
-    }
-    let mut calls = FakeCalls::new();
-    let result = create_and_verify_entry(&mut calls, &esp, &spec, &uncertain).unwrap_err();
-    assert_eq!(result.error, boothop_core::Error::NotConfigured);
-    assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
-    assert!(!calls.contains(spec.boot_id.0));
+    let collision = FakeCalls::new();
+    collision.put("Boot0004", vec![7, 0, 0, 0, 0xaa]);
+    let before = collision.raw(4);
+    let (result, backend, _) = run_provision(collision);
+    assert!(result.is_err());
+    assert_eq!(backend.calls.raw(4), before);
+
+    let mut raced_create = FakeCalls::new();
+    raced_create.injection = Inject::CreateCollision;
+    let (result, backend, state) = run_provision(raced_create);
+    assert!(result.is_err());
+    assert_eq!(
+        backend.calls.raw(4),
+        Some(b"other-owner-existing-entry".to_vec())
+    );
+    assert!(matches!(state, ArchProvisionState::Provisioning(ref record)
+        if record.residual.contains(&Residual::BootEntryMayExist)));
 }
 
 #[test]
-fn firmware_exclusive_create_readback_and_failure_boundaries() {
-    // State assembly below uses the synthetic identity fixture, not the installed firmware.
-    let mut calls = FakeCalls::new();
-    let (esp, state, spec) = crate_test_state();
-    assert_eq!(
-        create_and_verify_entry(&mut calls, &esp, &spec, &state),
-        Ok(())
-    );
-    assert!(calls.contains(spec.boot_id.0));
-    assert_eq!(
-        calls
-            .events
-            .borrow()
-            .iter()
-            .filter(|event| event.starts_with("open:Boot0004-") && event.ends_with("CreateEntry"))
-            .count(),
-        1
-    );
-
-    let mut collision = FakeCalls::new();
-    collision.put("Boot0004", vec![7, 0, 0, 0, 0xaa]);
-    let before = collision.raw(4);
-    let result = create_and_verify_entry(&mut collision, &esp, &spec, &state).unwrap_err();
-    assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
-    assert_eq!(collision.raw(4), before);
-
-    let mut raced = FakeCalls::new();
-    raced.injection = Inject::CreateCollision;
-    let result = create_and_verify_entry(&mut raced, &esp, &spec, &state).unwrap_err();
-    assert_eq!(result.mutation, CreateMutationState::NoEntryCreated);
-    assert_eq!(raced.raw(4), Some(b"other-owner-existing-entry".to_vec()));
-
+fn coordinator_entry_adapter_retains_uncertain_create_and_readback_residuals() {
     for injection in [
         Inject::CreateAfterMutationError,
         Inject::WriteErrorAfterMutation,
@@ -400,15 +579,13 @@ fn firmware_exclusive_create_readback_and_failure_boundaries() {
     ] {
         let mut calls = FakeCalls::new();
         calls.injection = injection;
-        let result = create_and_verify_entry(&mut calls, &esp, &spec, &state).unwrap_err();
-        assert_eq!(
-            result.mutation,
-            CreateMutationState::MayExist,
-            "injection {injection:?}: {result:?}"
-        );
+        let (result, backend, state) = run_provision(calls);
+        assert!(result.is_err(), "injection {injection:?}");
+        assert!(matches!(state, ArchProvisionState::Provisioning(ref record)
+            if record.residual.contains(&Residual::BootEntryMayExist)));
         if injection != Inject::AbsentReadback {
             assert!(
-                calls.contains(4),
+                backend.calls.contains(4),
                 "entry must be retained for {injection:?}"
             );
         }
@@ -416,17 +593,15 @@ fn firmware_exclusive_create_readback_and_failure_boundaries() {
     for injection in [Inject::WrongType, Inject::WrongFs, Inject::ReadOnly] {
         let mut calls = FakeCalls::new();
         calls.injection = injection;
-        let result = create_and_verify_entry(&mut calls, &esp, &spec, &state).unwrap_err();
-        assert_eq!(
-            result.mutation,
-            CreateMutationState::MayExist,
-            "injection {injection:?}: {result:?}"
-        );
-        assert_eq!(calls.raw(4), Some(Vec::new()));
+        let (result, backend, state) = run_provision(calls);
+        assert!(result.is_err(), "injection {injection:?}");
+        assert!(matches!(state, ArchProvisionState::Provisioning(ref record)
+            if record.residual.contains(&Residual::BootEntryMayExist)));
+        assert_eq!(backend.calls.raw(4), Some(Vec::new()));
     }
 }
 
-fn crate_test_state() -> (EspPartitionIdentity, ArchProvisionState, BootEntrySpec) {
+fn crate_test_state() -> (EspPartitionIdentity, OwnedArchEntry) {
     let esp = EspPartitionIdentity {
         partition_number: 9,
         start_lba: 0x0102_0304_0506_0708,
@@ -458,16 +633,5 @@ fn crate_test_state() -> (EspPartitionIdentity, ArchProvisionState, BootEntrySpe
             size: 100,
         }),
     };
-    let spec = BootEntrySpec {
-        boot_id: BootId(4),
-        identity,
-    };
-    let state = ArchProvisionState::Provisioning(ProvisioningRecord {
-        operation_id: "test-op".into(),
-        operation_version: 1,
-        owned_entry: entry,
-        step: ProvisioningStep::BootEntryCreateAttempted,
-        residual: Vec::new(),
-    });
-    (esp, state, spec)
+    (esp, entry)
 }

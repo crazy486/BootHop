@@ -81,9 +81,9 @@ impl<C: ArchConfigFsCalls> ArchConfigFsAdapter<C> {
         }
         let parent = parent.as_ref().unwrap_or(&self.root);
         let opened = if final_type == EntryType::Directory {
-            self.calls.open_directory(&parent, last)
+            self.calls.open_directory(parent, last)
         } else {
-            self.calls.open_file(&parent, last)
+            self.calls.open_file(parent, last)
         };
         let handle = match opened {
             Ok(handle) => handle,

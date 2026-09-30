@@ -5,10 +5,12 @@
 //! in-memory fake.  Keeping the operation boundary typed prevents these mutations from
 //! becoming another generic `Platform::write_next` capability.
 
+use super::coordinator::{
+    BootEntryRemovePermit, BootOrderAppendPermit, BootOrderRemovePermit, LifecycleProofBinding,
+};
 use boothop_core::{
-    ArchProvisionState, BootId, CanonicalIdentity, Error, OwnedArchEntry, ProvisioningStep,
-    UninstallingRecord, UninstallingStep, arch_uki_load_option_from_identity,
-    serialize_load_option,
+    ArchProvisionState, BootId, CanonicalIdentity, Error, OwnedArchEntry, UninstallingRecord,
+    UninstallingStep, arch_uki_load_option_from_identity, serialize_load_option,
 };
 
 const EFI_VARIABLE_NON_VOLATILE: u32 = 1;
@@ -114,13 +116,35 @@ pub fn decode_boot_order(raw: &[u8]) -> Result<BootOrderValue, Error> {
 pub trait BootOrderIo {
     fn read_boot_next(&mut self) -> Result<Option<BootId>, Error>;
     fn read_boot_order(&mut self) -> Result<BootOrderValue, Error>;
-    fn write_boot_order(&mut self, value: &BootOrderValue) -> Result<(), Error>;
+    /// At the write boundary recheck the full BootOrder, BootNext, and exact owned Boot####.
+    /// UEFI variables do not provide compare-and-swap, so this is best effort; implementations
+    /// must read back and report residual state on mismatch, without retry or rollback.
+    fn append_boot_order(
+        &mut self,
+        permit: BootOrderAppendPermit<'_>,
+        entry_io: &mut dyn OwnedBootEntryIo,
+    ) -> Result<(), Error>;
+    /// At the write boundary recheck the full BootOrder, BootNext, and exact owned Boot####.
+    /// UEFI variables do not provide compare-and-swap, so this is best effort; implementations
+    /// must read back and report residual state on mismatch, without retry or rollback.
+    fn remove_boot_order(
+        &mut self,
+        permit: BootOrderRemovePermit<'_>,
+        entry_io: &mut dyn OwnedBootEntryIo,
+    ) -> Result<(), Error>;
 }
 
 /// The separate, exact owned-entry deletion boundary.
 pub trait OwnedBootEntryIo {
     fn read_boot_entry(&mut self, id: BootId) -> Result<Option<Vec<u8>>, Error>;
-    fn delete_boot_entry_if_exact(&mut self, id: BootId, expected: &[u8]) -> Result<(), Error>;
+    /// Recheck BootNext, BootOrder, and exact owned bytes at the deletion boundary; never delete
+    /// by ID alone. EFI has no atomic multi-variable transaction, so any observed mismatch must
+    /// stop with residual state and the remaining check/write interval is best effort.
+    fn delete_boot_entry_if_exact(
+        &mut self,
+        permit: BootEntryRemovePermit<'_>,
+        boot: &mut dyn BootOrderIo,
+    ) -> Result<(), Error>;
 }
 
 /// Starts uninstall in memory.  The caller must durably save this result while holding the
@@ -149,17 +173,10 @@ pub fn begin_uninstall(
 /// mismatched readback is residual state and never triggers rollback or retry.
 pub fn append_owned_entry<I: BootOrderIo>(
     io: &mut I,
-    state: &mut ArchProvisionState,
+    entry_io: &mut impl OwnedBootEntryIo,
+    permit: BootOrderAppendPermit<'_>,
 ) -> Result<(), Error> {
-    let id = match state {
-        ArchProvisionState::Provisioning(record)
-            if record.step == ProvisioningStep::BootOrderAppendAttempted
-                && record.residual.is_empty() =>
-        {
-            record.owned_entry.boot_id
-        }
-        _ => return Err(Error::NotConfigured),
-    };
+    let (id, identity, before) = validate_append_permit(&permit)?;
 
     if io.read_boot_next()?.is_some() {
         return Err(Error::Busy);
@@ -176,18 +193,22 @@ pub fn append_owned_entry<I: BootOrderIo>(
     }
     let latest = io.read_boot_order()?;
     latest.validate()?;
+    if latest != before {
+        return Err(Error::ReadbackFailed);
+    }
     let expected = latest.appended(id)?;
+    let current_entry = entry_io.read_boot_entry(id)?.ok_or(Error::TargetMissing)?;
+    if current_entry != owned_entry_bytes(&identity)? {
+        return Err(Error::IdentityMismatch);
+    }
     if io.read_boot_next()?.is_some() {
         return Err(Error::Busy);
     }
-    io.write_boot_order(&expected)?;
+    io.append_boot_order(permit, entry_io)?;
     let actual = io.read_boot_order()?;
     actual.validate()?;
     if actual != expected {
         return Err(Error::ReadbackFailed);
-    }
-    if let ArchProvisionState::Provisioning(record) = state {
-        record.step = ProvisioningStep::BootOrderReadBackVerified;
     }
     Ok(())
 }
@@ -227,11 +248,12 @@ pub fn observe_order_removal<I: BootOrderIo>(
 
 /// Remove the owned ID from the latest valid order.  The caller must save
 /// `BootOrderRemovalAttempted` before this call.
-pub fn remove_owned_from_order<I: BootOrderIo>(
+pub fn remove_owned_from_order<I: BootOrderIo, E: OwnedBootEntryIo>(
     io: &mut I,
-    state: &mut ArchProvisionState,
+    entry_io: &mut E,
+    permit: BootOrderRemovePermit<'_>,
 ) -> Result<(), Error> {
-    let id = uninstall_id(state, UninstallingStep::BootOrderRemovalAttempted)?;
+    let (id, identity, before) = validate_remove_order_permit(&permit)?;
     if io.read_boot_next()?.is_some_and(|next| next == id) {
         return Err(Error::Busy);
     }
@@ -242,18 +264,22 @@ pub fn remove_owned_from_order<I: BootOrderIo>(
     }
     let latest = io.read_boot_order()?;
     latest.validate()?;
+    if latest != before {
+        return Err(Error::ReadbackFailed);
+    }
     let expected = latest.without(id)?;
+    let current_entry = entry_io.read_boot_entry(id)?.ok_or(Error::TargetMissing)?;
+    if current_entry != owned_entry_bytes(&identity)? {
+        return Err(Error::IdentityMismatch);
+    }
     if io.read_boot_next()?.is_some_and(|next| next == id) {
         return Err(Error::Busy);
     }
-    io.write_boot_order(&expected)?;
+    io.remove_boot_order(permit, entry_io)?;
     let actual = io.read_boot_order()?;
     actual.validate()?;
     if actual != expected {
         return Err(Error::ReadbackFailed);
-    }
-    if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::BootOrderRemovalReadBackVerified;
     }
     Ok(())
 }
@@ -292,20 +318,11 @@ fn uninstall_id(state: &ArchProvisionState, expected: UninstallingStep) -> Resul
 pub fn remove_owned_entry<I: OwnedBootEntryIo, B: BootOrderIo>(
     io: &mut I,
     boot: &mut B,
-    state: &mut ArchProvisionState,
+    permit: BootEntryRemovePermit<'_>,
 ) -> Result<(), Error> {
-    let (entry_id, entry_identity) = match state {
-        ArchProvisionState::Uninstalling(record)
-            if record.step == UninstallingStep::BootEntryRemovalAttempted
-                && record.residual.is_empty() =>
-        {
-            (
-                record.owned_entry.boot_id,
-                record.owned_entry.identity.clone(),
-            )
-        }
-        _ => return Err(Error::NotConfigured),
-    };
+    let entry = validate_entry_remove_permit(&permit)?;
+    let entry_id = entry.boot_id;
+    let entry_identity = entry.identity.clone();
     if boot.read_boot_next()?.is_some_and(|next| next == entry_id) {
         return Err(Error::Busy);
     }
@@ -326,20 +343,17 @@ pub fn remove_owned_entry<I: OwnedBootEntryIo, B: BootOrderIo>(
     if boundary != expected {
         return Err(Error::IdentityMismatch);
     }
-    if boot.read_boot_next()?.is_some_and(|next| next == entry_id) {
-        return Err(Error::Busy);
-    }
     let final_order = boot.read_boot_order()?;
     final_order.validate()?;
     if final_order.ids.contains(&entry_id) {
         return Err(Error::Busy);
     }
-    io.delete_boot_entry_if_exact(entry_id, &expected)?;
+    if boot.read_boot_next()?.is_some_and(|next| next == entry_id) {
+        return Err(Error::Busy);
+    }
+    io.delete_boot_entry_if_exact(permit, boot)?;
     if io.read_boot_entry(entry_id)?.is_some() {
         return Err(Error::ReadbackFailed);
-    }
-    if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::BootEntryRemovalReadBackVerified;
     }
     Ok(())
 }
@@ -373,4 +387,152 @@ pub fn owned_entry_bytes(identity: &CanonicalIdentity) -> Result<Vec<u8>, Error>
     value.extend_from_slice(&BOOT_ATTRIBUTES.to_le_bytes());
     value.extend_from_slice(&payload);
     Ok(value)
+}
+
+fn validate_append_permit(
+    permit: &BootOrderAppendPermit<'_>,
+) -> Result<(BootId, CanonicalIdentity, BootOrderValue), Error> {
+    let entry = validate_provisioning_order_permit(
+        permit.operation_id(),
+        permit.operation_version(),
+        permit.owned_entry(),
+        permit.attempted_state(),
+        boothop_core::ProvisioningStep::BootOrderAppendAttempted,
+    )?;
+    let (expected_identity, expected_before, observed_identity, observed_before) =
+        match (permit.expected_evidence(), permit.precondition_evidence()) {
+            (
+                LifecycleProofBinding::BootEntryAndOrderBefore {
+                    identity: expected_identity,
+                    order: expected_order,
+                },
+                LifecycleProofBinding::BootEntryAndOrderBefore {
+                    identity: observed_identity,
+                    order: observed_order,
+                },
+            ) => (
+                expected_identity,
+                expected_order,
+                observed_identity,
+                observed_order,
+            ),
+            _ => return Err(Error::NotConfigured),
+        };
+    expected_before.validate()?;
+    if expected_identity != observed_identity
+        || expected_identity != &entry.identity
+        || expected_before != observed_before
+        || expected_before.ids.contains(&entry.boot_id)
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok((
+        entry.boot_id,
+        expected_identity.clone(),
+        expected_before.clone(),
+    ))
+}
+
+fn validate_remove_order_permit(
+    permit: &BootOrderRemovePermit<'_>,
+) -> Result<(BootId, CanonicalIdentity, BootOrderValue), Error> {
+    let entry = validate_uninstall_order_permit(
+        permit.operation_id(),
+        permit.operation_version(),
+        permit.owned_entry(),
+        permit.attempted_state(),
+        UninstallingStep::BootOrderRemovalAttempted,
+    )?;
+    let (expected_identity, expected_before, observed_identity, observed_before) =
+        match (permit.expected_evidence(), permit.precondition_evidence()) {
+            (
+                LifecycleProofBinding::BootEntryAndOrderBefore {
+                    identity: expected_identity,
+                    order: expected_order,
+                },
+                LifecycleProofBinding::BootEntryAndOrderBefore {
+                    identity: observed_identity,
+                    order: observed_order,
+                },
+            ) => (
+                expected_identity,
+                expected_order,
+                observed_identity,
+                observed_order,
+            ),
+            _ => return Err(Error::NotConfigured),
+        };
+    expected_before.validate()?;
+    if expected_identity != observed_identity
+        || expected_identity != &entry.identity
+        || expected_before != observed_before
+        || !expected_before.ids.contains(&entry.boot_id)
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok((
+        entry.boot_id,
+        expected_identity.clone(),
+        expected_before.clone(),
+    ))
+}
+
+fn validate_entry_remove_permit(
+    permit: &BootEntryRemovePermit<'_>,
+) -> Result<OwnedArchEntry, Error> {
+    let entry = validate_uninstall_order_permit(
+        permit.operation_id(),
+        permit.operation_version(),
+        permit.owned_entry(),
+        permit.attempted_state(),
+        UninstallingStep::BootEntryRemovalAttempted,
+    )?;
+    if permit.expected_evidence() != &LifecycleProofBinding::BootEntryAbsent
+        || permit.precondition_evidence() != &LifecycleProofBinding::BootEntryPresent
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(entry.clone())
+}
+
+fn validate_provisioning_order_permit<'a>(
+    operation_id: &str,
+    operation_version: u64,
+    entry: &'a OwnedArchEntry,
+    attempted_state: &ArchProvisionState,
+    expected_step: boothop_core::ProvisioningStep,
+) -> Result<&'a OwnedArchEntry, Error> {
+    let ArchProvisionState::Provisioning(record) = attempted_state else {
+        return Err(Error::NotConfigured);
+    };
+    if record.step != expected_step
+        || !record.residual.is_empty()
+        || record.operation_id != operation_id
+        || record.operation_version != operation_version
+        || record.owned_entry != *entry
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(entry)
+}
+
+fn validate_uninstall_order_permit<'a>(
+    operation_id: &str,
+    operation_version: u64,
+    entry: &'a OwnedArchEntry,
+    attempted_state: &ArchProvisionState,
+    expected_step: UninstallingStep,
+) -> Result<&'a OwnedArchEntry, Error> {
+    let ArchProvisionState::Uninstalling(record) = attempted_state else {
+        return Err(Error::NotConfigured);
+    };
+    if record.step != expected_step
+        || !record.residual.is_empty()
+        || record.operation_id != operation_id
+        || record.operation_version != operation_version
+        || record.owned_entry != *entry
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(entry)
 }

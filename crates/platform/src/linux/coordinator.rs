@@ -24,6 +24,12 @@ pub enum LifecycleReadback {
     BootEntryAbsent,
     BootEntryPresent(boothop_core::CanonicalIdentity),
     BootOrder(BootOrderValue),
+    /// Ownership of the exact Boot#### bytes and the full BootOrder snapshot observed together
+    /// before an order mutation is authorized.
+    BootEntryAndOrder {
+        identity: boothop_core::CanonicalIdentity,
+        order: BootOrderValue,
+    },
 }
 
 /// A mutation failure says whether the mutation was rejected before its write boundary or may
@@ -31,12 +37,26 @@ pub enum LifecycleReadback {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleFailure {
     Rejected(Error),
-    Uncertain { error: Error, residual: Residual },
+    /// The adapter stopped before its mutation boundary because the observed resource no
+    /// longer matched the committed proof. Keep the residual even though this call did not
+    /// write, so a stale Attempted checkpoint cannot be mistaken for a clean retry point.
+    Stopped {
+        error: Error,
+        residual: Residual,
+    },
+    Uncertain {
+        error: Error,
+        residual: Residual,
+    },
 }
 
 impl LifecycleFailure {
     pub fn rejected(error: Error) -> Self {
         Self::Rejected(error)
+    }
+
+    pub fn stopped(error: Error, residual: Residual) -> Self {
+        Self::Stopped { error, residual }
     }
 
     pub fn uncertain(error: Error, residual: Residual) -> Self {
@@ -45,7 +65,9 @@ impl LifecycleFailure {
 
     fn error(&self) -> Error {
         match self {
-            Self::Rejected(error) | Self::Uncertain { error, .. } => error.clone(),
+            Self::Rejected(error) | Self::Stopped { error, .. } | Self::Uncertain { error, .. } => {
+                error.clone()
+            }
         }
     }
 }
@@ -82,6 +104,7 @@ pub trait LifecycleBackend {
         &mut self,
         entry: &OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error>;
+    /// Recheck the exact Boot#### identity immediately before invoking the order writer.
     fn append_boot_order(
         &mut self,
         permit: BootOrderAppendPermit<'_>,
@@ -91,6 +114,7 @@ pub trait LifecycleBackend {
         &mut self,
         entry: &OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error>;
+    /// Recheck the exact Boot#### identity immediately before invoking the order writer.
     fn remove_boot_order(
         &mut self,
         permit: BootOrderRemovePermit<'_>,
@@ -128,6 +152,10 @@ pub enum LifecycleProofBinding {
     BootEntryAbsent,
     BootEntryPresent,
     BootOrderBefore(BootOrderValue),
+    BootEntryAndOrderBefore {
+        identity: boothop_core::CanonicalIdentity,
+        order: BootOrderValue,
+    },
     BootOrderTransition {
         before: BootOrderValue,
         after: BootOrderValue,
@@ -398,9 +426,16 @@ fn proof_bindings_valid(
             ProvisioningStep::BootOrderAppendAttempted => {
                 matches!(
                     (expected, observed),
-                    (LifecycleProofBinding::BootOrderBefore(before), LifecycleProofBinding::BootOrderBefore(observed))
-                        if before == observed
-                            && boot_order_append_precondition(before, record.owned_entry.boot_id)
+                    (
+                        LifecycleProofBinding::BootEntryAndOrderBefore { identity, order },
+                        LifecycleProofBinding::BootEntryAndOrderBefore {
+                            identity: observed_identity,
+                            order: observed_order,
+                        },
+                    ) if identity == observed_identity
+                        && identity == &record.owned_entry.identity
+                        && order == observed_order
+                        && boot_order_append_precondition(order, record.owned_entry.boot_id)
                 )
             }
             ProvisioningStep::BootOrderAppended | ProvisioningStep::BootOrderReadBackVerified => {
@@ -428,9 +463,16 @@ fn proof_bindings_valid(
             UninstallingStep::BootOrderRemovalAttempted => {
                 matches!(
                     (expected, observed),
-                    (LifecycleProofBinding::BootOrderBefore(before), LifecycleProofBinding::BootOrderBefore(observed))
-                        if before == observed
-                            && boot_order_remove_precondition(before, record.owned_entry.boot_id)
+                    (
+                        LifecycleProofBinding::BootEntryAndOrderBefore { identity, order },
+                        LifecycleProofBinding::BootEntryAndOrderBefore {
+                            identity: observed_identity,
+                            order: observed_order,
+                        },
+                    ) if identity == observed_identity
+                        && identity == &record.owned_entry.identity
+                        && order == observed_order
+                        && boot_order_remove_precondition(order, record.owned_entry.boot_id)
                 )
             }
             UninstallingStep::BootOrderRemoved
@@ -541,6 +583,11 @@ fn boot_order_remove_transition(
     boot_order_remove_precondition(before, id)
         && after.validate().is_ok()
         && before.without(id).is_ok_and(|expected| expected == *after)
+}
+
+fn entry_precondition_residual(error: &Error) -> Option<Residual> {
+    matches!(error, Error::IdentityMismatch | Error::TargetMissing)
+        .then_some(Residual::BootEntryMayExist)
 }
 
 fn is_nonterminal_state(state: &ArchProvisionState) -> bool {
@@ -743,14 +790,25 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
     let observed = match backend.prepare_boot_order_append(entry) {
         Ok(observed) => observed,
         Err(error) => {
-            return fail_precondition(store, &verified, Residual::BootOrderMayContainEntry, error);
+            let residual =
+                entry_precondition_residual(&error).unwrap_or(Residual::BootOrderMayContainEntry);
+            return fail_precondition(store, &verified, residual, error);
         }
     };
-    let before = match observed {
-        LifecycleReadback::BootOrder(before)
-            if boot_order_append_precondition(&before, entry.boot_id) =>
+    let (observed_identity, before) = match observed {
+        LifecycleReadback::BootEntryAndOrder { identity, order }
+            if identity == entry.identity
+                && boot_order_append_precondition(&order, entry.boot_id) =>
         {
-            before
+            (identity, order)
+        }
+        LifecycleReadback::BootEntryAndOrder { identity, .. } if identity != entry.identity => {
+            return fail_precondition(
+                store,
+                &verified,
+                Residual::BootEntryMayExist,
+                Error::IdentityMismatch,
+            );
         }
         _ => {
             return fail_precondition(
@@ -766,12 +824,16 @@ pub fn provision<F: Filesystem, B: LifecycleBackend>(
         ProvisioningStep::BootOrderAppendAttempted,
         published_publish_opt(&verified)?,
     )?;
+    let order_proof = LifecycleProofBinding::BootEntryAndOrderBefore {
+        identity: observed_identity,
+        order: before.clone(),
+    };
     let permit = commit_boot_order_append_attempt(
         store,
         verified.clone(),
         attempt.clone(),
-        LifecycleProofBinding::BootOrderBefore(before.clone()),
-        LifecycleProofBinding::BootOrderBefore(before.clone()),
+        order_proof.clone(),
+        order_proof,
     )?;
     let observed = match backend.append_boot_order(permit) {
         Ok(observed) => observed,
@@ -845,14 +907,25 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
     let observed = match backend.prepare_boot_order_remove(&entry) {
         Ok(observed) => observed,
         Err(error) => {
-            return fail_precondition(store, &started, Residual::BootOrderMayContainEntry, error);
+            let residual =
+                entry_precondition_residual(&error).unwrap_or(Residual::BootOrderMayContainEntry);
+            return fail_precondition(store, &started, residual, error);
         }
     };
-    let before = match observed {
-        LifecycleReadback::BootOrder(before)
-            if boot_order_remove_precondition(&before, entry.boot_id) =>
+    let (observed_identity, before) = match observed {
+        LifecycleReadback::BootEntryAndOrder { identity, order }
+            if identity == entry.identity
+                && boot_order_remove_precondition(&order, entry.boot_id) =>
         {
-            before
+            (identity, order)
+        }
+        LifecycleReadback::BootEntryAndOrder { identity, .. } if identity != entry.identity => {
+            return fail_precondition(
+                store,
+                &started,
+                Residual::BootEntryMayExist,
+                Error::IdentityMismatch,
+            );
         }
         _ => {
             return fail_precondition(
@@ -864,12 +937,16 @@ pub fn uninstall<F: Filesystem, B: LifecycleBackend>(
         }
     };
     let attempt = uninstall_step(&started, UninstallingStep::BootOrderRemovalAttempted)?;
+    let order_proof = LifecycleProofBinding::BootEntryAndOrderBefore {
+        identity: observed_identity,
+        order: before.clone(),
+    };
     let permit = commit_boot_order_remove_attempt(
         store,
         started.clone(),
         attempt.clone(),
-        LifecycleProofBinding::BootOrderBefore(before.clone()),
-        LifecycleProofBinding::BootOrderBefore(before.clone()),
+        order_proof.clone(),
+        order_proof,
     )?;
     let observed = match backend.remove_boot_order(permit) {
         Ok(observed) => observed,
@@ -1244,10 +1321,14 @@ fn fail_at<F: Filesystem>(
     attempt: &ArchProvisionState,
     failure: LifecycleFailure,
 ) -> Result<ArchProvisionState, Error> {
-    if let LifecycleFailure::Uncertain { residual, .. } = failure {
-        let mut retained = attempt.clone();
-        add_residual(&mut retained, residual)?;
-        store.save(&retained)?;
+    match &failure {
+        LifecycleFailure::Stopped { residual, .. }
+        | LifecycleFailure::Uncertain { residual, .. } => {
+            let mut retained = attempt.clone();
+            add_residual(&mut retained, *residual)?;
+            store.save(&retained)?;
+        }
+        LifecycleFailure::Rejected(_) => {}
     }
     Err(failure.error())
 }

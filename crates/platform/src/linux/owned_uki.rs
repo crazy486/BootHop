@@ -3,6 +3,8 @@
 use boothop_core::{ArchProvisionState, Error, UninstallingStep};
 use sha2::{Digest, Sha256};
 
+use super::coordinator::{LifecycleProofBinding, UkiRemovePermit};
+
 const FIXED_UKI_PATH: &str = "EFI/BootHop/arch.efi";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,34 +19,17 @@ pub enum OwnedUkiState {
 /// or delete anything except the fixed path selected by this module.
 pub trait OwnedUkiIo {
     fn inspect_fixed(&mut self, path: &str) -> Result<OwnedUkiState, Error>;
-    fn remove_fixed_if_expected(
-        &mut self,
-        path: &str,
-        sha256: [u8; 32],
-        size: u64,
-    ) -> Result<(), Error>;
+    /// Recheck the exact fixed-path file identity at the deletion boundary.
+    fn remove_fixed_if_expected(&mut self, permit: UkiRemovePermit<'_>) -> Result<(), Error>;
 }
 
 /// Delete the journal-owned UKI only when its fixed path is a regular file with the exact
 /// journaled digest and size. The journal must already contain `UkiRemovalAttempted`.
 pub fn remove_owned_uki<I: OwnedUkiIo>(
     io: &mut I,
-    state: &mut ArchProvisionState,
+    permit: UkiRemovePermit<'_>,
 ) -> Result<(), Error> {
-    let expected = match state {
-        ArchProvisionState::Uninstalling(record)
-            if record.step == UninstallingStep::UkiRemovalAttempted
-                && record.residual.is_empty() =>
-        {
-            record
-                .owned_entry
-                .publish
-                .as_ref()
-                .ok_or(Error::CorruptRecord)
-                .map(|metadata| (metadata.sha256, metadata.size))?
-        }
-        _ => return Err(Error::NotConfigured),
-    };
+    let expected = validate_remove_permit(&permit)?;
     let current = io.inspect_fixed(FIXED_UKI_PATH)?;
     match current {
         OwnedUkiState::Regular { sha256, size } if (sha256, size) == expected => {}
@@ -52,14 +37,32 @@ pub fn remove_owned_uki<I: OwnedUkiIo>(
         OwnedUkiState::Regular { .. } => return Err(Error::IdentityMismatch),
         OwnedUkiState::Symlink | OwnedUkiState::Other => return Err(Error::IdentityMismatch),
     }
-    io.remove_fixed_if_expected(FIXED_UKI_PATH, expected.0, expected.1)?;
+    io.remove_fixed_if_expected(permit)?;
     if io.inspect_fixed(FIXED_UKI_PATH)? != OwnedUkiState::Missing {
         return Err(Error::ReadbackFailed);
     }
-    if let ArchProvisionState::Uninstalling(record) = state {
-        record.step = UninstallingStep::UkiRemoved;
-    }
     Ok(())
+}
+
+fn validate_remove_permit(permit: &UkiRemovePermit<'_>) -> Result<([u8; 32], u64), Error> {
+    let entry = permit.owned_entry();
+    let ArchProvisionState::Uninstalling(record) = permit.attempted_state() else {
+        return Err(Error::NotConfigured);
+    };
+    if record.step != UninstallingStep::UkiRemovalAttempted
+        || !record.residual.is_empty()
+        || record.operation_id != permit.operation_id()
+        || record.operation_version != permit.operation_version()
+        || record.owned_entry != *entry
+        || permit.expected_evidence() != &LifecycleProofBinding::UkiAbsent
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    let metadata = entry.publish.as_ref().ok_or(Error::CorruptRecord)?;
+    if permit.precondition_evidence() != &LifecycleProofBinding::Uki(metadata.clone()) {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok((metadata.sha256, metadata.size))
 }
 
 /// Reconcile an interrupted UKI removal read-only. The returned state is evidence only and
