@@ -66,6 +66,32 @@ pub fn serve(
     }
 }
 
+/// Serve the small Linux-only lifecycle transport. Lifecycle requests have a
+/// distinct decoder and callback so they can never enter core operation
+/// dispatch or reach a `Platform` implementation.
+#[cfg(target_os = "linux")]
+pub fn serve_lifecycle(
+    euid: u32,
+    io: &mut impl SessionIo,
+    operation: impl FnOnce(protocol::LifecycleOperation) -> protocol::LifecycleStatus,
+) -> Result<(), Error> {
+    if euid != 0 {
+        return Err(Error::PlatformIo {
+            operation: PlatformOperation::Ipc,
+            raw_code: 1,
+        });
+    }
+
+    let hello = protocol::encode_hello();
+    io.send(&hello)?;
+    let envelope = protocol::decode_lifecycle_request_envelope(&io.receive()?)
+        .map_err(|_| Error::UnsupportedFormat)?;
+    let status = operation(envelope.operation);
+    let response = protocol::encode_lifecycle_response_with_id(&envelope.request_id, status)
+        .map_err(|_| Error::ResourceLimit)?;
+    io.send(&response)
+}
+
 /// Complete one authenticated Windows operation. The operation guard is
 /// acquired before platform construction and remains in scope until the
 /// terminal `send` attempt has returned.
