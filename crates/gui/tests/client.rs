@@ -203,6 +203,57 @@ fn lifecycle_client_maps_missing_terminal_response_to_non_retryable_unknown() {
         Err(ClientError::UnknownAfterSend(TransportError::Timeout))
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lifecycle_client_maps_mismatched_response_id_to_non_retryable_unknown() {
+    struct MismatchedResponseFake {
+        events: VecDeque<Result<Event, TransportError>>,
+        now: Duration,
+    }
+
+    impl Boundary for MismatchedResponseFake {
+        fn now(&self) -> Duration {
+            self.now
+        }
+
+        fn spawn(&mut self, _: &SpawnSpec) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn next(&mut self, _: Duration) -> Result<Event, TransportError> {
+            self.now += Duration::from_secs(2);
+            self.events
+                .pop_front()
+                .unwrap_or(Err(TransportError::Timeout))
+        }
+
+        fn send(&mut self, _: &[u8], _: Duration) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn stop(&mut self) {}
+    }
+
+    let wrong_id = boothop_protocol::RequestId::parse("0123456789abcdef0123456789abcde2").unwrap();
+    let response =
+        boothop_protocol::encode_lifecycle_response_with_id(&wrong_id, LifecycleStatus::Succeeded)
+            .unwrap();
+    let fake = MismatchedResponseFake {
+        events: VecDeque::from([
+            Ok(Event::Stdout(encode_hello())),
+            Ok(Event::Stdout(response)),
+            Ok(Event::Exit(0)),
+        ]),
+        now: Duration::ZERO,
+    };
+    let mut client = LifecycleClient::new(fake);
+
+    assert_eq!(
+        client.run(LifecycleOperation::ProvisionArchEntry),
+        Err(ClientError::UnknownAfterSend(TransportError::Protocol))
+    );
+}
 #[test]
 fn noncanonical_hello_never_enters_send_phase() {
     let mut client = HelperClient::new(Fake::new(vec![Ok(Event::Stdout(json_frame("[1,true]")))]));

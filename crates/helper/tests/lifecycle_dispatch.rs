@@ -90,6 +90,24 @@ fn malformed_and_ordinary_frames_are_rejected_before_callback() {
 }
 
 #[test]
+fn ordinary_linux_dispatch_rejects_lifecycle_frame_before_operation_callback() {
+    let (_, frame) = request(LifecycleOperation::ProvisionArchEntry);
+    let mut io = Io::new(frame);
+    let called = Cell::new(false);
+
+    assert_eq!(
+        dispatch::serve(0, &mut io, |_, _| {
+            called.set(true);
+            panic!("lifecycle input must not reach ordinary dispatch")
+        }),
+        Err(Error::UnsupportedFormat)
+    );
+
+    assert!(!called.get());
+    assert_eq!(io.output, [boothop_protocol::encode_hello()]);
+}
+
+#[test]
 fn non_root_is_rejected_before_io_or_callback() {
     let mut io = Io::new(Vec::new());
     let called = Cell::new(false);
