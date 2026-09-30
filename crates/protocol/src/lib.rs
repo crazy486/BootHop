@@ -82,6 +82,55 @@ pub struct ResponseEnvelope {
     pub request_id: RequestId,
     pub result: Result<c::Report, c::Error>,
 }
+
+/// A separate, intentionally small transport for helper lifecycle intent.
+/// It carries no caller-selected paths, firmware identifiers, or raw data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum LifecycleOperation {
+    ProvisionArchEntry,
+    UninstallArchEntry,
+}
+
+/// Typed lifecycle progress/result labels. These values contain no platform
+/// error codes or other operation details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum LifecycleStatus {
+    Pending,
+    Succeeded,
+    AlreadyPresent,
+    NotPresent,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleRequestEnvelope {
+    pub request_id: RequestId,
+    pub operation: LifecycleOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleResponseEnvelope {
+    pub request_id: RequestId,
+    pub status: LifecycleStatus,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireLifecycleRequest {
+    protocol_version: u32,
+    request_id: RequestId,
+    lifecycle_request: LifecycleOperation,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireLifecycleResponse {
+    protocol_version: u32,
+    request_id: RequestId,
+    lifecycle_response: LifecycleStatus,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BootId(u16);
@@ -912,6 +961,48 @@ pub fn decode_request_envelope(frame: &[u8]) -> Result<RequestEnvelope, Protocol
 }
 pub fn decode_request(frame: &[u8]) -> Result<c::Request, ProtocolError> {
     Ok(decode_request_envelope(frame)?.request)
+}
+pub fn encode_lifecycle_request_with_id(
+    request_id: &RequestId,
+    operation: LifecycleOperation,
+) -> Result<Vec<u8>, ProtocolError> {
+    RequestId::parse(request_id.as_str())?;
+    encode(&WireLifecycleRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        lifecycle_request: operation,
+    })
+}
+pub fn decode_lifecycle_request_envelope(
+    frame: &[u8],
+) -> Result<LifecycleRequestEnvelope, ProtocolError> {
+    let wire: WireLifecycleRequest = decode(frame)?;
+    version(wire.protocol_version)?;
+    Ok(LifecycleRequestEnvelope {
+        request_id: wire.request_id,
+        operation: wire.lifecycle_request,
+    })
+}
+pub fn encode_lifecycle_response_with_id(
+    request_id: &RequestId,
+    status: LifecycleStatus,
+) -> Result<Vec<u8>, ProtocolError> {
+    RequestId::parse(request_id.as_str())?;
+    encode(&WireLifecycleResponse {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        lifecycle_response: status,
+    })
+}
+pub fn decode_lifecycle_response_envelope(
+    frame: &[u8],
+) -> Result<LifecycleResponseEnvelope, ProtocolError> {
+    let wire: WireLifecycleResponse = decode(frame)?;
+    version(wire.protocol_version)?;
+    Ok(LifecycleResponseEnvelope {
+        request_id: wire.request_id,
+        status: wire.lifecycle_response,
+    })
 }
 pub fn encode_response_with_id(
     request_id: &RequestId,

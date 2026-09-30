@@ -381,3 +381,37 @@ fn authentication_precedes_guard_and_native_platform_construction() {
     assert!(events.borrow().is_empty());
     assert!(io.output.is_empty());
 }
+
+#[test]
+fn ordinary_windows_dispatch_rejects_lifecycle_frames_before_guard_or_platform() {
+    let events = Rc::new(RefCell::new(Vec::<String>::new()));
+    let id = boothop_protocol::RequestId::parse("0123456789abcdef0123456789abcde1").unwrap();
+    let mut io = CaptureIo {
+        input: boothop_protocol::encode_lifecycle_request_with_id(
+            &id,
+            boothop_protocol::LifecycleOperation::ProvisionArchEntry,
+        )
+        .unwrap(),
+        output: vec![],
+    };
+    let result = serve_windows(
+        &mut io,
+        || Ok(()),
+        || {
+            events.borrow_mut().push("acquire".into());
+            WindowsOperationGuard::acquire(MutexFake(events.clone()))
+        },
+        |_| -> Result<FakePlatform, Error> {
+            events.borrow_mut().push("construct".into());
+            panic!("lifecycle input must not construct a platform")
+        },
+    );
+
+    assert_eq!(result, Err(Error::UnsupportedFormat));
+    assert!(
+        events.borrow().is_empty(),
+        "unexpected operation: {:?}",
+        events.borrow()
+    );
+    assert_eq!(io.output, [boothop_protocol::encode_hello()]);
+}

@@ -33,6 +33,52 @@ fn v2_id_is_exact_nonzero_lowercase_and_response_echo_is_checked() {
 }
 
 #[test]
+fn lifecycle_transport_round_trips_closed_typed_operations_and_statuses() {
+    let id = RequestId::parse("0123456789abcdef0123456789abcde1").unwrap();
+    for operation in [
+        LifecycleOperation::ProvisionArchEntry,
+        LifecycleOperation::UninstallArchEntry,
+    ] {
+        let frame = encode_lifecycle_request_with_id(&id, operation.clone()).unwrap();
+        let decoded = decode_lifecycle_request_envelope(&frame).unwrap();
+        assert_eq!(decoded.request_id, id);
+        assert_eq!(decoded.operation, operation);
+        assert!(decode_request(&frame).is_err());
+    }
+
+    for status in [
+        LifecycleStatus::Pending,
+        LifecycleStatus::Succeeded,
+        LifecycleStatus::AlreadyPresent,
+        LifecycleStatus::NotPresent,
+        LifecycleStatus::Failed,
+    ] {
+        let frame = encode_lifecycle_response_with_id(&id, status.clone()).unwrap();
+        let decoded = decode_lifecycle_response_envelope(&frame).unwrap();
+        assert_eq!(decoded.request_id, id);
+        assert_eq!(decoded.status, status);
+    }
+}
+
+#[test]
+fn lifecycle_transport_rejects_fields_outside_its_small_closed_schema() {
+    let raw = |json: &str| {
+        let mut frame = (json.len() as u32).to_le_bytes().to_vec();
+        frame.extend(json.as_bytes());
+        frame
+    };
+    let id = "0123456789abcdef0123456789abcde1";
+    assert!(decode_lifecycle_request_envelope(&raw(&format!(
+        r#"{{"protocol_version":2,"request_id":"{id}","lifecycle_request":"ProvisionArchEntry","path":"C:\\EFI\\BootHop\\bootx64.efi"}}"#
+    )))
+    .is_err());
+    assert!(decode_lifecycle_request_envelope(&raw(&format!(
+        r#"{{"protocol_version":2,"request_id":"{id}","lifecycle_request":{{"ProvisionArchEntry":{{"boot_id":7}}}}}}"#
+    )))
+    .is_err());
+}
+
+#[test]
 fn v2_rejects_missing_id_and_credential_or_arbitrary_transport_fields() {
     let raw = |json: &str| {
         let mut frame = (json.len() as u32).to_le_bytes().to_vec();
