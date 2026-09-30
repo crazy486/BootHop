@@ -224,7 +224,7 @@ try {
     $wrongPe = Join-Path $temp 'wrong-arch.exe'; New-FakePe $wrongPe 0x014c
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $wrongPe -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'unsupported PE machine'
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-capabilities.rs') (Join-Path $auditRoot 'crates\gui\src\forbidden.rs')
-    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariable'' outside its allowlist'
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariableEx'' outside its allowlist'
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\gui\src\forbidden.rs')
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-volume-mount.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-volume.rs')
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetVolumeMountPoint'' outside its allowlist'
@@ -245,7 +245,7 @@ try {
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''DeviceIoControl'' outside its allowlist'
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-device-io.rs')
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-platform-firmware.rs') (Join-Path $auditRoot 'crates\platform\src\windows\firmware.rs.bak')
-    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariable'' outside its allowlist'
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariableEx'' outside its allowlist'
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\firmware.rs.bak')
     $junctionTarget = Join-Path $temp 'junction-target'; New-Item -ItemType Directory -Path $junctionTarget -Force | Out-Null
     Copy-Item -LiteralPath $gui -Destination (Join-Path $junctionTarget 'boothop-gui.exe')
