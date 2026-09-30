@@ -3,7 +3,7 @@ use boothop_core::{
     CanonicalIdentity, OpaqueAlgorithm, OpaqueExactV1,
 };
 use boothop_platform::windows::uki::{
-    EfiVolume, FileReadError, GptPartition, ReadOnlyEfiVolumes, UkiPreflightError,
+    EfiVolume, FileReadError, GptPartition, MAX_UKI_BYTES, ReadOnlyEfiVolumes, UkiPreflightError,
     VolumeEnumerationError, preflight_uki,
 };
 
@@ -62,7 +62,11 @@ fn identity() -> CanonicalIdentity {
         optional_data: OpaqueExactV1 {
             algorithm: OpaqueAlgorithm::Sha256,
             byte_length: 0,
-            digest: [0; 32],
+            digest: [
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
+            ],
         },
     }
 }
@@ -186,6 +190,42 @@ fn rejects_a_non_fixed_file_path_without_enumerating_volumes() {
 }
 
 #[test]
+fn rejects_zero_guid_overflowing_geometry_and_invalid_optional_data() {
+    let mut zero_guid = identity();
+    let CanonicalDevicePathNode::HardDrive(disk) = &mut zero_guid.nodes[0] else {
+        unreachable!();
+    };
+    disk.partition_signature_uefi_bytes = [0; 16];
+
+    let mut overflowing_geometry = identity();
+    let CanonicalDevicePathNode::HardDrive(disk) = &mut overflowing_geometry.nodes[0] else {
+        unreachable!();
+    };
+    disk.partition_start_lba = u64::MAX - 10;
+    disk.partition_size_lba = 11;
+
+    let mut non_empty_optional_data = identity();
+    non_empty_optional_data.optional_data.byte_length = 1;
+
+    let mut inconsistent_optional_data = identity();
+    inconsistent_optional_data.optional_data.digest[0] ^= 1;
+
+    for target in [
+        zero_guid,
+        overflowing_geometry,
+        non_empty_optional_data,
+        inconsistent_optional_data,
+    ] {
+        let volumes = fake(Ok(valid_uki()));
+        assert_eq!(
+            preflight_uki(&volumes, &target),
+            Err(UkiPreflightError::UnsupportedIdentity)
+        );
+        assert_eq!(volumes.reads.get(), 0);
+    }
+}
+
+#[test]
 fn rejects_missing_or_unsupported_file() {
     for error in [FileReadError::Missing, FileReadError::Unsupported] {
         let volumes = fake(Err(error));
@@ -228,6 +268,22 @@ fn rejects_corrupt_pe_headers_and_truncated_section_data() {
     assert_eq!(
         preflight_uki(&fake(Ok(invalid_name_padding)), &identity()),
         Err(UkiPreflightError::MalformedPe)
+    );
+
+    let mut unsupported_machine = valid_uki();
+    unsupported_machine[0x84..0x86].copy_from_slice(&0xaa64_u16.to_le_bytes());
+    assert_eq!(
+        preflight_uki(&fake(Ok(unsupported_machine)), &identity()),
+        Err(UkiPreflightError::MalformedPe)
+    );
+}
+
+#[test]
+fn rejects_uki_bytes_over_the_fixed_limit_before_pe_parsing() {
+    let oversized = vec![0_u8; MAX_UKI_BYTES + 1];
+    assert_eq!(
+        preflight_uki(&fake(Ok(oversized)), &identity()),
+        Err(UkiPreflightError::ImageTooLarge)
     );
 }
 

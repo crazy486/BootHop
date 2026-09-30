@@ -4,6 +4,14 @@
 
 use boothop_core::{CanonicalDevicePathNode, CanonicalIdentity};
 
+/// Bound parser work and reject implausibly large UKI images before parsing.
+pub const MAX_UKI_BYTES: usize = 128 * 1024 * 1024;
+
+const SHA256_EMPTY: [u8; 32] = [
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+];
+
 /// The only file this checker will request from a matched EFI volume.
 pub const UKI_PATH_UTF16: &[u16] = &[
     b'\\' as u16,
@@ -74,6 +82,7 @@ pub enum UkiPreflightError {
     NoMatchingVolume,
     AmbiguousVolumes,
     FileUnavailable,
+    ImageTooLarge,
     MalformedPe,
     MalformedUki,
 }
@@ -99,6 +108,9 @@ pub fn preflight_uki<V: ReadOnlyEfiVolumes + ?Sized>(
     let image = volumes
         .read_file(volume.id, UKI_PATH_UTF16)
         .map_err(|_| UkiPreflightError::FileUnavailable)?;
+    if image.len() > MAX_UKI_BYTES {
+        return Err(UkiPreflightError::ImageTooLarge);
+    }
     validate_uki(&image)
 }
 
@@ -131,6 +143,11 @@ fn target_partition(identity: &CanonicalIdentity) -> Result<GptPartition, UkiPre
         || disk.partition_number == 0
         || disk.partition_start_lba == 0
         || disk.partition_size_lba == 0
+        || disk
+            .partition_start_lba
+            .checked_add(disk.partition_size_lba)
+            .is_none()
+        || disk.partition_signature_uefi_bytes == [0; 16]
         || path.node_type != 4
         || path.subtype != 4
         || path.length != file_length.unwrap_or(0)
@@ -140,6 +157,8 @@ fn target_partition(identity: &CanonicalIdentity) -> Result<GptPartition, UkiPre
         || end.subtype != 0xff
         || end.length != 4
         || expected_list_length != Some(identity.file_path_list_length)
+        || identity.optional_data.byte_length != 0
+        || identity.optional_data.digest != SHA256_EMPTY
     {
         return Err(UkiPreflightError::UnsupportedIdentity);
     }
@@ -191,7 +210,7 @@ fn pe_sections(image: &[u8]) -> Result<Vec<PeSection<'_>>, UkiPreflightError> {
         0x20b => 112,
         _ => return Err(malformed()),
     };
-    if machine == 0
+    if machine != 0x8664
         || section_count == 0
         || section_count > 96
         || optional_size < minimum_optional_size
