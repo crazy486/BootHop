@@ -186,6 +186,57 @@ fn out_of_range_octal_mount_escape_fails_closed_without_panicking() {
 }
 
 #[test]
+fn mountinfo_numeric_fields_require_ascii_decimal_digits() {
+    let root = TempRoot::new();
+    let fs = adapter(&root);
+    for mountinfo in [
+        b"+36 25 8:1 / /mnt/esp rw - vfat /dev/sda1 rw\n".as_slice(),
+        b"36 +25 8:1 / /mnt/esp rw - vfat /dev/sda1 rw\n".as_slice(),
+        b"36 25 +8:1 / /mnt/esp rw - vfat /dev/sda1 rw\n".as_slice(),
+        b"36 25 8:+1 / /mnt/esp rw - vfat /dev/sda1 rw\n".as_slice(),
+    ] {
+        root.write("proc/self/mountinfo", mountinfo);
+        assert!(!fs.is_mounted_esp("/mnt/esp"));
+    }
+}
+
+#[test]
+fn mountinfo_root_path_must_be_absolute() {
+    let root = TempRoot::new();
+    root.write(
+        "proc/self/mountinfo",
+        b"36 25 8:1 relative /mnt/esp rw - vfat /dev/sda1 rw\n",
+    );
+    let fs = adapter(&root);
+
+    assert!(!fs.is_mounted_esp("/mnt/esp"));
+}
+
+#[test]
+fn mountinfo_requires_exactly_three_fields_after_separator() {
+    let root = TempRoot::new();
+    root.write(
+        "proc/self/mountinfo",
+        b"36 25 8:1 / /mnt/esp rw - vfat /dev/sda1 rw unexpected\n",
+    );
+    let fs = adapter(&root);
+
+    assert!(!fs.is_mounted_esp("/mnt/esp"));
+}
+
+#[test]
+fn mountinfo_accepts_unknown_optional_fields_before_separator() {
+    let root = TempRoot::new();
+    root.write(
+        "proc/self/mountinfo",
+        b"36 25 8:1 / /mnt/esp rw shared:17 master:1 custom:flag - vfat /dev/sda1 rw\n",
+    );
+    let fs = adapter(&root);
+
+    assert!(fs.is_mounted_esp("/mnt/esp"));
+}
+
+#[test]
 fn adapter_exposes_only_the_read_only_contract() {
     fn read_only_contract(_: &impl ArchConfigFs) {}
     let root = TempRoot::new();

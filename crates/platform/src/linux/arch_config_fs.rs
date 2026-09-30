@@ -300,8 +300,11 @@ fn parse_mountinfo(text: &str) -> Result<Vec<(String, String)>, String> {
             .ok_or_else(|| "malformed mount metadata".to_string())?;
         let fields = before.split_ascii_whitespace().collect::<Vec<_>>();
         let post = after.split_ascii_whitespace().collect::<Vec<_>>();
-        if fields.len() < 6 || post.len() < 3 {
+        if fields.len() < 6 || post.len() != 3 {
             return Err("malformed mount metadata".into());
+        }
+        if !is_ascii_decimal(fields[0]) || !is_ascii_decimal(fields[1]) {
+            return Err("malformed mount IDs".into());
         }
         fields[0]
             .parse::<u64>()
@@ -312,15 +315,27 @@ fn parse_mountinfo(text: &str) -> Result<Vec<(String, String)>, String> {
         let (major, minor) = fields[2]
             .split_once(':')
             .ok_or_else(|| "malformed mount device number".to_string())?;
+        if !is_ascii_decimal(major) || !is_ascii_decimal(minor) {
+            return Err("malformed mount device number".into());
+        }
         if major.parse::<u32>().is_err() || minor.parse::<u32>().is_err() {
             return Err("malformed mount device number".into());
         }
-        mounts.push((decode_mount_path(fields[4])?, post[0].to_owned()));
+        let root_path = decode_mount_path(fields[3])?;
+        let mount_path = decode_mount_path(fields[4])?;
+        if !root_path.starts_with('/') || !mount_path.starts_with('/') {
+            return Err("mount root and mount point must be absolute".into());
+        }
+        mounts.push((mount_path, post[0].to_owned()));
     }
     if mounts.is_empty() {
         return Err("mount metadata has no entries".into());
     }
     Ok(mounts)
+}
+
+fn is_ascii_decimal(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn decode_mount_path(encoded: &str) -> Result<String, String> {
