@@ -615,7 +615,14 @@ fn boot_order_proof_bound(
                 _ => false,
             }
         }
-        _ => proof.validate().is_ok(),
+        _ => {
+            proof.validate().is_ok()
+                && matches!(
+                    prior,
+                    ArchProvisionState::Uninstalling(prior_record)
+                        if prior_record.boot_order_proof.as_ref() == Some(proof)
+                )
+        }
     }
 }
 
@@ -1852,6 +1859,10 @@ mod tests {
         }
     }
 
+    fn changed_proof() -> BootOrderRemovalProof {
+        removal_proof("op-1", &[8, 7, 6], true)
+    }
+
     #[test]
     fn proofs_reject_stale_operation_and_mismatched_readback() {
         let prior = verified_state("op-1");
@@ -2081,5 +2092,71 @@ mod tests {
             forged_write_result.validate(&forged_write_result.prior),
             Err(Error::ReadbackFailed)
         );
+    }
+
+    #[test]
+    fn post_order_boot_entry_attempt_must_preserve_the_verified_order_proof() {
+        let prior = uninstalling_state(
+            "op-1",
+            UninstallingStep::BootOrderRemovalReadBackVerified,
+            removal_proof("op-1", &[8, 7, 9], true),
+        );
+        let next = uninstalling_state(
+            "op-1",
+            UninstallingStep::BootEntryRemovalAttempted,
+            changed_proof(),
+        );
+        let forged = LifecycleProof::new(
+            prior,
+            next,
+            LifecycleProofBinding::BootEntryAbsent,
+            LifecycleProofBinding::BootEntryPresent,
+        )
+        .unwrap();
+        assert_eq!(forged.validate(&forged.prior), Err(Error::ReadbackFailed));
+    }
+
+    #[test]
+    fn post_order_boot_entry_and_uki_checkpoints_preserve_the_order_proof() {
+        let cases = [
+            (
+                UninstallingStep::BootEntryRemovalAttempted,
+                UninstallingStep::BootEntryRemoved,
+                LifecycleProofBinding::BootEntryAbsent,
+                LifecycleProofBinding::BootEntryAbsent,
+            ),
+            (
+                UninstallingStep::BootEntryRemoved,
+                UninstallingStep::BootEntryRemovalReadBackVerified,
+                LifecycleProofBinding::BootEntryAbsent,
+                LifecycleProofBinding::BootEntryAbsent,
+            ),
+            (
+                UninstallingStep::BootEntryRemovalReadBackVerified,
+                UninstallingStep::UkiRemovalAttempted,
+                LifecycleProofBinding::UkiAbsent,
+                LifecycleProofBinding::Uki(PublishMetadata {
+                    sha256: [1; 32],
+                    size: 1,
+                }),
+            ),
+            (
+                UninstallingStep::UkiRemovalAttempted,
+                UninstallingStep::UkiRemoved,
+                LifecycleProofBinding::UkiAbsent,
+                LifecycleProofBinding::UkiAbsent,
+            ),
+        ];
+        for (prior_step, next_step, expected, observed) in cases {
+            let prior =
+                uninstalling_state("op-1", prior_step, removal_proof("op-1", &[8, 7, 9], true));
+            let next = uninstalling_state("op-1", next_step, changed_proof());
+            let forged = LifecycleProof::new(prior, next, expected, observed).unwrap();
+            assert_eq!(
+                forged.validate(&forged.prior),
+                Err(Error::ReadbackFailed),
+                "{prior_step:?} -> {next_step:?}"
+            );
+        }
     }
 }
