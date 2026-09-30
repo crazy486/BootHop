@@ -361,14 +361,38 @@ fn rejects_missing_empty_or_duplicate_required_uki_sections() {
     );
 }
 
+fn declaration_region<'a>(source: &'a str, declaration: &str, next: &str) -> &'a str {
+    let after_declaration = source
+        .split_once(declaration)
+        .map(|(_, tail)| tail)
+        .expect("declaration exists");
+    after_declaration
+        .split_once(next)
+        .map(|(region, _)| region)
+        .expect("following declaration exists")
+}
+
+#[test]
+fn native_trait_region_does_not_leak_past_crlf_boundary() {
+    let source = "pub trait NativeEfiCalls {\r\n    fn read_fixed_uki(&self);\r\n}\r\npub struct NativeEfiVolumeAdapter { path_utf16: Vec<u16> }\r\n";
+    let native_trait = declaration_region(
+        source,
+        "pub trait NativeEfiCalls {",
+        "pub struct NativeEfiVolumeAdapter",
+    );
+
+    assert!(native_trait.contains("read_fixed_uki"));
+    assert!(!native_trait.contains("path_utf16"));
+}
+
 #[test]
 fn the_volume_boundary_only_offers_shared_reference_reads() {
     let boundary = include_str!("../src/windows/uki.rs");
-    let trait_body = boundary
-        .split("pub trait ReadOnlyEfiVolumes {")
-        .nth(1)
-        .and_then(|tail| tail.split("}\n").next())
-        .expect("read-only volume trait exists");
+    let trait_body = declaration_region(
+        boundary,
+        "pub trait ReadOnlyEfiVolumes {",
+        "pub fn uses_fixed_uki_path",
+    );
     assert!(trait_body.contains("&self"));
     assert!(trait_body.contains("read_fixed_uki"));
     assert!(
@@ -377,13 +401,17 @@ fn the_volume_boundary_only_offers_shared_reference_reads() {
             .any(|operation| trait_body.contains(operation))
     );
 
-    let native_trait = boundary
-        .split("pub trait NativeEfiCalls {")
-        .nth(1)
-        .and_then(|tail| tail.split("}\n").next())
-        .expect("native calls contract exists");
+    let native_trait = declaration_region(
+        boundary,
+        "pub trait NativeEfiCalls {",
+        "pub struct NativeEfiVolumeAdapter",
+    );
     assert!(native_trait.contains("enumerate_existing_efi_volumes"));
     assert!(native_trait.contains("read_fixed_uki"));
+    let normalized_native_trait = native_trait.replace("\r\n", "\n");
+    assert!(normalized_native_trait.contains(
+        "fn read_fixed_uki(\n        &self,\n        volume_id: u64,\n        expected_partition: GptPartition,\n        max_bytes: usize,\n    ) -> Result<NativeFixedUkiRead, FileReadError>;"
+    ));
     assert!(!native_trait.contains("path_utf16"));
     assert!(
         ![
