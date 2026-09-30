@@ -7,7 +7,12 @@ use boothop_platform::{
     windows::{
         CallError, FirmwareType, ReadOutcome, RebootCalls, RebootReply, VariableName, WindowsCalls,
         WindowsPlatform,
-        uki::{EfiVolume, FileReadError, GptPartition, ReadOnlyEfiVolumes, VolumeEnumerationError},
+        uki::{
+            EFI_SYSTEM_PARTITION_TYPE_GUID_UEFI_BYTES, EfiVolume, FileHandleIdentity,
+            FileIdentitySnapshot, FileReadError, GptPartition, NativeEfiCalls, NativeEfiVolume,
+            NativeEfiVolumeAdapter, NativeFixedUkiRead, NativePartitionScheme, ReadOnlyEfiVolumes,
+            VolumeEnumerationError,
+        },
     },
 };
 use std::{cell::Cell, rc::Rc};
@@ -63,6 +68,38 @@ struct Volumes {
     file_reads: Rc<Cell<usize>>,
 }
 
+struct NativeVolumes {
+    enumerations: Vec<Vec<NativeEfiVolume>>,
+    enumeration_index: Cell<usize>,
+    reads: Rc<Cell<usize>>,
+    read: Result<NativeFixedUkiRead, FileReadError>,
+}
+
+impl NativeEfiCalls for NativeVolumes {
+    fn enumerate_existing_efi_volumes(
+        &self,
+    ) -> Result<Vec<NativeEfiVolume>, VolumeEnumerationError> {
+        let index = self.enumeration_index.get();
+        self.enumeration_index.set(index + 1);
+        Ok(self
+            .enumerations
+            .get(index)
+            .or_else(|| self.enumerations.last())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn read_fixed_uki(
+        &self,
+        _volume_id: u64,
+        _expected_partition: GptPartition,
+        _max_bytes: usize,
+    ) -> Result<NativeFixedUkiRead, FileReadError> {
+        self.reads.set(self.reads.get() + 1);
+        self.read.clone()
+    }
+}
+
 impl ReadOnlyEfiVolumes for Volumes {
     fn existing_efi_volumes(&self) -> Result<Vec<EfiVolume>, VolumeEnumerationError> {
         Ok(if self.matching_volume {
@@ -75,12 +112,13 @@ impl ReadOnlyEfiVolumes for Volumes {
         })
     }
 
-    fn read_file(&self, volume_id: u64, path_utf16: &[u16]) -> Result<Vec<u8>, FileReadError> {
+    fn read_fixed_uki(
+        &self,
+        volume_id: u64,
+        expected_partition: GptPartition,
+    ) -> Result<Vec<u8>, FileReadError> {
         assert_eq!(volume_id, 9);
-        assert_eq!(
-            path_utf16,
-            r"\EFI\BootHop\arch.efi".encode_utf16().collect::<Vec<_>>()
-        );
+        assert_eq!(expected_partition, partition());
         self.file_reads.set(self.file_reads.get() + 1);
         self.file.clone()
     }
@@ -101,6 +139,19 @@ fn partition() -> GptPartition {
         starting_lba: 2048,
         size_lba: 500_000,
         partition_guid_uefi_bytes: [0x11; 16],
+    }
+}
+
+fn native_volume(id: u64) -> NativeEfiVolume {
+    NativeEfiVolume {
+        id,
+        partition_scheme: NativePartitionScheme::Gpt,
+        partition_number: 3,
+        starting_offset_bytes: 2048 * 512,
+        size_bytes: 500_000 * 512,
+        logical_sector_size: 512,
+        partition_guid_uefi_bytes: [0x11; 16],
+        partition_type_guid_uefi_bytes: EFI_SYSTEM_PARTITION_TYPE_GUID_UEFI_BYTES,
     }
 }
 
@@ -127,6 +178,25 @@ fn valid_uki() -> Vec<u8> {
         image[raw_start + index] = 0x41 + index as u8;
     }
     image
+}
+
+fn native_read(bytes: Vec<u8>) -> NativeFixedUkiRead {
+    let identity = FileIdentitySnapshot {
+        identity: Some(FileHandleIdentity {
+            volume_serial_number: 0x1234,
+            file_id: [7; 16],
+        }),
+        size: bytes.len() as u64,
+        is_regular_file: true,
+        is_reparse_point: false,
+    };
+    NativeFixedUkiRead {
+        volume_id: 9,
+        partition: partition(),
+        before: identity,
+        after: identity,
+        bytes,
+    }
 }
 
 struct SwitchFixture {
@@ -245,4 +315,66 @@ fn matching_fixed_uki_preflight_allows_existing_switch_flow() {
     assert_eq!(fixture.next_reads.get(), 2);
     assert_eq!(fixture.next_writes.get(), 0);
     assert_eq!(fixture.reboots.get(), 1);
+}
+
+#[test]
+fn native_second_snapshot_partition_ambiguity_stops_before_bootnext_and_reboot() {
+    let fixture = setup(Ok(valid_uki()), true);
+    let native_reads = Rc::new(Cell::new(0));
+    let native = NativeVolumes {
+        enumerations: vec![
+            vec![native_volume(9)],
+            vec![native_volume(9), native_volume(10)],
+        ],
+        enumeration_index: Cell::new(0),
+        reads: native_reads.clone(),
+        read: Ok(native_read(valid_uki())),
+    };
+    let mut store = fixture.store;
+    let mut platform = WindowsPlatform::new(&mut store, fixture.calls, fixture.reboot)
+        .with_read_only_efi_volumes(NativeEfiVolumeAdapter::new(native));
+
+    let result = execute(
+        Request::Switch { os: Os::Linux },
+        Os::Windows,
+        &mut platform,
+    );
+
+    assert_eq!(result, Err(Error::TargetMissing));
+    drop(platform);
+    assert_eq!(native_reads.get(), 0);
+    assert_eq!(fixture.next_reads.get(), 0);
+    assert_eq!(fixture.next_writes.get(), 0);
+    assert_eq!(fixture.reboots.get(), 0);
+}
+
+#[test]
+fn native_missing_file_identity_stops_before_bootnext_and_reboot() {
+    let fixture = setup(Ok(valid_uki()), true);
+    let native_reads = Rc::new(Cell::new(0));
+    let mut read = native_read(valid_uki());
+    read.before.identity = None;
+    read.after.identity = None;
+    let native = NativeVolumes {
+        enumerations: vec![vec![native_volume(9)], vec![native_volume(9)]],
+        enumeration_index: Cell::new(0),
+        reads: native_reads.clone(),
+        read: Ok(read),
+    };
+    let mut store = fixture.store;
+    let mut platform = WindowsPlatform::new(&mut store, fixture.calls, fixture.reboot)
+        .with_read_only_efi_volumes(NativeEfiVolumeAdapter::new(native));
+
+    let result = execute(
+        Request::Switch { os: Os::Linux },
+        Os::Windows,
+        &mut platform,
+    );
+
+    assert_eq!(result, Err(Error::TargetMissing));
+    drop(platform);
+    assert_eq!(native_reads.get(), 1);
+    assert_eq!(fixture.next_reads.get(), 0);
+    assert_eq!(fixture.next_writes.get(), 0);
+    assert_eq!(fixture.reboots.get(), 0);
 }

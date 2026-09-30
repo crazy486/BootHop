@@ -58,15 +58,17 @@ impl<S: crate::ProtectedStore, F: WindowsCalls, R: RebootCalls> WindowsPlatform<
 
 struct UnavailableEfiVolumes;
 
+// No native EFI-volume reader has been verified against a Windows ESP. Keep
+// production UKI preflight fail-closed until that evidence exists.
 impl uki::ReadOnlyEfiVolumes for UnavailableEfiVolumes {
     fn existing_efi_volumes(&self) -> Result<Vec<uki::EfiVolume>, uki::VolumeEnumerationError> {
         Err(uki::VolumeEnumerationError::Failed)
     }
 
-    fn read_file(
+    fn read_fixed_uki(
         &self,
         _volume_id: u64,
-        _path_utf16: &[u16],
+        _expected_partition: uki::GptPartition,
     ) -> Result<Vec<u8>, uki::FileReadError> {
         Err(uki::FileReadError::Unsupported)
     }

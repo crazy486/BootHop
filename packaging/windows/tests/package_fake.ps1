@@ -145,6 +145,18 @@ try {
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin } 'production dumpbin must be canonical dumpbin.exe'
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
     & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
+    New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetCurrentProcess', 'SetVolumeMountPointW'))
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'GUI PE imports a forbidden capability'
+    New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetCurrentProcess', 'DeleteFileW'))
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'GUI PE imports a forbidden capability'
+    New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetCurrentProcess', 'DeviceIoControl'))
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'GUI PE imports a forbidden capability'
+    New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetCurrentProcess', 'OpenFileById'))
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $root -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'GUI PE imports a forbidden capability'
+    New-FakeDumpbin $dumpbin $validDumpbin
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-platform-uki-read-query.rs') (Join-Path $auditRoot 'crates\platform\src\windows\uki.rs')
+    & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\uki.rs')
     New-FakeDumpbin $dumpbin ($validDumpbin.Replace('GetProcAddress', 'GetProcAddressEvil'))
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'dynamic-loader import lacks audited runtime provenance'
     New-FakeDumpbin $dumpbin $validDumpbin
@@ -176,6 +188,24 @@ try {
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-capabilities.rs') (Join-Path $auditRoot 'crates\gui\src\forbidden.rs')
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariable'' outside its allowlist'
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\gui\src\forbidden.rs')
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-volume-mount.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-volume.rs')
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetVolumeMountPoint'' outside its allowlist'
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-volume.rs')
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-file-delete.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-delete.rs')
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''DeleteFile'' outside its allowlist'
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-delete.rs')
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-volume-query.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-query.rs')
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''FindFirstVolume'' outside its allowlist'
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-query.rs')
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-file-open.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-open.rs')
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''CreateFile'' outside its allowlist'
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-open.rs')
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-open-file-id.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-open-by-id.rs')
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''OpenFileById'' outside its allowlist'
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-open-by-id.rs')
+    Copy-Item (Join-Path $PSScriptRoot 'fixtures\forbidden-platform-device-io.rs') (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-device-io.rs')
+    Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''DeviceIoControl'' outside its allowlist'
+    Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\unsafe-device-io.rs')
     Copy-Item (Join-Path $PSScriptRoot 'fixtures\allowed-platform-firmware.rs') (Join-Path $auditRoot 'crates\platform\src\windows\firmware.rs.bak')
     Assert-Fails { & (Join-Path $root 'packaging\windows\check-capabilities.ps1') -RootPath $auditRoot -GuiPath $gui -HelperPath $helper -DumpbinPath $dumpbin -TestOnlyFixtureMode } 'source capability ''SetFirmwareEnvironmentVariable'' outside its allowlist'
     Remove-Item -LiteralPath (Join-Path $auditRoot 'crates\platform\src\windows\firmware.rs.bak')

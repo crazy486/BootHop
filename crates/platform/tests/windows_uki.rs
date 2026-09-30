@@ -3,8 +3,10 @@ use boothop_core::{
     CanonicalIdentity, OpaqueAlgorithm, OpaqueExactV1,
 };
 use boothop_platform::windows::uki::{
-    EfiVolume, FileReadError, GptPartition, MAX_UKI_BYTES, ReadOnlyEfiVolumes, UkiPreflightError,
-    VolumeEnumerationError, preflight_uki,
+    EFI_SYSTEM_PARTITION_TYPE_GUID_UEFI_BYTES, EfiVolume, FileHandleIdentity, FileIdentitySnapshot,
+    FileReadError, GptPartition, MAX_UKI_BYTES, NativeEfiCalls, NativeEfiVolume,
+    NativeEfiVolumeAdapter, NativeFixedUkiRead, NativePartitionScheme, ReadOnlyEfiVolumes,
+    UkiPreflightError, VolumeEnumerationError, preflight_uki,
 };
 
 const FILE_PATH: &str = r"\EFI\BootHop\arch.efi";
@@ -21,9 +23,13 @@ impl ReadOnlyEfiVolumes for FakeVolumes {
         Ok(self.volumes.clone())
     }
 
-    fn read_file(&self, volume_id: u64, path_utf16: &[u16]) -> Result<Vec<u8>, FileReadError> {
+    fn read_fixed_uki(
+        &self,
+        volume_id: u64,
+        expected_partition: GptPartition,
+    ) -> Result<Vec<u8>, FileReadError> {
         assert_eq!(volume_id, 9);
-        assert_eq!(path_utf16, FILE_PATH.encode_utf16().collect::<Vec<_>>());
+        assert_eq!(expected_partition, partition());
         self.reads.set(self.reads.get() + 1);
         self.bytes.clone()
     }
@@ -230,7 +236,11 @@ fn rejects_zero_guid_overflowing_geometry_and_invalid_optional_data() {
 
 #[test]
 fn rejects_missing_or_unsupported_file() {
-    for error in [FileReadError::Missing, FileReadError::Unsupported] {
+    for error in [
+        FileReadError::Missing,
+        FileReadError::Unsupported,
+        FileReadError::Failed,
+    ] {
         let volumes = fake(Err(error));
         assert_eq!(
             preflight_uki(&volumes, &identity()),
@@ -360,9 +370,382 @@ fn the_volume_boundary_only_offers_shared_reference_reads() {
         .and_then(|tail| tail.split("}\n").next())
         .expect("read-only volume trait exists");
     assert!(trait_body.contains("&self"));
+    assert!(trait_body.contains("read_fixed_uki"));
     assert!(
         !["write", "mount", "assign_drive_letter", "delete"]
             .iter()
             .any(|operation| trait_body.contains(operation))
     );
+
+    let native_trait = boundary
+        .split("pub trait NativeEfiCalls {")
+        .nth(1)
+        .and_then(|tail| tail.split("}\n").next())
+        .expect("native calls contract exists");
+    assert!(native_trait.contains("enumerate_existing_efi_volumes"));
+    assert!(native_trait.contains("read_fixed_uki"));
+    assert!(!native_trait.contains("path_utf16"));
+    assert!(
+        ![
+            "mount",
+            "drive_letter",
+            "write",
+            "delete",
+            "SetVolumeMountPoint"
+        ]
+        .iter()
+        .any(|operation| native_trait.contains(operation))
+    );
+}
+
+#[derive(Clone)]
+struct FakeNativeCalls {
+    volumes: Vec<NativeEfiVolume>,
+    read: Result<NativeFixedUkiRead, FileReadError>,
+    requested: std::rc::Rc<std::cell::RefCell<Vec<(u64, GptPartition, usize)>>>,
+    enumeration_calls: std::rc::Rc<std::cell::Cell<usize>>,
+    second_snapshot: Option<Vec<NativeEfiVolume>>,
+    enumeration_fails: bool,
+}
+
+impl NativeEfiCalls for FakeNativeCalls {
+    fn enumerate_existing_efi_volumes(
+        &self,
+    ) -> Result<Vec<NativeEfiVolume>, VolumeEnumerationError> {
+        let call = self.enumeration_calls.get();
+        self.enumeration_calls.set(call + 1);
+        if self.enumeration_fails {
+            return Err(VolumeEnumerationError::Failed);
+        }
+        if call == 1
+            && let Some(snapshot) = &self.second_snapshot
+        {
+            return Ok(snapshot.clone());
+        }
+        Ok(self.volumes.clone())
+    }
+
+    fn read_fixed_uki(
+        &self,
+        volume_id: u64,
+        expected_partition: GptPartition,
+        max_bytes: usize,
+    ) -> Result<NativeFixedUkiRead, FileReadError> {
+        self.requested
+            .borrow_mut()
+            .push((volume_id, expected_partition, max_bytes));
+        self.read.clone()
+    }
+}
+
+fn native_volume(sector_size: u32, id: u64) -> NativeEfiVolume {
+    NativeEfiVolume {
+        id,
+        partition_scheme: NativePartitionScheme::Gpt,
+        partition_number: 3,
+        starting_offset_bytes: 2048 * sector_size as u64,
+        size_bytes: 500_000 * sector_size as u64,
+        logical_sector_size: sector_size,
+        partition_guid_uefi_bytes: [0x11; 16],
+        partition_type_guid_uefi_bytes: EFI_SYSTEM_PARTITION_TYPE_GUID_UEFI_BYTES,
+    }
+}
+
+fn stable_read(bytes: Vec<u8>) -> NativeFixedUkiRead {
+    let identity = FileIdentitySnapshot {
+        identity: Some(FileHandleIdentity {
+            volume_serial_number: 0x1234,
+            file_id: [7; 16],
+        }),
+        size: bytes.len() as u64,
+        is_regular_file: true,
+        is_reparse_point: false,
+    };
+    NativeFixedUkiRead {
+        volume_id: 9,
+        partition: partition(),
+        before: identity,
+        after: identity,
+        bytes,
+    }
+}
+
+fn native_fake(sector_size: u32, bytes: Vec<u8>) -> FakeNativeCalls {
+    FakeNativeCalls {
+        volumes: vec![native_volume(sector_size, 9)],
+        read: Ok(stable_read(bytes)),
+        requested: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        enumeration_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+        second_snapshot: None,
+        enumeration_fails: false,
+    }
+}
+
+#[test]
+fn native_adapter_normalizes_512_and_4096_sector_partitions() {
+    for sector_size in [512, 4096] {
+        let calls = native_fake(sector_size, valid_uki());
+        let adapter = NativeEfiVolumeAdapter::new(calls.clone());
+        assert_eq!(preflight_uki(&adapter, &identity()), Ok(()));
+        assert_eq!(calls.requested.borrow().len(), 1);
+        assert_eq!(calls.requested.borrow()[0].2, MAX_UKI_BYTES);
+    }
+}
+
+#[test]
+fn native_adapter_fails_closed_for_non_esp_bad_sector_and_duplicate_volumes() {
+    let calls = native_fake(512, valid_uki());
+    let mut volume = calls.volumes[0];
+    volume.partition_scheme = NativePartitionScheme::Mbr;
+    volume.partition_type_guid_uefi_bytes = [0x55; 16];
+    let non_esp = FakeNativeCalls {
+        volumes: vec![volume],
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(non_esp.clone()), &identity()),
+        Err(UkiPreflightError::NoMatchingVolume)
+    );
+    assert!(non_esp.requested.borrow().is_empty());
+
+    let mut non_gpt = calls.clone();
+    non_gpt.volumes[0].partition_scheme = NativePartitionScheme::Unknown;
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(non_gpt.clone()), &identity()),
+        Err(UkiPreflightError::NoMatchingVolume)
+    );
+    assert!(non_gpt.requested.borrow().is_empty());
+
+    let mut invalid_sector = calls.clone();
+    invalid_sector.volumes[0].logical_sector_size = 768;
+    assert_eq!(
+        preflight_uki(
+            &NativeEfiVolumeAdapter::new(invalid_sector.clone()),
+            &identity()
+        ),
+        Err(UkiPreflightError::NoMatchingVolume)
+    );
+    assert!(invalid_sector.requested.borrow().is_empty());
+
+    let mut duplicate = calls;
+    duplicate.volumes.push(native_volume(512, 10));
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(duplicate.clone()), &identity()),
+        Err(UkiPreflightError::AmbiguousVolumes)
+    );
+    assert!(duplicate.requested.borrow().is_empty());
+
+    let mut none = native_fake(512, valid_uki());
+    none.volumes.clear();
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(none.clone()), &identity()),
+        Err(UkiPreflightError::NoMatchingVolume)
+    );
+    assert!(none.requested.borrow().is_empty());
+}
+
+#[test]
+fn native_adapter_rejects_stale_volume_id_or_unstable_and_unsupported_file_identity() {
+    let calls = native_fake(512, valid_uki());
+    let mut stale_read = stable_read(valid_uki());
+    stale_read.partition.partition_guid_uefi_bytes = [0x22; 16];
+    let stale = FakeNativeCalls {
+        read: Ok(stale_read),
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(stale.clone()), &identity()),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut reused_id = stable_read(valid_uki());
+    reused_id.volume_id = 10;
+    let reused = FakeNativeCalls {
+        read: Ok(reused_id),
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(reused), &identity()),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut changed = stable_read(valid_uki());
+    changed.after.identity.as_mut().unwrap().file_id[0] ^= 1;
+    let changed_file = FakeNativeCalls {
+        read: Ok(changed),
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(changed_file), &identity()),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut reparse = stable_read(valid_uki());
+    reparse.before.is_reparse_point = true;
+    let reparse_file = FakeNativeCalls {
+        read: Ok(reparse),
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(reparse_file), &identity()),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut changed_serial = stable_read(valid_uki());
+    changed_serial
+        .after
+        .identity
+        .as_mut()
+        .unwrap()
+        .volume_serial_number += 1;
+    assert_eq!(
+        preflight_uki(
+            &NativeEfiVolumeAdapter::new(FakeNativeCalls {
+                read: Ok(changed_serial),
+                ..calls.clone()
+            }),
+            &identity()
+        ),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut after_reparse = stable_read(valid_uki());
+    after_reparse.after.is_reparse_point = true;
+    assert_eq!(
+        preflight_uki(
+            &NativeEfiVolumeAdapter::new(FakeNativeCalls {
+                read: Ok(after_reparse),
+                ..calls.clone()
+            }),
+            &identity()
+        ),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut changed_size = stable_read(valid_uki());
+    changed_size.after.size -= 1;
+    assert_eq!(
+        preflight_uki(
+            &NativeEfiVolumeAdapter::new(FakeNativeCalls {
+                read: Ok(changed_size),
+                ..calls.clone()
+            }),
+            &identity()
+        ),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+}
+
+#[test]
+fn native_adapter_rejects_volume_disappearance_or_reuse_before_opening_the_file() {
+    let mut same_partition_new_id = native_volume(512, 10);
+    same_partition_new_id.partition_number = 3;
+    let duplicate_invalid_id = NativeEfiVolume {
+        id: 9,
+        partition_scheme: NativePartitionScheme::Unknown,
+        ..native_volume(512, 9)
+    };
+    for second_snapshot in [
+        vec![],
+        vec![NativeEfiVolume {
+            starting_offset_bytes: 2049 * 512,
+            ..native_volume(512, 9)
+        }],
+        vec![native_volume(512, 9), same_partition_new_id],
+        vec![native_volume(512, 9), duplicate_invalid_id],
+    ] {
+        let calls = native_fake(512, valid_uki());
+        let stale = FakeNativeCalls {
+            second_snapshot: Some(second_snapshot),
+            ..calls.clone()
+        };
+        assert_eq!(
+            preflight_uki(&NativeEfiVolumeAdapter::new(stale.clone()), &identity()),
+            Err(UkiPreflightError::FileUnavailable)
+        );
+        assert!(stale.requested.borrow().is_empty());
+    }
+}
+
+#[test]
+fn native_adapter_reports_enumeration_errors_and_zero_byte_files() {
+    let calls = native_fake(512, valid_uki());
+    let failed_enumeration = FakeNativeCalls {
+        enumeration_fails: true,
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(
+            &NativeEfiVolumeAdapter::new(failed_enumeration.clone()),
+            &identity()
+        ),
+        Err(UkiPreflightError::VolumeEnumerationFailed)
+    );
+    assert!(failed_enumeration.requested.borrow().is_empty());
+
+    let zero_byte_file = FakeNativeCalls {
+        read: Ok(stable_read(vec![])),
+        ..calls
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(zero_byte_file), &identity()),
+        Err(UkiPreflightError::MalformedPe)
+    );
+}
+
+#[test]
+fn native_adapter_rejects_short_and_oversized_reads() {
+    let calls = native_fake(512, valid_uki());
+    let mut short = stable_read(valid_uki());
+    short.bytes.pop();
+    let short_read = FakeNativeCalls {
+        read: Ok(short),
+        ..calls.clone()
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(short_read), &identity()),
+        Err(UkiPreflightError::FileUnavailable)
+    );
+
+    let mut too_large = stable_read(vec![0; MAX_UKI_BYTES + 1]);
+    too_large.before.size = (MAX_UKI_BYTES + 1) as u64;
+    too_large.after.size = (MAX_UKI_BYTES + 1) as u64;
+    let oversized = FakeNativeCalls {
+        read: Ok(too_large),
+        ..calls
+    };
+    assert_eq!(
+        preflight_uki(&NativeEfiVolumeAdapter::new(oversized), &identity()),
+        Err(UkiPreflightError::ImageTooLarge)
+    );
+}
+
+#[test]
+fn native_adapter_rejects_unavailable_zero_file_identity() {
+    let calls = native_fake(512, valid_uki());
+    for file_identity in [
+        None,
+        Some(FileHandleIdentity {
+            volume_serial_number: 0x1234,
+            file_id: [0; 16],
+        }),
+        Some(FileHandleIdentity {
+            volume_serial_number: 0,
+            file_id: [7; 16],
+        }),
+    ] {
+        let mut unavailable = stable_read(valid_uki());
+        unavailable.before.identity = file_identity;
+        unavailable.after.identity = file_identity;
+        assert_eq!(
+            preflight_uki(
+                &NativeEfiVolumeAdapter::new(FakeNativeCalls {
+                    read: Ok(unavailable),
+                    ..calls.clone()
+                }),
+                &identity()
+            ),
+            Err(UkiPreflightError::FileUnavailable)
+        );
+    }
 }

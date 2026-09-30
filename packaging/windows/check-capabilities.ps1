@@ -138,8 +138,43 @@ $allow = @{
     'ExitWindows' = @('crates\platform\src\windows\reboot.rs')
     'ShellExecute' = @('crates\gui\src\helper_client\windows\native.rs')
     'CreateProcess' = @('crates\gui\src\helper_client\windows\native.rs')
+    # Existing, unrelated file/IPC writers remain narrowly allowlisted. New
+    # Windows EFI code cannot use these APIs: writes/deletes in every other
+    # source file are rejected below.
+    'WriteFile' = @('crates\gui\src\helper_client\windows\native.rs','crates\helper\src\windows\pipe.rs')
+    'MoveFile' = @('crates\gui\src\cache\windows.rs')
+    'ReplaceFile' = @('crates\platform\src\windows\store.rs')
+    'SetFileInformationByHandle' = @('crates\gui\src\cache\windows.rs')
+    # Read-only metadata and volume-discovery APIs may only be introduced in
+    # the dedicated UKI boundary; these paths are existing unrelated uses.
+    'FindFirstVolume' = @('crates\platform\src\windows\uki.rs')
+    'FindNextVolume' = @('crates\platform\src\windows\uki.rs')
+    'FindVolumeClose' = @('crates\platform\src\windows\uki.rs')
+    'GetVolumeInformation' = @('crates\platform\src\windows\uki.rs')
+    'GetVolumeNameForVolumeMountPoint' = @('crates\platform\src\windows\uki.rs')
+    'GetVolumePathNamesForVolumeName' = @('crates\platform\src\windows\uki.rs')
+    'QueryDosDevice' = @('crates\platform\src\windows\uki.rs')
+    'GetLogicalDrives' = @('crates\platform\src\windows\uki.rs')
+    'GetFileInformationByHandle' = @('crates\platform\src\windows\uki.rs','crates\gui\src\cache\windows.rs','crates\helper\src\windows\pipe.rs','crates\gui\src\helper_client\windows\native.rs')
+    'GetFileInformationByHandleEx' = @('crates\platform\src\windows\uki.rs','crates\gui\src\cache\windows.rs','crates\platform\src\windows\store.rs')
+    'GetFinalPathNameByHandle' = @('crates\platform\src\windows\uki.rs','crates\gui\src\cache\windows.rs','crates\helper\src\windows\pipe.rs','crates\gui\src\helper_client\windows\native.rs','crates\platform\src\windows\store.rs')
+    # Generic opens and arbitrary device control are deliberately unavailable
+    # to the UKI boundary until a native implementation has a reviewed,
+    # read-only access-mask and IOCTL contract. Existing unrelated opens stay
+    # limited to these exact source files.
+    'CreateFile' = @('crates\platform\src\windows\store.rs','crates\gui\src\cache\windows.rs','crates\helper\src\windows\pipe.rs','crates\gui\src\helper_client\windows\native.rs')
 }
-$patterns = @('SetFirmwareEnvironmentVariable','GetFirmwareEnvironmentVariable','GetFirmwareType','AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','ExitWindows','ShellExecute','CreateProcess','LoadLibrary','GetProcAddress','bcdedit')
+$patterns = @(
+    'SetFirmwareEnvironmentVariable','GetFirmwareEnvironmentVariable','GetFirmwareType',
+    'AdjustTokenPrivileges','OpenProcessToken','InitiateSystemShutdown','ExitWindows',
+    'ShellExecute','CreateProcess','LoadLibrary','GetProcAddress','bcdedit',
+    'SetVolumeMountPoint','DeleteVolumeMountPoint','DefineDosDevice','SetVolumeLabel',
+    'WriteFile','WriteFileEx','DeleteFile','MoveFile','ReplaceFile','SetEndOfFile',
+    'SetFileInformationByHandle','FindFirstVolume','FindNextVolume','FindVolumeClose',
+    'GetVolumeInformation','GetVolumeNameForVolumeMountPoint','GetVolumePathNamesForVolumeName',
+    'QueryDosDevice','GetLogicalDrives','GetFileInformationByHandle','GetFileInformationByHandleEx',
+    'GetFinalPathNameByHandle','CreateFile','OpenFileById','DeviceIoControl'
+)
 foreach ($file in $sourceFiles) {
     $sourcePath = Get-Absolute $file.FullName 'source file'
     $sourceResource = Open-HeldFileResource $sourcePath 'source file' $sourcePath; [void](Add-HeldResource $resources $sourceResource); $sourceHeld = $sourceResource.Held
@@ -242,8 +277,11 @@ function Assert-RuntimeImportProvenance($imports, [string] $label) {
 
 $guiImports = Parse-DumpbinImports (Invoke-Dumpbin $guiPath 'GUI PE') 'GUI PE'; $helperImports = Parse-DumpbinImports (Invoke-Dumpbin $helperPath 'helper PE') 'helper PE'
 Assert-RuntimeImportProvenance $guiImports 'GUI PE'; Assert-RuntimeImportProvenance $helperImports 'helper PE'
-$guiForbidden = 'SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|InitiateSystemShutdown|ExitWindows|bcdedit'
-$helperForbidden = 'CreateProcess|ShellExecute|bcdedit'
+$volumeMutationApis = 'SetVolumeMountPoint|DeleteVolumeMountPoint|DefineDosDevice|SetVolumeLabel'
+$ukiFileMutationApis = 'WriteFileEx|DeleteFile|SetEndOfFile'
+$unreviewedVolumeAccessApis = 'OpenFileById|DeviceIoControl'
+$guiForbidden = "SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|InitiateSystemShutdown|ExitWindows|bcdedit|$volumeMutationApis|$ukiFileMutationApis|$unreviewedVolumeAccessApis"
+$helperForbidden = "CreateProcess|ShellExecute|bcdedit|$volumeMutationApis|$ukiFileMutationApis|$unreviewedVolumeAccessApis"
 if (($guiImports | Where-Object { $_.Name -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
 if (($helperImports | Where-Object { $_.Name -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
 foreach ($pe in @($guiPe,$helperPe)) { if ((Get-HeldHash $pe.Held $pe.Path) -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }
