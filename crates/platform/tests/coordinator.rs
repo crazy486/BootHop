@@ -21,6 +21,8 @@ enum FailAt {
 struct FakeBackend {
     fs: support::FakeFs,
     fail: FailAt,
+    mismatch: FailAt,
+    uki_mismatch: bool,
     mutations: Vec<&'static str>,
     events: Vec<&'static str>,
     observations: usize,
@@ -31,6 +33,8 @@ impl FakeBackend {
         Self {
             fs,
             fail: FailAt::None,
+            mismatch: FailAt::None,
+            uki_mismatch: false,
             mutations: Vec::new(),
             events: Vec::new(),
             observations: 0,
@@ -44,12 +48,23 @@ impl FakeBackend {
         );
     }
 
+    fn trace(&self, event: &'static str) {
+        self.fs.0.borrow_mut().events.push(event.into());
+    }
+
     fn mutation(
         &mut self,
         stage: &'static str,
         residual: Residual,
+        entry: Option<&boothop_core::OwnedArchEntry>,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
         self.assert_lock();
+        self.trace(match stage {
+            "uki" => "external-mutate-uki",
+            "entry" => "external-mutate-entry",
+            "order" => "external-mutate-order",
+            _ => unreachable!(),
+        });
         self.events.push(match stage {
             "uki" => "mutate-uki",
             "entry" => "mutate-entry",
@@ -66,10 +81,38 @@ impl FakeBackend {
         if fail {
             return Err(LifecycleFailure::uncertain(Error::ReadbackFailed, residual));
         }
+        if self.mismatch
+            == match stage {
+                "uki" => FailAt::Uki,
+                "entry" => FailAt::Entry,
+                "order" => FailAt::Order,
+                _ => FailAt::None,
+            }
+        {
+            return Ok(match stage {
+                "uki" => LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
+                    sha256: [0x33; 32],
+                    size: 43,
+                }),
+                "entry" => {
+                    let mut identity = entry.expect("entry readback identity").identity.clone();
+                    identity.file_path_list_length = identity.file_path_list_length.wrapping_add(1);
+                    LifecycleReadback::BootEntryPresent(identity)
+                }
+                "order" => LifecycleReadback::BootOrderAbsent,
+                _ => unreachable!(),
+            });
+        }
         self.events.push(match stage {
             "uki" => "readback-uki",
             "entry" => "readback-entry",
             "order" => "readback-order",
+            _ => unreachable!(),
+        });
+        self.trace(match stage {
+            "uki" => "external-readback-uki",
+            "entry" => "external-readback-entry",
+            "order" => "external-readback-order",
             _ => unreachable!(),
         });
         Ok(match stage {
@@ -77,7 +120,9 @@ impl FakeBackend {
                 sha256: [0x22; 32],
                 size: 42,
             }),
-            "entry" => LifecycleReadback::BootEntryPresent,
+            "entry" => LifecycleReadback::BootEntryPresent(
+                entry.expect("entry readback identity").identity.clone(),
+            ),
             "order" => LifecycleReadback::BootOrderContains,
             _ => unreachable!(),
         })
@@ -90,6 +135,7 @@ impl LifecycleBackend for FakeBackend {
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<(boothop_core::PublishMetadata, LifecycleReadback), Error> {
         self.assert_lock();
+        self.trace("external-read-uki");
         self.events.push("read-uki");
         Ok((
             boothop_core::PublishMetadata {
@@ -104,27 +150,29 @@ impl LifecycleBackend for FakeBackend {
         _entry: &boothop_core::OwnedArchEntry,
         _expected: &boothop_core::PublishMetadata,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("uki", Residual::UkiMayRemain)
+        self.mutation("uki", Residual::UkiMayRemain, None)
     }
     fn prepare_boot_entry(
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.trace("external-read-entry");
         self.events.push("read-entry");
         Ok(LifecycleReadback::BootEntryAbsent)
     }
     fn create_boot_entry(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("entry", Residual::BootEntryMayExist)
+        self.mutation("entry", Residual::BootEntryMayExist, Some(entry))
     }
     fn prepare_boot_order_append(
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.trace("external-read-order");
         self.events.push("read-order");
         Ok(LifecycleReadback::BootOrderAbsent)
     }
@@ -132,43 +180,59 @@ impl LifecycleBackend for FakeBackend {
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("order", Residual::BootOrderMayContainEntry)
+        self.mutation("order", Residual::BootOrderMayContainEntry, None)
     }
     fn prepare_boot_order_remove(
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.trace("external-read-order");
         self.events.push("read-order");
         Ok(LifecycleReadback::BootOrderContains)
     }
     fn remove_boot_order(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("order", Residual::BootOrderMayContainEntry)
-            .map(|_| LifecycleReadback::BootOrderAbsent)
+        self.mutation("order", Residual::BootOrderMayContainEntry, None)
+            .map(|_| {
+                if self.mismatch == FailAt::Order {
+                    LifecycleReadback::BootOrderContains
+                } else {
+                    let _ = entry;
+                    LifecycleReadback::BootOrderAbsent
+                }
+            })
     }
     fn prepare_boot_entry_remove(
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.trace("external-read-entry");
         self.events.push("read-entry");
-        Ok(LifecycleReadback::BootEntryPresent)
+        Ok(LifecycleReadback::BootEntryPresent(_entry.identity.clone()))
     }
     fn remove_boot_entry(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("entry", Residual::BootEntryMayExist)
-            .map(|_| LifecycleReadback::BootEntryAbsent)
+        self.mutation("entry", Residual::BootEntryMayExist, Some(entry))
+            .map(|_| {
+                if self.mismatch == FailAt::Entry {
+                    LifecycleReadback::BootEntryPresent(entry.identity.clone())
+                } else {
+                    LifecycleReadback::BootEntryAbsent
+                }
+            })
     }
     fn prepare_uki_remove(
         &mut self,
         _entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
+        self.trace("external-read-uki");
         self.events.push("read-uki");
         Ok(LifecycleReadback::UkiPresent(
             boothop_core::PublishMetadata {
@@ -179,10 +243,26 @@ impl LifecycleBackend for FakeBackend {
     }
     fn remove_uki(
         &mut self,
-        _entry: &boothop_core::OwnedArchEntry,
+        entry: &boothop_core::OwnedArchEntry,
     ) -> Result<LifecycleReadback, LifecycleFailure> {
-        self.mutation("uki", Residual::UkiMayRemain)
-            .map(|_| LifecycleReadback::UkiAbsent)
+        self.mutation("uki", Residual::UkiMayRemain, None).map(|_| {
+            if self.mismatch == FailAt::Uki {
+                LifecycleReadback::UkiPresent(entry.publish.clone().expect("published fixture"))
+            } else {
+                LifecycleReadback::UkiAbsent
+            }
+        })
+    }
+    fn observe_uki_ownership(
+        &mut self,
+        entry: &boothop_core::OwnedArchEntry,
+    ) -> Result<LifecycleReadback, Error> {
+        self.assert_lock();
+        let mut metadata = entry.publish.clone().expect("published fixture");
+        if self.uki_mismatch {
+            metadata.size += 1;
+        }
+        Ok(LifecycleReadback::UkiPresent(metadata))
     }
     fn observe(&mut self, state: &ArchProvisionState) -> Result<LifecycleReadback, Error> {
         self.assert_lock();
@@ -195,13 +275,17 @@ impl LifecycleBackend for FakeBackend {
                         size: 42,
                     })
                 }
-                ProvisioningStep::BootEntryCreateAttempted => LifecycleReadback::BootEntryPresent,
+                ProvisioningStep::BootEntryCreateAttempted => {
+                    LifecycleReadback::BootEntryPresent(record.owned_entry.identity.clone())
+                }
                 ProvisioningStep::BootOrderAppendAttempted => LifecycleReadback::BootOrderContains,
                 _ => LifecycleReadback::UkiAbsent,
             },
             ArchProvisionState::Uninstalling(record) => match record.step {
                 UninstallingStep::BootOrderRemovalAttempted => LifecycleReadback::BootOrderContains,
-                UninstallingStep::BootEntryRemovalAttempted => LifecycleReadback::BootEntryPresent,
+                UninstallingStep::BootEntryRemovalAttempted => {
+                    LifecycleReadback::BootEntryPresent(record.owned_entry.identity.clone())
+                }
                 UninstallingStep::UkiRemovalAttempted => {
                     LifecycleReadback::UkiPresent(boothop_core::PublishMetadata {
                         sha256: [0x22; 32],
@@ -248,6 +332,30 @@ fn full_provision_and_uninstall_hold_one_lock_and_reach_tombstone() {
             "readback-order",
         ]
     );
+    let journal_events = fs.0.borrow().events.clone();
+    for stage in ["uki", "entry", "order"] {
+        let mutation = journal_events
+            .iter()
+            .position(|event| event == &format!("external-mutate-{stage}"))
+            .unwrap();
+        let readback = journal_events
+            .iter()
+            .position(|event| event == &format!("external-readback-{stage}"))
+            .unwrap();
+        assert!(
+            journal_events[..mutation]
+                .iter()
+                .rev()
+                .any(|event| event == "rename"),
+            "attempt checkpoint must precede {stage} mutation"
+        );
+        assert!(
+            journal_events[readback + 1..]
+                .iter()
+                .any(|event| event == "rename"),
+            "verified checkpoint must follow {stage} readback"
+        );
+    }
     let tombstone = uninstall(&mut store, &mut backend, "uninstall-1".into()).unwrap();
     assert!(matches!(tombstone, ArchProvisionState::Uninstalled(_)));
     assert_eq!(
@@ -325,6 +433,120 @@ fn restart_recovery_observes_attempt_only_and_never_mutates_or_advances() {
             && r.residual.contains(&Residual::BootOrderMayContainEntry)));
     assert!(matches!(before, ArchProvisionState::Provisioning(ref r)
         if r.step == ProvisioningStep::BootOrderAppendAttempted));
+}
+
+#[test]
+fn every_attempted_checkpoint_recovers_read_only_and_keeps_checkpoint() {
+    for fail in [FailAt::Uki, FailAt::Entry, FailAt::Order] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.fail = fail;
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+        let before = store.load().unwrap();
+        let mutations = backend.mutations.len();
+        let after = recover(&mut store, &mut backend).unwrap();
+        assert_eq!(backend.mutations.len(), mutations);
+        assert_eq!(backend.observations, 1);
+        assert_eq!(
+            matches!(before, ArchProvisionState::Provisioning(_)),
+            matches!(after, ArchProvisionState::Provisioning(_))
+        );
+    }
+
+    for fail in [FailAt::Order, FailAt::Entry, FailAt::Uki] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        provision(&mut store, &mut backend, pending_intent()).unwrap();
+        backend.fail = fail;
+        assert!(uninstall(&mut store, &mut backend, "uninstall-1".into()).is_err());
+        let before = store.load().unwrap();
+        let mutations = backend.mutations.len();
+        let after = recover(&mut store, &mut backend).unwrap();
+        assert_eq!(backend.mutations.len(), mutations);
+        assert_eq!(backend.observations, 1);
+        assert_eq!(
+            matches!(before, ArchProvisionState::Uninstalling(_)),
+            matches!(after, ArchProvisionState::Uninstalling(_))
+        );
+    }
+}
+
+#[test]
+fn boot_entry_and_order_recovery_requires_exact_journaled_uki_metadata() {
+    for fail in [FailAt::Entry, FailAt::Order] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.fail = fail;
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+        backend.uki_mismatch = true;
+        let recovered = recover(&mut store, &mut backend).unwrap();
+        assert!(
+            matches!(recovered, ArchProvisionState::Provisioning(ref record)
+            if record.residual.contains(&Residual::UkiMayRemain))
+        );
+    }
+}
+
+#[test]
+fn post_mutation_readback_mismatch_retains_stage_residual_and_identity() {
+    for mismatch in [FailAt::Uki, FailAt::Entry, FailAt::Order] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        backend.mismatch = mismatch;
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        assert_eq!(
+            provision(&mut store, &mut backend, pending_intent()),
+            Err(Error::ReadbackFailed)
+        );
+        let state = store.load().unwrap();
+        assert!(matches!(state, ArchProvisionState::Provisioning(ref record)
+            if !record.residual.is_empty()
+                && matches!(record.step,
+                    ProvisioningStep::UkiPublicationAttempted
+                    | ProvisioningStep::BootEntryCreateAttempted
+                    | ProvisioningStep::BootOrderAppendAttempted)));
+    }
+}
+
+#[test]
+fn uninstall_post_mutation_readback_mismatch_retains_cleanup_attempt() {
+    for mismatch in [FailAt::Order, FailAt::Entry, FailAt::Uki] {
+        let fs = support::FakeFs::installed();
+        let mut backend = FakeBackend::new(fs.clone());
+        let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+        provision(&mut store, &mut backend, pending_intent()).unwrap();
+        backend.mismatch = mismatch;
+        assert_eq!(
+            uninstall(&mut store, &mut backend, "uninstall-1".into()),
+            Err(Error::ReadbackFailed)
+        );
+        assert!(
+            matches!(store.load().unwrap(), ArchProvisionState::Uninstalling(ref record)
+            if !record.residual.is_empty()
+                && matches!(record.step,
+                    UninstallingStep::BootOrderRemovalAttempted
+                    | UninstallingStep::BootEntryRemovalAttempted
+                    | UninstallingStep::UkiRemovalAttempted))
+        );
+    }
+}
+
+#[test]
+fn failed_verified_checkpoint_save_preserves_attempt_evidence_without_retry() {
+    let fs = support::FakeFs::installed();
+    fs.0.borrow_mut().fail_after = Some(("dir_fsync", 2, 5));
+    let mut backend = FakeBackend::new(fs.clone());
+    let mut store = ArchProvisionStore::acquire(fs.clone()).unwrap();
+    assert!(provision(&mut store, &mut backend, pending_intent()).is_err());
+    assert_eq!(backend.mutations, ["uki"]);
+    assert!(
+        matches!(store.load().unwrap(), ArchProvisionState::Provisioning(ref record)
+        if record.step == ProvisioningStep::UkiPublicationAttempted
+            || record.step == ProvisioningStep::UkiPublished)
+    );
 }
 
 #[test]
@@ -416,6 +638,12 @@ fn mismatched_prepare_readback_stops_before_attempt_checkpoint() {
         }
         fn observe(&mut self, s: &ArchProvisionState) -> Result<LifecycleReadback, Error> {
             self.0.observe(s)
+        }
+        fn observe_uki_ownership(
+            &mut self,
+            e: &boothop_core::OwnedArchEntry,
+        ) -> Result<LifecycleReadback, Error> {
+            self.0.observe_uki_ownership(e)
         }
     }
     let fs = support::FakeFs::installed();
