@@ -20,6 +20,15 @@ pub trait SetupFirmware {
     fn replace_boot_order(&mut self, order: &[u8]) -> Result<(), Error>;
 }
 
+/// Proof that this setup operation exclusively created and exactly read back a Boot#### entry.
+/// Its private fields prevent callers from presenting a pre-existing orphan to `append_tail_exact`.
+#[must_use = "append only an entry returned by successful create_exact_entry"]
+#[derive(Debug, Eq, PartialEq)]
+pub struct CreatedEntry {
+    id: BootId,
+    option: Vec<u8>,
+}
+
 /// Allocate the lowest unused nonzero Boot#### ID from the complete firmware namespace.
 pub fn allocate_unused_id(firmware: &mut impl SetupFirmware) -> Result<BootId, Error> {
     let names = firmware.enumerate_variables()?;
@@ -58,16 +67,25 @@ pub fn create_exact_entry(
     firmware: &mut impl SetupFirmware,
     id: BootId,
     option: &[u8],
-) -> Result<(), Error> {
+) -> Result<CreatedEntry, Error> {
     if id == BootId(0) {
         return Err(Error::UnsupportedFormat);
     }
+    let mut expected = Vec::new();
+    expected
+        .try_reserve_exact(option.len())
+        .map_err(|_| Error::ResourceLimit)?;
+    expected.extend_from_slice(option);
+
     firmware.create_boot_entry_exclusive(id, option)?;
     let actual = firmware.read_variable(&boot_variable_name(id))?;
-    if actual.as_deref() != Some(option) {
+    if actual.as_deref() != Some(expected.as_slice()) {
         return Err(Error::ReadbackFailed);
     }
-    Ok(())
+    Ok(CreatedEntry {
+        id,
+        option: expected,
+    })
 }
 
 /// Decode a complete BootOrder payload and reject malformed or duplicate IDs.
@@ -98,9 +116,9 @@ pub fn decode_boot_order(bytes: &[u8]) -> Result<Vec<BootId>, Error> {
 /// Re-read the preconditions, append one ID to the current order, and verify the full result.
 pub fn append_tail_exact(
     firmware: &mut impl SetupFirmware,
-    id: BootId,
-    expected_option: &[u8],
+    created: CreatedEntry,
 ) -> Result<(), Error> {
+    let CreatedEntry { id, option } = created;
     if id == BootId(0) {
         return Err(Error::UnsupportedFormat);
     }
@@ -110,7 +128,7 @@ pub fn append_tail_exact(
     {
         return Err(Error::BootNextConflict);
     }
-    if firmware.read_variable(&boot_variable_name(id))?.as_deref() != Some(expected_option) {
+    if firmware.read_variable(&boot_variable_name(id))?.as_deref() != Some(option.as_slice()) {
         return Err(Error::ReadbackFailed);
     }
 
