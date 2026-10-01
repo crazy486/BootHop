@@ -22,7 +22,7 @@ expect_failure() {
 new_fixture() {
     fixture_root="$tmp_root/$1"
     esp="$fixture_root/esp"
-    mkdir -p "$esp/EFI/BootHop" "$fixture_root/var/lib/boothop" "$fixture_root/build"
+    mkdir -p "$esp/EFI/BootHop" "$fixture_root/var/lib/boothop" "$fixture_root/build" "$fixture_root/run/lock"
     printf kernel > "$fixture_root/build/vmlinuz"
     printf initramfs > "$fixture_root/build/initramfs.img"
     stage="$esp/EFI/BootHop/arch.efi.tmp"
@@ -35,26 +35,37 @@ write_valid_uki() {
 import struct
 import sys
 
-image = bytearray(1024)
+image = bytearray(3072)
 image[:2] = b"MZ"
 struct.pack_into("<I", image, 0x3C, 0x80)
 image[0x80:0x84] = b"PE\0\0"
-struct.pack_into("<HHIIIHH", image, 0x84, 0x8664, 4, 0, 0, 0, 240, 0x22)
+struct.pack_into("<HHIIIHH", image, 0x84, 0x8664, 5, 0, 0, 0, 240, 0x22)
 optional = 0x98
 struct.pack_into("<H", image, optional, 0x20B)
+struct.pack_into("<I", image, optional + 16, 0x1000)
+struct.pack_into("<Q", image, optional + 24, 0x100000)
+struct.pack_into("<II", image, optional + 32, 0x1000, 0x200)
+struct.pack_into("<II", image, optional + 56, 0x6000, 0x400)
 struct.pack_into("<H", image, optional + 68, 10)
+struct.pack_into("<I", image, optional + 108, 16)
 sections = optional + 240
-for index, (name, offset, raw_size) in enumerate(((b".linux", 512, 16), (b".initrd", 528, 16), (b".cmdline", 544, 16), (b".bss", 0, 0))):
+for index, (name, virtual_address, offset, raw_size, characteristics) in enumerate((
+    (b".text", 0x1000, 1024, 512, 0x60000020),
+    (b".linux", 0x2000, 1536, 512, 0x40000040),
+    (b".initrd", 0x3000, 2048, 512, 0x40000040),
+    (b".cmdline", 0x4000, 2560, 512, 0x40000040),
+    (b".bss", 0x5000, 0, 0, 0xC0000080),
+)):
     header = sections + index * 40
     image[header:header + len(name)] = name
-    struct.pack_into("<I", image, header + 8, raw_size)
-    struct.pack_into("<I", image, header + 12, offset)
+    struct.pack_into("<II", image, header + 8, 16, virtual_address)
     struct.pack_into("<I", image, header + 16, raw_size)
     struct.pack_into("<I", image, header + 20, offset)
+    struct.pack_into("<I", image, header + 36, characteristics)
     if raw_size:
         image[offset:offset + raw_size] = bytes([index + 1]) * raw_size
 with open(sys.argv[1], "wb") as output:
-    output.write(image[:560])
+    output.write(image)
 PY
 }
 
@@ -70,6 +81,31 @@ run_publisher() {
         "$mode" "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$output"
 }
 
+# Another publisher holding the fixed lock must prevent this invocation from
+# validating and replacing the staged/final files concurrently.
+new_fixture concurrent-publisher
+write_valid_uki
+printf old-final > "$final"
+write_marker
+lock_path="$fixture_root/run/boothop-uki-publish.lock"
+: > "$lock_path"
+chmod 600 "$lock_path"
+(
+    flock --exclusive 9
+    touch "$fixture_root/lock-held"
+    sleep 5
+) 9>>"$lock_path" &
+locker_pid=$!
+for _ in {1..100}; do
+    [[ -e "$fixture_root/lock-held" ]] && break
+    sleep 0.01
+done
+[[ -e "$fixture_root/lock-held" ]] || fail 'could not establish concurrent publisher lock'
+expect_failure 'concurrent publisher lock' --update "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$stage"
+kill "$locker_pid" 2>/dev/null || true
+wait "$locker_pid" 2>/dev/null || true
+[[ "$(cat "$final")" == old-final && -f "$stage" ]] || fail 'locked publication changed either UKI path'
+
 # Invalid and truncated images fail before any final path is created.
 new_fixture invalid-uki
 printf 'MZ' > "$stage"
@@ -79,6 +115,69 @@ expect_failure 'truncated UKI' --initial "$stage" "$fixture_root/build/vmlinuz" 
 new_fixture invalid-pe
 printf 'not an executable' > "$stage"
 expect_failure 'invalid UKI' --initial "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$stage"
+
+new_fixture zero-entrypoint
+write_valid_uki
+python3 - "$stage" <<'PY'
+import sys
+with open(sys.argv[1], "r+b") as image:
+    image.seek(0x98 + 16)
+    image.write(bytes(4))
+PY
+printf old-final > "$final"
+write_marker
+expect_failure 'zero UKI entry point' --update "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$stage"
+[[ "$(cat "$final")" == old-final ]] || fail 'zero entry point replaced the old final UKI'
+
+new_fixture zero-image-size
+write_valid_uki
+python3 - "$stage" <<'PY'
+import sys
+with open(sys.argv[1], "r+b") as image:
+    image.seek(0x98 + 56)
+    image.write(bytes(4))
+PY
+printf old-final > "$final"
+write_marker
+expect_failure 'zero UKI image size' --update "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$stage"
+[[ "$(cat "$final")" == old-final ]] || fail 'zero image size replaced the old final UKI'
+
+new_fixture short-optional-header
+write_valid_uki
+python3 - "$stage" <<'PY'
+import struct
+import sys
+
+path = sys.argv[1]
+with open(path, "r+b") as image:
+    data = bytearray(image.read())
+    old_section_table = 0x98 + 240
+    new_section_table = 0x98 + 72
+    table = bytes(data[old_section_table:old_section_table + 5 * 40])
+    data[new_section_table:new_section_table + len(table)] = table
+    struct.pack_into("<H", data, 0x84 + 20, 72)
+    image.seek(0)
+    image.write(data)
+    image.truncate()
+PY
+printf old-final > "$final"
+write_marker
+expect_failure 'short PE32+ fixed optional header' --update "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$stage"
+[[ "$(cat "$final")" == old-final ]] || fail 'short optional header replaced the old final UKI'
+
+new_fixture non-executable-entrypoint
+write_valid_uki
+python3 - "$stage" <<'PY'
+import struct
+import sys
+with open(sys.argv[1], "r+b") as image:
+    image.seek(0x98 + 240 + 36)
+    image.write(struct.pack("<I", 0x40000040))
+PY
+printf old-final > "$final"
+write_marker
+expect_failure 'entry point outside executable section' --update "$stage" "$fixture_root/build/vmlinuz" "$fixture_root/build/initramfs.img" "$stage"
+[[ "$(cat "$final")" == old-final ]] || fail 'non-executable entry point replaced the old final UKI'
 
 # Initial mode requires both final and marker to be absent.
 new_fixture initial-existing-final
@@ -140,7 +239,7 @@ python3 - "$final" <<'PY'
 import sys
 with open(sys.argv[1], "rb") as image:
     data = image.read()
-assert data[:2] == b"MZ" and len(data) == 560
+assert data[:2] == b"MZ" and len(data) == 3072
 PY
 
 # Hook calls without the third UKI argument cannot consume stale staging residue.
