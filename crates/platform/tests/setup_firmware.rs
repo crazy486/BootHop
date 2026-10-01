@@ -131,10 +131,12 @@ fn allocator_refuses_when_boot_next_is_present() {
 
 #[test]
 fn allocator_reports_exhaustion_after_all_boot_ids_are_occupied() {
-    let mut firmware = FakeFirmware::default();
-    firmware.names = (0..=u16::MAX)
-        .map(|id| variable_name(&format!("Boot{id:04X}")))
-        .collect();
+    let mut firmware = FakeFirmware {
+        names: (0..=u16::MAX)
+            .map(|id| variable_name(&format!("Boot{id:04X}")))
+            .collect(),
+        ..Default::default()
+    };
 
     assert_eq!(allocate_unused_id(&mut firmware), Err(Error::ResourceLimit));
 }
