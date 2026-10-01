@@ -329,8 +329,16 @@ $ukiFileMutationApis = 'WriteFileEx|DeleteFile|SetEndOfFile'
 $unreviewedVolumeAccessApis = 'OpenFileById|DeviceIoControl'
 $guiForbidden = "SetFirmwareEnvironmentVariable|GetFirmwareEnvironmentVariable|AdjustTokenPrivileges|InitiateSystemShutdown|ExitWindows|bcdedit|$volumeMutationApis|$ukiFileMutationApis|$unreviewedVolumeAccessApis"
 $helperForbidden = "CreateProcess|ShellExecute|bcdedit|$volumeMutationApis|$ukiFileMutationApis|$unreviewedVolumeAccessApis"
-if (($guiImports | Where-Object { $_.Name -match $guiForbidden }).Count -gt 0) { Fail 'GUI PE imports a forbidden capability' }
-if (($helperImports | Where-Object { $_.Name -match $helperForbidden }).Count -gt 0) { Fail 'helper PE imports a forbidden capability' }
+$guiForbiddenImports = @($guiImports | Where-Object { $_.Name -match $guiForbidden })
+if ($guiForbiddenImports.Count -gt 0) {
+    $matchedImports = ($guiForbiddenImports | ForEach-Object { '{0}!{1}' -f $_.Dll, $_.Name }) -join ', '
+    Fail "GUI PE imports a forbidden capability: $matchedImports"
+}
+$helperForbiddenImports = @($helperImports | Where-Object { $_.Name -match $helperForbidden })
+if ($helperForbiddenImports.Count -gt 0) {
+    $matchedImports = ($helperForbiddenImports | ForEach-Object { '{0}!{1}' -f $_.Dll, $_.Name }) -join ', '
+    Fail "helper PE imports a forbidden capability: $matchedImports"
+}
 foreach ($pe in @($guiPe,$helperPe)) { if ((Get-HeldHash $pe.Held $pe.Path) -cne $pe.Hash) { Fail "PE changed during dumpbin audit: $($pe.Path)" } }
 Write-Output 'Windows source and PE capability audit: passed'
 } finally { Close-HeldResourceSet $resources }
