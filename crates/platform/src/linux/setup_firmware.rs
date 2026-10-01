@@ -21,10 +21,11 @@ pub trait SetupFirmware {
 }
 
 /// Proof that this setup operation exclusively created and exactly read back a Boot#### entry.
-/// Its private fields prevent callers from presenting a pre-existing orphan to `append_tail_exact`.
+/// Its private fields and exclusive mutable firmware borrow prevent callers from redirecting the
+/// proof to another instance or presenting a pre-existing orphan to `append_tail_exact`.
 #[must_use = "append only an entry returned by successful create_exact_entry"]
-#[derive(Debug, Eq, PartialEq)]
-pub struct CreatedEntry {
+pub struct CreatedEntry<'firmware, F: SetupFirmware> {
+    firmware: &'firmware mut F,
     id: BootId,
     option: Vec<u8>,
 }
@@ -63,11 +64,11 @@ pub fn allocate_unused_id(firmware: &mut impl SetupFirmware) -> Result<BootId, E
 }
 
 /// Exclusively create one Boot#### variable, then require its exact payload readback.
-pub fn create_exact_entry(
-    firmware: &mut impl SetupFirmware,
+pub fn create_exact_entry<'firmware, F: SetupFirmware>(
+    firmware: &'firmware mut F,
     id: BootId,
     option: &[u8],
-) -> Result<CreatedEntry, Error> {
+) -> Result<CreatedEntry<'firmware, F>, Error> {
     if id == BootId(0) {
         return Err(Error::UnsupportedFormat);
     }
@@ -83,6 +84,7 @@ pub fn create_exact_entry(
         return Err(Error::ReadbackFailed);
     }
     Ok(CreatedEntry {
+        firmware,
         id,
         option: expected,
     })
@@ -114,11 +116,12 @@ pub fn decode_boot_order(bytes: &[u8]) -> Result<Vec<BootId>, Error> {
 }
 
 /// Re-read the preconditions, append one ID to the current order, and verify the full result.
-pub fn append_tail_exact(
-    firmware: &mut impl SetupFirmware,
-    created: CreatedEntry,
-) -> Result<(), Error> {
-    let CreatedEntry { id, option } = created;
+pub fn append_tail_exact<F: SetupFirmware>(created: CreatedEntry<'_, F>) -> Result<(), Error> {
+    let CreatedEntry {
+        firmware,
+        id,
+        option,
+    } = created;
     if id == BootId(0) {
         return Err(Error::UnsupportedFormat);
     }

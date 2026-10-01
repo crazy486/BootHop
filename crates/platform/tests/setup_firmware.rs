@@ -146,10 +146,10 @@ fn create_entry_uses_one_exclusive_attempt_and_stops_on_collision() {
         ..FakeFirmware::default()
     };
 
-    assert_eq!(
+    assert!(matches!(
         create_exact_entry(&mut firmware, BootId(7), b"serialized option"),
         Err(Error::Busy),
-    );
+    ));
     assert_eq!(firmware.create_calls, 1);
     assert!(firmware.reads.is_empty());
 }
@@ -161,10 +161,10 @@ fn create_entry_requires_an_exact_variable_readback() {
         ..FakeFirmware::default()
     };
 
-    assert_eq!(
+    assert!(matches!(
         create_exact_entry(&mut firmware, BootId(7), b"serialized option"),
         Err(Error::ReadbackFailed),
-    );
+    ));
     assert_eq!(firmware.create_calls, 1);
     assert_eq!(firmware.reads, [boot_name(BootId(7))]);
 }
@@ -184,7 +184,7 @@ fn append_preserves_the_complete_order_and_reads_it_back_exactly() {
     let created = create_exact_entry(&mut firmware, BootId(8), b"new option").unwrap();
     let expected = [0x00, 0x00, 0x07, 0x00, 0x02, 0x00, 0x08, 0x00];
 
-    assert_eq!(append_tail_exact(&mut firmware, created), Ok(()));
+    assert_eq!(append_tail_exact(created), Ok(()));
     assert_eq!(
         firmware.variables.get::<[u8]>(BOOT_ORDER).unwrap(),
         &expected
@@ -209,10 +209,10 @@ fn matching_preexisting_orphan_cannot_be_appended() {
         .variables
         .insert(boot_name(BootId(8)), b"matching option".to_vec());
 
-    assert_eq!(
+    assert!(matches!(
         create_exact_entry(&mut firmware, BootId(8), b"matching option"),
         Err(Error::Busy),
-    );
+    ));
     // The exclusive-create collision returns no CreatedEntry proof, which is the only input
     // accepted by append_tail_exact.
     assert_eq!(firmware.create_calls, 1);
@@ -224,35 +224,54 @@ fn matching_preexisting_orphan_cannot_be_appended() {
 }
 
 #[test]
+fn creation_proof_remains_bound_to_its_firmware_instance() {
+    let mut creator = FakeFirmware::with_order(&[0, 7]);
+    let created = create_exact_entry(&mut creator, BootId(8), b"matching option").unwrap();
+    let mut other = FakeFirmware::with_order(&[0, 7]);
+    other.names = vec![variable_name("Boot0000"), variable_name("Boot0008")];
+    other
+        .variables
+        .insert(boot_name(BootId(8)), b"matching option".to_vec());
+
+    assert_eq!(append_tail_exact(created), Ok(()));
+    assert_eq!(
+        creator.variables.get::<[u8]>(BOOT_ORDER).unwrap(),
+        &encode_order(&[0, 7, 8]),
+    );
+    assert_eq!(other.replace_calls, 0);
+    assert_eq!(
+        other.variables.get::<[u8]>(BOOT_ORDER).unwrap(),
+        &encode_order(&[0, 7])
+    );
+}
+
+#[test]
 fn append_requires_boot_zero_first_and_does_not_write_on_invalid_order() {
     let mut firmware = FakeFirmware::with_order(&[7, 0]);
     let created = create_exact_entry(&mut firmware, BootId(8), b"new option").unwrap();
 
-    assert!(append_tail_exact(&mut firmware, created).is_err());
+    assert!(append_tail_exact(created).is_err());
     assert_eq!(firmware.replace_calls, 0);
 }
 
 #[test]
 fn append_detects_an_order_changed_before_full_readback_without_retrying() {
     let mut firmware = FakeFirmware::with_order(&[0, 7]);
-    let created = create_exact_entry(&mut firmware, BootId(8), b"new option").unwrap();
     firmware.order_after_replace = Some(encode_order(&[0, 7, 8, 9]));
+    let created = create_exact_entry(&mut firmware, BootId(8), b"new option").unwrap();
 
-    assert_eq!(
-        append_tail_exact(&mut firmware, created),
-        Err(Error::ReadbackFailed),
-    );
+    assert_eq!(append_tail_exact(created), Err(Error::ReadbackFailed),);
     assert_eq!(firmware.replace_calls, 1);
 }
 
 #[test]
 fn append_does_not_retry_an_uncertain_order_write() {
     let mut firmware = FakeFirmware::with_order(&[0, 7]);
-    let created = create_exact_entry(&mut firmware, BootId(8), b"new option").unwrap();
     firmware.replace_error = Some(Error::FirmwareWriteFailed { raw_code: 5 });
+    let created = create_exact_entry(&mut firmware, BootId(8), b"new option").unwrap();
 
     assert_eq!(
-        append_tail_exact(&mut firmware, created),
+        append_tail_exact(created),
         Err(Error::FirmwareWriteFailed { raw_code: 5 }),
     );
     assert_eq!(firmware.replace_calls, 1);
