@@ -12,6 +12,7 @@ INITIAL_PAYLOAD="$ROOT/initial-payload"
 mkdir "$INITIAL_PAYLOAD"
 printf helper > "$INITIAL_PAYLOAD/boothop-helper"
 printf gui > "$INITIAL_PAYLOAD/boothop-gui"
+printf setup > "$INITIAL_PAYLOAD/boothop-arch-setup"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
@@ -172,6 +173,8 @@ uninstall_rejects_symlinked_package_parents_before_removal() {
   mkdir "$missing"
   "$INSTALLER" install --destdir "$missing" --payload "$INITIAL_PAYLOAD" --test-staging
   rm "$missing/usr/lib/boothop/boothop-helper"
+  rm "$missing/usr/lib/boothop/boothop-arch-setup"
+  rm "$missing/usr/lib/boothop/boothop-uki-publish"
   rmdir "$missing/usr/lib/boothop"
   if "$INSTALLER" uninstall --destdir "$missing" --test-staging >/dev/null 2>&1; then
     fail "uninstall accepted a missing package parent"

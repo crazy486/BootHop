@@ -1,3 +1,4 @@
+use super::arch_identity::InstalledIdentity;
 use crate::ProtectedStore;
 use boothop_core::{
     Error, PlatformOperation, RecordState, TargetRecord, decode_record, encode_record,
@@ -47,6 +48,7 @@ pub trait Filesystem {
 
 const MAX_RECORD_BYTES: usize = 1_048_576;
 const RECORD: &str = "targets.json";
+const ARCH_IDENTITY: &str = "arch-direct.identity";
 const LOCK: &str = "operation.lock";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -93,6 +95,69 @@ impl<F: Filesystem> LockedStore<F> {
             dir,
             _lock: lock,
         })
+    }
+
+    /// Save the one installation marker while the trusted operation lock is held.
+    /// A present or unreadable marker is never replaced. A failed directory sync is
+    /// reported as an unknown durability result and must not trigger a retry.
+    pub fn save_arch_identity(&mut self, identity: &InstalledIdentity) -> Result<(), Error> {
+        match self
+            .fs
+            .open(&self.dir, ARCH_IDENTITY, OpenKind::ExistingFile)
+        {
+            Err(2) => {}
+            Ok(_) => return Err(Error::Busy),
+            Err(code) => return Err(io(PlatformOperation::Open, code)),
+        }
+        let bytes = identity.encode();
+        let name = format!(
+            ".arch-direct-{}-{}.tmp",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut file = self
+            .fs
+            .open(&self.dir, &name, OpenKind::ExclusiveTemp)
+            .map_err(|e| io(PlatformOperation::Open, e))?;
+        let result = (|| {
+            validate_file(
+                self.fs
+                    .metadata(&file)
+                    .map_err(|e| io(PlatformOperation::Metadata, e))?,
+            )?;
+            let mut written = 0;
+            while written < bytes.len() {
+                let count = self
+                    .fs
+                    .write(&mut file, &bytes[written..])
+                    .map_err(|e| io(PlatformOperation::Write, e))?;
+                if count == 0 || count > bytes.len() - written {
+                    return Err(io(PlatformOperation::Write, 5));
+                }
+                written += count;
+            }
+            self.fs
+                .sync(&file)
+                .map_err(|e| io(PlatformOperation::Flush, e))?;
+            match self
+                .fs
+                .open(&self.dir, ARCH_IDENTITY, OpenKind::ExistingFile)
+            {
+                Err(2) => {}
+                Ok(_) => return Err(Error::Busy),
+                Err(code) => return Err(io(PlatformOperation::Open, code)),
+            }
+            self.fs
+                .rename(&self.dir, &name, ARCH_IDENTITY)
+                .map_err(|e| io(PlatformOperation::Replace, e))
+        })();
+        if let Err(error) = result {
+            self.cleanup_temp(&file, &name);
+            return Err(error);
+        }
+        self.fs
+            .sync(&self.dir)
+            .map_err(|raw_code| Error::StoreDurabilityUnknown { raw_code })
     }
 }
 impl<F: Filesystem> ProtectedStore for LockedStore<F> {
@@ -243,6 +308,10 @@ pub struct LinuxStore(LockedStore<LinuxSyscalls>);
 impl LinuxStore {
     pub fn open() -> Result<Self, Error> {
         LockedStore::acquire(LinuxSyscalls).map(Self)
+    }
+
+    pub fn save_arch_identity(&mut self, identity: &InstalledIdentity) -> Result<(), Error> {
+        self.0.save_arch_identity(identity)
     }
 }
 impl ProtectedStore for LinuxStore {

@@ -260,7 +260,7 @@ create_layout() {
 copy_payload() {
   assert_no_symlink_components "$payload"
   [[ -d "$payload" && ! -L "$payload" ]] || die "payload directory is missing"
-  for name in boothop-gui boothop-helper; do
+  for name in boothop-gui boothop-helper boothop-arch-setup; do
     [[ -f "$payload/$name" && ! -L "$payload/$name" ]] || die "payload binary is missing or linked: $name"
   done
   ensure_directory "$target_root/usr"
@@ -271,16 +271,20 @@ copy_payload() {
   ensure_directory "$target_root/usr/share/applications"
   ensure_directory "$target_root/usr/share/polkit-1"
   ensure_directory "$target_root/usr/share/polkit-1/actions"
-  for name in boothop-gui boothop-helper; do
-    local destination
+  for name in boothop-gui boothop-helper boothop-arch-setup; do
+    local destination binary_mode=755
     if [[ "$name" == boothop-gui ]]; then
       destination="$target_root/usr/bin/$name"
     else
       destination="$target_root/usr/lib/boothop/$name"
     fi
+    [[ "$name" != boothop-arch-setup ]] || binary_mode=700
     [[ ! -L "$destination" ]] || die "package destination is linked: $destination"
-    install -m 755 "$payload/$name" "$destination"
+    install -m "$binary_mode" "$payload/$name" "$destination"
   done
+  local publisher="$target_root/usr/lib/boothop/boothop-uki-publish"
+  [[ ! -L "$publisher" ]] || die "publisher destination is linked"
+  install -m 755 "$(dirname "$0")/boothop-uki-publish.sh" "$publisher"
   local desktop="$target_root/usr/share/applications/org.boothop.desktop"
   local policy="$target_root/usr/share/polkit-1/actions/org.boothop.helper.policy"
   [[ ! -L "$desktop" && ! -L "$policy" ]] || die "package metadata destination is linked"
@@ -315,6 +319,8 @@ case "$action" in
     # package-owned files are removed; unknown files are left for inspection.
     rm -f -- "$target_root/usr/bin/boothop-gui" \
       "$target_root/usr/lib/boothop/boothop-helper" \
+      "$target_root/usr/lib/boothop/boothop-arch-setup" \
+      "$target_root/usr/lib/boothop/boothop-uki-publish" \
       "$target_root/usr/share/applications/org.boothop.desktop" \
       "$target_root/usr/share/polkit-1/actions/org.boothop.helper.policy"
     ;;

@@ -326,7 +326,7 @@ fn parse_static_array(value: &str) -> Result<Vec<String>, SetupError> {
     Ok(names)
 }
 
-fn is_safe_flavor(value: &str) -> bool {
+pub fn is_safe_flavor(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')
         && value

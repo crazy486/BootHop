@@ -77,7 +77,7 @@ impl InstalledIdentity {
             .filter(|value| value.len() == 64)
             .ok_or(IdentityError::InvalidMarker)?;
         let mut option_sha256 = [0_u8; 32];
-        for (index, pair) in digest.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in digest.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = lower_hex_nibble(pair[0]).ok_or(IdentityError::InvalidMarker)?;
             let low = lower_hex_nibble(pair[1]).ok_or(IdentityError::InvalidMarker)?;
             option_sha256[index] = (high << 4) | low;

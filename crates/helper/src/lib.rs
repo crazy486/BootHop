@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub mod arch_setup_cli;
 pub mod dispatch;
 #[cfg(target_os = "linux")]
 pub mod lock;
