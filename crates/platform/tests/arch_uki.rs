@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use boothop_core::GptEspIdentity;
 use boothop_platform::linux::arch_uki::{
     ArchSetupSource, CmdlineSource, EspInfo, PackageHookRoute, SecureBootState, SetupError,
@@ -25,9 +23,9 @@ impl Default for Fixture {
     fn default() -> Self {
         Self {
             flavors: vec!["linux".into(), "linux-lts".into()],
-            cmdline: CmdlineSource::Persistent(PathBuf::from("/etc/kernel/cmdline")),
+            cmdline: CmdlineSource::Persistent("/etc/kernel/cmdline".into()),
             esp: EspInfo {
-                mount_point: PathBuf::from("/boot"),
+                mount_point: "/boot".into(),
                 filesystem: "vfat".into(),
                 is_mounted: true,
                 is_efi_system_partition: true,
@@ -76,17 +74,17 @@ fn two_installed_flavors_require_explicit_flavor_selection() {
     let plan = plan_arch_uki("linux-lts", &source).unwrap();
     assert_eq!(plan.flavor(), "linux-lts");
     assert_eq!(
-        plan.preset_path(),
-        PathBuf::from("/etc/mkinitcpio.d/linux-lts.preset")
+        plan.preset_path().to_str(),
+        Some("/etc/mkinitcpio.d/linux-lts.preset")
     );
-    assert_eq!(plan.cmdline_path(), PathBuf::from("/etc/kernel/cmdline"));
+    assert_eq!(plan.cmdline_path().to_str(), Some("/etc/kernel/cmdline"));
     assert_eq!(
-        plan.staged_uki_path(),
-        PathBuf::from("/boot/EFI/BootHop/arch.efi.tmp")
+        plan.staged_uki_path().to_str(),
+        Some("/boot/EFI/BootHop/arch.efi.tmp")
     );
     assert_eq!(
-        plan.final_uki_path(),
-        PathBuf::from("/boot/EFI/BootHop/arch.efi")
+        plan.final_uki_path().to_str(),
+        Some("/boot/EFI/BootHop/arch.efi")
     );
     assert_eq!(plan.esp_identity(), ESP_IDENTITY);
 }
@@ -127,7 +125,7 @@ fn rejects_missing_and_dynamic_kernel_command_lines() {
 #[test]
 fn rejects_a_persistent_command_line_from_another_path() {
     let source = Fixture {
-        cmdline: CmdlineSource::Persistent(PathBuf::from("/proc/cmdline")),
+        cmdline: CmdlineSource::Persistent("/proc/cmdline".into()),
         ..Fixture::default()
     };
 

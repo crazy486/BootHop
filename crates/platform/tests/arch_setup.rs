@@ -11,7 +11,7 @@ use boothop_platform::linux::{
     },
     setup_firmware::{SetupFirmware, decode_boot_order},
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 #[allow(dead_code)]
 mod support;
 use boothop_platform::linux::store::LockedStore;
@@ -83,7 +83,7 @@ impl ArchSetupSource for Source {
     }
     fn esp_info(&self) -> Result<EspInfo, SetupError> {
         Ok(EspInfo {
-            mount_point: PathBuf::from("/boot"),
+            mount_point: "/boot".into(),
             filesystem: "vfat".into(),
             is_mounted: true,
             is_efi_system_partition: true,
