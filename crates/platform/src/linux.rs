@@ -1,5 +1,6 @@
 pub mod firmware;
 pub mod reboot;
+pub mod setup_firmware;
 pub mod store;
 
 use crate::ProtectedStore;
