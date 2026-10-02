@@ -272,6 +272,12 @@ fn injected_system_adapter_runs_full_order_and_fixed_hook_without_host_io() {
     assert!(hook.contains("mode=--update"));
     assert!(hook.contains("BOOTHOP_ARCH_INITIAL"));
     assert!(hook.contains("'/boot/EFI/BootHop/arch.efi.tmp'"));
+    assert!(hook.contains(
+        "exec /usr/lib/boothop/boothop-uki-publish \"$mode\" '/boot/EFI/BootHop/arch.efi.tmp' \"$@\""
+    ));
+    assert!(hook.contains("MKINITCPIO_PROCESS_PRESET"));
+    assert!(hook.contains("'linux-boothop'"));
+    assert!(hook.contains("|| exit 0"));
     assert!(!hook.contains("--nopost"));
 }
 #[test]

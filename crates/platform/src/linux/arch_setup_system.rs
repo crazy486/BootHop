@@ -121,8 +121,9 @@ impl<C: ArchSystemCalls> SystemArchSetupBackend<C> {
             return Err(22);
         }
         let quoted = stage.replace('\'', "'\\''");
+        let selected_preset = format!("{}-boothop", plan.flavor());
         Ok(format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nmode=--update\nif [[ \"${{BOOTHOP_ARCH_INITIAL:-}}\" == 1 ]]; then mode=--initial; fi\nexec {PUBLISHER} \"$mode\" '{quoted}' \"$@\"\n"
+            "#!/usr/bin/env bash\nset -euo pipefail\n[[ \"${{MKINITCPIO_PROCESS_PRESET:-}}\" == '{selected_preset}' ]] || exit 0\nmode=--update\nif [[ \"${{BOOTHOP_ARCH_INITIAL:-}}\" == 1 ]]; then mode=--initial; fi\nexec {PUBLISHER} \"$mode\" '{quoted}' \"$@\"\n"
         ).into_bytes())
     }
 }
