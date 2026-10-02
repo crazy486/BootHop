@@ -210,7 +210,7 @@ pub fn render_boothop_preset(existing: &str, plan: &UkiPlan) -> Result<String, S
         let statement = trimmed.strip_prefix("export ").unwrap_or(trimmed);
         if statement.starts_with("boothop_")
             || statement.starts_with("boothop=")
-            || statement.starts_with("declare boothop_")
+            || declaration_mentions_boothop_variable(statement)
         {
             return Err(SetupError::ConflictingPreset);
         }
@@ -234,6 +234,33 @@ pub fn render_boothop_preset(existing: &str, plan: &UkiPlan) -> Result<String, S
     rendered.push_str(&shell_quote(&plan.cmdline_path.to_string_lossy()));
     rendered.push('\n');
     Ok(rendered)
+}
+
+fn declaration_mentions_boothop_variable(statement: &str) -> bool {
+    let mut words = statement.split_whitespace();
+    if !matches!(words.next(), Some("declare" | "readonly" | "typeset")) {
+        return false;
+    }
+
+    let mut options = true;
+    words.any(|word| {
+        if options && word == "--" {
+            options = false;
+            return false;
+        }
+        if options && (word.starts_with('-') || word.starts_with('+')) {
+            return false;
+        }
+
+        let lhs = word.split('=').next().unwrap_or(word);
+        let name = lhs
+            .strip_suffix('+')
+            .unwrap_or(lhs)
+            .split('[')
+            .next()
+            .unwrap_or(lhs);
+        name.starts_with("boothop_")
+    })
 }
 
 fn parse_presets_line(line: &str) -> Result<(usize, usize, Vec<String>), SetupError> {

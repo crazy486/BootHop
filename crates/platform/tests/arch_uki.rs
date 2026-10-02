@@ -231,11 +231,29 @@ fn preset_renderer_refuses_existing_boot_hop_preset_or_assignments() {
         "PRESETS=('default' 'fallback' 'boothop')\n",
         "PRESETS=('default' 'fallback')\nboothop_uki='/old/path'\n",
         "PRESETS=('default' 'fallback')\nboothop_cmdline='/old/cmdline'\n",
+        "PRESETS=('default' 'fallback')\nreadonly boothop_uki='/old/path'\n",
+        "PRESETS=('default' 'fallback')\nreadonly -r boothop_cmdline='/old/cmdline'\n",
+        "PRESETS=('default' 'fallback')\ndeclare -r boothop_uki='/old/path'\n",
+        "PRESETS=('default' 'fallback')\ndeclare -xr boothop_cmdline='/old/cmdline'\n",
+        "PRESETS=('default' 'fallback')\ndeclare -r unrelated='kept' boothop_uki='/old/path'\n",
     ] {
         assert!(matches!(
             render_boothop_preset(existing, &plan),
             Err(SetupError::ConflictingPreset)
         ));
+    }
+}
+
+#[test]
+fn preset_renderer_allows_readonly_declarations_of_unrelated_variables() {
+    let plan = plan_arch_uki("linux-lts", &Fixture::default()).unwrap();
+    for declaration in [
+        "readonly unrelated='/kept/path'",
+        "declare -r unrelated='/kept/path'",
+        "declare -r unrelated='/kept/path' another='value'",
+    ] {
+        let existing = format!("PRESETS=('default' 'fallback')\n{declaration}\n");
+        assert!(render_boothop_preset(&existing, &plan).is_ok());
     }
 }
 
