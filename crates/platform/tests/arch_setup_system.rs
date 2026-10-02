@@ -170,7 +170,7 @@ impl ArchSystemCalls for Fake {
         Ok(())
     }
     fn run(&mut self, command: &Path, args: &[&str], initial: bool) -> Result<(), i32> {
-        assert_eq!(command, Path::new("/usr/bin/mkinitcpio"));
+        assert_eq!(command.to_str(), Some("/usr/bin/mkinitcpio"));
         assert_eq!(args, ["-p", "linux"]);
         assert!(initial);
         self.action("mkinitcpio")?;
@@ -257,8 +257,15 @@ fn injected_system_adapter_runs_full_order_and_fixed_hook_without_host_io() {
     );
     assert_eq!(fake.vars[&key("BootOrder")].1, vec![0, 0, 7, 0, 1, 0]);
     assert_eq!(fake.vars[&key("Boot0000")].1, b"grub");
-    let hook =
-        String::from_utf8(fake.files[Path::new("/etc/initcpio/post/boothop-uki")].clone()).unwrap();
+    let hook = String::from_utf8(
+        fake.files
+            .iter()
+            .find(|(path, _)| path.to_str() == Some("/etc/initcpio/post/boothop-uki"))
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
     assert!(hook.contains("/usr/lib/boothop/boothop-uki-publish"));
     assert!(hook.contains("mode=--update"));
     assert!(hook.contains("BOOTHOP_ARCH_INITIAL"));
@@ -284,7 +291,8 @@ fn stale_stage_is_cleared_before_initial_build_and_failure_is_terminal() {
         !backend
             .calls()
             .files
-            .contains_key(Path::new("/boot/EFI/BootHop/arch.efi.tmp"))
+            .keys()
+            .any(|path| path.to_str() == Some("/boot/EFI/BootHop/arch.efi.tmp"))
     );
     assert!(!backend.calls().vars.contains_key(&key("Boot0001")));
 }
