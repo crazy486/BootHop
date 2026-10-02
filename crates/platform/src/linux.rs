@@ -1,5 +1,7 @@
 pub mod arch_identity;
 pub mod arch_setup;
+pub mod arch_setup_native;
+pub mod arch_setup_system;
 pub mod arch_uki;
 pub mod firmware;
 pub mod reboot;
