@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::{BootId, Error, GptEspIdentity};
 use boothop_platform::linux::{
     arch_identity::InstalledIdentity,

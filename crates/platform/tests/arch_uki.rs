@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::GptEspIdentity;
 use boothop_platform::linux::arch_uki::{
     ArchSetupSource, CmdlineSource, EspInfo, PackageHookRoute, SecureBootState, SetupError,

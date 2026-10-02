@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_core::BootId;
 use boothop_platform::linux::arch_identity::{
     IDENTITY_MARKER_PATH, IdentityError, InstalledIdentity,

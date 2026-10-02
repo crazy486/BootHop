@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::collections::HashMap;
 
 use boothop_core::{BootId, Error};
