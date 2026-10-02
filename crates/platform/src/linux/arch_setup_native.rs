@@ -1,4 +1,5 @@
-//! Native Arch setup calls. This module is intentionally not reachable from either helper main.
+//! Native Arch setup calls. Packaged helpers cannot construct this backend;
+//! the feature-gated M4 guest entry can construct it only after its guest guard.
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -22,6 +23,12 @@ use super::{
 const EFI_FS_MAGIC: u64 = 0xde5e81e4;
 const GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+const FINDMNT_ARGS: &[&str] = &[
+    "--noheadings",
+    "--output",
+    "TARGET,SOURCE,FSTYPE",
+    "--pairs",
+];
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Holds the BootHop operation lock and pacman's exclusive DB lock for the whole setup.
@@ -483,16 +490,7 @@ impl ArchSystemCalls for NativeArchCalls {
     }
     fn esp_info(&self) -> Result<EspInfo, i32> {
         let mut found = None;
-        let snapshot = command_output(
-            "/usr/bin/findmnt",
-            &[
-                "--noheadings",
-                "--list",
-                "--output",
-                "TARGET,SOURCE,FSTYPE",
-                "--pairs",
-            ],
-        )?;
+        let snapshot = command_output("/usr/bin/findmnt", FINDMNT_ARGS)?;
         for (mount, source) in mount_candidates(&snapshot)? {
             if !source.starts_with("/dev/")
                 || source[5..]

@@ -3,11 +3,19 @@ name = "boothop-helper"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+m4-guest-setup = []
+
 [dependencies]
 boothop-core = { path = "../core" }
 boothop-protocol = { path = "../protocol" }
 boothop-platform = { path = "../platform" }
 libc = "0.2"
+
+[[bin]]
+name = "boothop-m4-guest-setup"
+path = "src/bin/boothop-m4-guest-setup.rs"
+required-features = ["m4-guest-setup"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

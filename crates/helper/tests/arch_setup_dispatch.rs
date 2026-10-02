@@ -38,6 +38,15 @@ fn daily_helper_policy_does_not_name_setup_executable() {
     let policy = include_str!("../../../packaging/linux/org.boothop.helper.policy");
     assert!(policy.contains("/usr/lib/boothop/boothop-helper"));
     assert!(!policy.contains("boothop-arch-setup"));
+    assert!(!policy.contains("boothop-m4-guest-setup"));
     let daily = include_str!("../src/dispatch.rs");
     assert!(!daily.contains("arch_setup"));
+}
+
+#[test]
+fn packaged_host_setup_entry_remains_fail_closed() {
+    let host_setup = include_str!("../src/bin/boothop-arch-setup.rs");
+    assert!(host_setup.contains("Arch direct setup is unavailable"));
+    assert!(host_setup.contains("std::process::exit(1)"));
+    assert!(!host_setup.contains("NativeArchCalls::open"));
 }

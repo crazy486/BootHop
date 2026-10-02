@@ -7,6 +7,10 @@ script=$(cd "$(dirname "$0")" && pwd)
 archive=$("$script/build-package.sh" "$out" | tail -n 1)
 [[ -f "$archive" ]] || { echo "package archive was not produced" >&2; exit 1; }
 listing=$(tar -tzf "$archive")
+if grep -Eq 'boothop-m4-guest-setup|m4-guest' <<<"$listing"; then
+  echo "package must not contain the M4 guest setup binary or marker assets" >&2
+  exit 1
+fi
 for required in \
   ./usr/bin/boothop-gui \
   ./usr/lib/boothop/boothop-helper \
