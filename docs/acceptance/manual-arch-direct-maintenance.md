@@ -41,6 +41,20 @@ partition number/start/size/GUID, fixed File() path
 Compare the exact bytes' SHA-256 with the marker when present. Record unknown
 reads explicitly. BootNext must be absent before any future setup attempt.
 
+## Publisher stage freshness boundary
+
+The publisher validates the staged UKI and checks that the file remains stable
+while it validates and renames it. It does not independently prove when the
+stage was generated. The supported mkinitcpio path calls the BootHop post hook
+for the selected preset after successful UKI generation; initial setup also
+removes a pre-existing stage before the build. A root administrator who invokes
+the publisher directly with an old, valid stage and matching arguments could
+still publish that old image. This direct root invocation is accepted within
+the current root-only trust model while real setup remains disabled. Do not
+invoke the publisher directly or treat a leftover stage as evidence of a
+successful build. Any future change to this trust boundary needs a separate
+review before real setup is enabled.
+
 ## Administrator-controlled cleanup
 
 First preserve the inventory above and verify the original Boot0000 and BootOrder.
