@@ -389,3 +389,16 @@ fn uncertain_efi_writes_report_observed_state_without_retry() {
         assert_eq!(backend.calls().vars[&key("Boot0000")].1, b"grub");
     }
 }
+
+#[test]
+fn planning_failure_reports_uninspected_hook_and_artifact_as_unknown() {
+    let mut fake = Fake::new();
+    fake.vars.insert(key("SecureBoot"), (6, vec![1]));
+    let mut backend = SystemArchSetupBackend::new(fake);
+    let failure = run_arch_setup(SetupIntent::new("linux".into()), &mut backend).unwrap_err();
+    assert_eq!(failure.stage, SetupStage::Plan);
+    assert_eq!(failure.observed.preset_stanza, Observed::Unknown);
+    assert_eq!(failure.observed.hook_exact, Observed::Unknown);
+    assert_eq!(failure.observed.artifact_present, Observed::Unknown);
+    assert!(backend.calls().actions.is_empty());
+}

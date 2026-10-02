@@ -198,7 +198,7 @@ fn command_output(program: &str, args: &[&str]) -> Result<String, i32> {
         .env("LC_ALL", "C")
         .output()
         .map_err(code)?;
-    if !output.status.success() || output.stdout.len() > 16 * 1024 {
+    if !output.status.success() || output.stdout.len() > 1024 * 1024 {
         return Err(5);
     }
     String::from_utf8(output.stdout).map_err(|_| 84)
@@ -228,6 +228,41 @@ fn pairs(text: &str) -> Result<std::collections::BTreeMap<String, String>, i32> 
         }
     }
     Ok(values)
+}
+/// Parse one complete findmnt snapshot. A malformed row makes the entire observation unknown.
+fn mount_candidates(snapshot: &str) -> Result<Vec<(String, String)>, i32> {
+    let mut candidates = Vec::new();
+    let mut rows = 0;
+    let mut boot_seen = false;
+    let mut efi_seen = false;
+    for line in snapshot.lines() {
+        if line.is_empty() {
+            return Err(22);
+        }
+        rows += 1;
+        let fields = pairs(line)?;
+        let target = fields.get("TARGET").ok_or(22)?;
+        let source = fields.get("SOURCE").ok_or(22)?;
+        let filesystem = fields.get("FSTYPE").ok_or(22)?;
+        if target == "/boot" || target == "/efi" {
+            let seen = if target == "/boot" {
+                &mut boot_seen
+            } else {
+                &mut efi_seen
+            };
+            if *seen {
+                return Err(22);
+            }
+            *seen = true;
+            if filesystem == "vfat" {
+                candidates.push((target.clone(), source.clone()));
+            }
+        }
+    }
+    if rows == 0 {
+        return Err(22);
+    }
+    Ok(candidates)
 }
 fn guid_bytes(value: &str) -> Result<[u8; 16], i32> {
     let parts = value.split('-').collect::<Vec<_>>();
@@ -448,25 +483,17 @@ impl ArchSystemCalls for NativeArchCalls {
     }
     fn esp_info(&self) -> Result<EspInfo, i32> {
         let mut found = None;
-        for mount in ["/boot", "/efi"] {
-            let Ok(output) = command_output(
-                "/usr/bin/findmnt",
-                &[
-                    "--noheadings",
-                    "--mountpoint",
-                    mount,
-                    "--output",
-                    "SOURCE,FSTYPE",
-                    "--pairs",
-                ],
-            ) else {
-                continue;
-            };
-            let row = pairs(output.trim())?;
-            if row.get("FSTYPE").map(String::as_str) != Some("vfat") {
-                continue;
-            }
-            let source = row.get("SOURCE").ok_or(22)?;
+        let snapshot = command_output(
+            "/usr/bin/findmnt",
+            &[
+                "--noheadings",
+                "--list",
+                "--output",
+                "TARGET,SOURCE,FSTYPE",
+                "--pairs",
+            ],
+        )?;
+        for (mount, source) in mount_candidates(&snapshot)? {
             if !source.starts_with("/dev/")
                 || source[5..]
                     .bytes()
@@ -474,7 +501,7 @@ impl ArchSystemCalls for NativeArchCalls {
             {
                 return Err(22);
             }
-            let meta = fs::symlink_metadata(source).map_err(code)?;
+            let meta = fs::symlink_metadata(&source).map_err(code)?;
             if !meta.file_type().is_block_device() || meta.file_type().is_symlink() {
                 return Err(22);
             }
@@ -486,7 +513,7 @@ impl ArchSystemCalls for NativeArchCalls {
                     "--pairs",
                     "--output",
                     "PARTN,START,SIZE,LOG-SEC,PARTTYPE,PARTUUID",
-                    source,
+                    &source,
                 ],
             )?;
             let fields = pairs(columns.trim())?;
@@ -655,5 +682,18 @@ mod tests {
             Err(2)
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn mount_snapshot_is_complete_and_rejects_unknown_rows() {
+        let snapshot = "TARGET=\"/\" SOURCE=\"/dev/root\" FSTYPE=\"ext4\"\nTARGET=\"/efi\" SOURCE=\"/dev/sda1\" FSTYPE=\"vfat\"\n";
+        assert_eq!(
+            mount_candidates(snapshot),
+            Ok(vec![(String::from("/efi"), String::from("/dev/sda1"))])
+        );
+        let unknown = "BROKEN\nTARGET=\"/efi\" SOURCE=\"/dev/sda1\" FSTYPE=\"vfat\"\n";
+        assert!(mount_candidates(unknown).is_err());
+        let duplicate = "TARGET=\"/boot\" SOURCE=\"/dev/sda1\" FSTYPE=\"vfat\"\nTARGET=\"/boot\" SOURCE=\"/dev/sda2\" FSTYPE=\"ext4\"\n";
+        assert!(mount_candidates(duplicate).is_err());
     }
 }

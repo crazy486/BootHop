@@ -96,3 +96,32 @@ was run. Real machine and isolated UEFI acceptance remain separate gates.
 - The artifact inspection checks final-file trust, PE signature, and absent
   stage after the publisher succeeds. Bootability and module compatibility
   still require isolated boot acceptance.
+
+## Independent review fix — mount observation and unknown report state
+
+The review found that separate `findmnt --mountpoint` failures could be
+silently skipped and that a plan failure returned known false for a hook and
+artifact that had not been inspected. The adapter now obtains one complete
+`findmnt --list` snapshot. Command failure, oversized output, malformed
+rows, and duplicate candidate mountpoints stop planning as unknown or
+unsupported; only a complete snapshot can establish a candidate. A failure
+before a `UkiPlan` exists reports preset, hook, and artifact observations as
+Unknown.
+
+### RED
+
+- `cargo test -p boothop-platform --test arch_setup_system
+  planning_failure_reports_uninspected_hook_and_artifact_as_unknown` failed:
+  actual `Known(false)`, expected `Unknown`.
+- `cargo test -p boothop-platform --lib
+  mount_snapshot_is_complete_and_rejects_unknown_rows` failed to compile
+  because the complete-snapshot parser did not exist.
+
+### GREEN
+
+- `cargo test -p boothop-platform --lib --test arch_setup_system --test
+  arch_setup`: library 35/35, system adapter 7/7, runner 6/6 passed.
+- `cargo clippy -p boothop-platform --lib --test arch_setup_system -- -D
+  warnings`, `cargo fmt --all -- --check`, and `git diff --check`: passed.
+- Tests used only injected state and pure snapshot text; no real findmnt,
+  mkinitcpio, ESP, or efivarfs operation was run.

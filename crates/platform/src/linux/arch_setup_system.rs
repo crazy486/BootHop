@@ -436,7 +436,9 @@ impl<C: ArchSystemCalls> ArchSetupBackend for SystemArchSetupBackend<C> {
         &mut self,
         plan: Option<&UkiPlan>,
     ) -> Result<Option<String>, ObservationError> {
-        let Some(plan) = plan else { return Ok(None) };
+        let Some(plan) = plan else {
+            return Err(ObservationError);
+        };
         let bytes = self
             .calls
             .read(plan.preset_path())
@@ -452,7 +454,9 @@ impl<C: ArchSystemCalls> ArchSetupBackend for SystemArchSetupBackend<C> {
         Ok((!stanza.is_empty()).then_some(stanza))
     }
     fn observe_hook_exact(&mut self, plan: Option<&UkiPlan>) -> Result<bool, ObservationError> {
-        let Some(plan) = plan else { return Ok(false) };
+        let Some(plan) = plan else {
+            return Err(ObservationError);
+        };
         let expected = Self::hook_bytes(plan).map_err(unknown)?;
         let Some(meta) = self.calls.metadata(Path::new(POST_HOOK)).map_err(unknown)? else {
             return Ok(false);
@@ -464,7 +468,9 @@ impl<C: ArchSystemCalls> ArchSetupBackend for SystemArchSetupBackend<C> {
         Ok(actual.as_deref() == Some(expected.as_slice()))
     }
     fn observe_artifact(&mut self, plan: Option<&UkiPlan>) -> Result<bool, ObservationError> {
-        let Some(plan) = plan else { return Ok(false) };
+        let Some(plan) = plan else {
+            return Err(ObservationError);
+        };
         Ok(self
             .calls
             .metadata(plan.final_uki_path())
