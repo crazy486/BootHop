@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use boothop_helper::arch_setup_cli::{CliError, SetupArgs, parse_setup_args};
 
 #[test]
