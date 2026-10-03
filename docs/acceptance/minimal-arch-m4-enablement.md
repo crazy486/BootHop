@@ -43,3 +43,45 @@ No host EFI/NVRAM/ESP, host GRUB/mkinitcpio, or host reboot operation occurred.
 Local workspace and feature-enabled tests, formatting, Clippy, Linux isolation,
 installer fake tests, and package smoke passed. CI must be inspected after this
 report is pushed; none of these checks proves the remaining UEFI boot semantics.
+
+## 2026-10-04 continuation
+
+**M4 remains BLOCKED.** Reused the same qcow2, OVMF_VARS, QEMU binary, and
+Arch guest. The previously pushed `5658445` Linux and Windows CI completed
+successfully. No asset was downloaded or rebuilt.
+
+The ordinary boot again showed OVMF starting `Boot0000 "Arch GRUB"`, the GNU
+GRUB menu, and an Arch 7.2.8 serial login. Immediately before the planned
+guest setup, `efibootmgr` reported `BootCurrent: 0000`, no BootNext, and
+`BootOrder: 0000,0001,0002,0003,0004,0005,0006,0007,0008`. `Boot0000` still
+had SHA-256 `d4283290d50f8a90927619517c5d6680e1db1d72b55139c766d01e5154fbfbc9`.
+The fixed fw_cfg guest marker matched; the ESP was `/dev/vda1` mounted as
+`vfat` at `/boot`; both pinned mkinitcpio package-route digests matched.
+No existing identity marker, BootHop UKI, post hook, pacman lock, or BootNext
+was present. The guest-only binary and publisher were transferred with matching
+SHA-256 values and installed inside the guest with required root ownership and
+permissions.
+
+The read-only preflight failed because
+`/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c`
+does not exist in this OVMF guest. `SystemArchSetupBackend::secure_boot_state`
+maps anything other than an explicit disabled value to `Unknown`; the setup
+planner rejects that state. Following the stop-on-failure rule, **the setup
+binary was not run**. No SecureBoot variable was synthesized, and no firmware
+mutation, retry, rollback, or OVMF replacement was attempted. The guest was
+powered off cleanly and the temporary transfer server was stopped.
+
+| Check | Latest result |
+| --- | --- |
+| QEMU/OVMF environment | READY for ordinary Arch boot; BLOCKED for this setup policy by missing SecureBoot state |
+| Guest-only setup | BLOCKED — not run after failed preflight |
+| Normal boot → GRUB | PASS |
+| BootNext → UKI → Arch | NOT RUN |
+| BootNext consumed | NOT RUN |
+| Next normal boot → GRUB | NOT RUN |
+| Original Boot0000/BootOrder preserved after setup | NOT RUN — setup did not occur |
+
+No host EFI/NVRAM/ESP, BootOrder, BootNext, GRUB, or mkinitcpio operation and
+no host reboot occurred. The remaining M4 checks require an isolated OVMF
+environment that explicitly reports Secure Boot disabled; preparing that is a
+separate decision, outside this stop-on-failure run.

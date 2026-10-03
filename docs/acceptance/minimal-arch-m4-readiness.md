@@ -1,5 +1,11 @@
 # Minimal Arch direct boot: M4 readiness
 
+Decision on 2026-10-04: **BLOCKED at guest preflight**. The existing OVMF
+guest has no `SecureBoot` EFI variable. The production setup policy treats
+that as an unknown state and refuses to plan setup. No setup, BootHop Boot####,
+BootNext, or follow-on boot was attempted. The guest was shut down without
+retry or firmware repair. See the [2026-10-04 acceptance evidence](minimal-arch-m4-enablement.md#2026-10-04-continuation).
+
 Decision on 2026-10-02: **BLOCKED**. The first normal boot check has now passed
 in a disposable Arch QEMU/OVMF guest. Guest setup and the BootNext sequence
 were not run. See [the M4 enablement report](minimal-arch-m4-enablement.md).
