@@ -89,6 +89,19 @@ impl SetupFirmware for FakeFirmware {
 }
 
 #[test]
+fn allocator_ignores_vendor_boot_variables_but_keeps_global_ids_occupied() {
+    let mut firmware = FakeFirmware::with_order(&[0, 1]);
+    firmware.names = vec![
+        variable_name("Boot0000"),
+        variable_name("Boot0001"),
+        b"BootMediaInfo-5bd6b672-b6ea-4d6a-b590-18a932b78794".to_vec(),
+        b"Boot0002-5bd6b672-b6ea-4d6a-b590-18a932b78794".to_vec(),
+    ];
+
+    assert_eq!(allocate_unused_id(&mut firmware), Ok(BootId(2)));
+}
+
+#[test]
 fn allocator_skips_orphan_boot_entries_outside_boot_order() {
     let mut firmware = FakeFirmware::with_order(&[0]);
     firmware.names = vec![variable_name("Boot0000"), variable_name("Boot0001")];
@@ -102,7 +115,9 @@ fn allocator_refuses_malformed_boot_like_variable_names() {
         b"Boot000g-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
         b"Boot00001-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
         b"Boot00af-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
-        b"Boot0007-deadbeef-93ca-11d2-aa0d-00e098032b8c".as_slice(),
+        b"BootMediaInfo-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
+        b"BootNextExtra-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
+        b"BootOrderExtra-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
         b"boot0007-8be4df61-93ca-11d2-aa0d-00e098032b8c".as_slice(),
     ] {
         let mut firmware = FakeFirmware::with_order(&[0]);

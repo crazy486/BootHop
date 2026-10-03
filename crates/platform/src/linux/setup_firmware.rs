@@ -180,13 +180,12 @@ fn classify_boot_name(name: &[u8]) -> Result<BootName, Error> {
     {
         return Ok(BootName::NotBootLike);
     }
-    let stem_end = name
-        .len()
-        .checked_sub(EFI_GLOBAL_VARIABLE_GUID_SUFFIX.len())
-        .ok_or(Error::UnsupportedFormat)?;
-    if name.get(stem_end..) != Some(EFI_GLOBAL_VARIABLE_GUID_SUFFIX) {
-        return Err(Error::UnsupportedFormat);
+    // Vendor namespaces can contain unrelated Boot* variables. Only global EFI
+    // variables participate in allocation and its strict name validation.
+    if !name.ends_with(EFI_GLOBAL_VARIABLE_GUID_SUFFIX) {
+        return Ok(BootName::NotBootLike);
     }
+    let stem_end = name.len() - EFI_GLOBAL_VARIABLE_GUID_SUFFIX.len();
     let stem = name.get(..stem_end).ok_or(Error::UnsupportedFormat)?;
     match stem {
         BOOT_NEXT_STEM => Ok(BootName::Next),
