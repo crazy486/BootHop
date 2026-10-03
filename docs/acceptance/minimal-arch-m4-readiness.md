@@ -1,5 +1,14 @@
 # Minimal Arch direct boot: M4 readiness
 
+Decision on 2026-10-04 (guest-only setup attempt): **M4 BLOCKED at
+InitialState/Backend**. The stable Secure Boot firmware fixture was reused
+without replacement. Setup was run once and exited 1 before entry allocation;
+its artifact observation was unknown. The guest lacks `/boot/EFI/BootHop`,
+consistent with the native metadata adapter rejecting a missing parent before
+leaf absence handling. Original Boot0000–Boot0007 and BootOrder remained
+unchanged. The guest was stopped without retry, rollback, or BootNext writes.
+See [the setup attempt evidence](minimal-arch-m4-setup-attempt.md).
+
 Decision on 2026-10-04 (fresh Secure Boot firmware baseline): **Environment
 READY for setup**. Read-only analysis identified the former Boot0008 as the
 OVMF internal shell, separate from Arch GRUB. A new private variable template
