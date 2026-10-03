@@ -1,5 +1,15 @@
 # Minimal Arch direct boot: M4 readiness
 
+Decision on 2026-10-04 (post-fix boot acceptance): **M4 PASS**. The minimal
+native metadata fix was tested and independently reviewed, then the existing
+guest-only setup succeeded on the same stable Secure Boot firmware fixture.
+Boot0008 was appended without changing original entries/order; BootNext booted
+the UKI directly to Arch and was consumed; the next ordinary boot returned to
+GRUB. Final entry, order, and artifact hashes matched the post-setup state.
+See [the final M4 evidence](minimal-arch-m4-boot-acceptance.md). No additional
+boot testing or real-machine provisioning follows this result. Older decisions
+below are historical observations, superseded by this completed acceptance.
+
 Decision on 2026-10-04 (guest-only setup attempt): **M4 BLOCKED at
 InitialState/Backend**. The stable Secure Boot firmware fixture was reused
 without replacement. Setup was run once and exited 1 before entry allocation;

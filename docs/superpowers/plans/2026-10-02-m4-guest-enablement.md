@@ -32,10 +32,14 @@
 
 - [x] Obtain only the QEMU/OVMF and Arch guest assets required for one VM; ensure the launch command contains no host disk, directory, or efivarfs passthrough.
 - [x] In the guest, establish Boot0000 as GRUB and record BootOrder; ordinary boot must reach GRUB.
-- [ ] Install BootHop's guest-only binary and fixed publisher in the guest; run setup there, recording the created BootHop entry and the original BootOrder prefix.
-- [ ] Set BootNext in guest; reboot guest; demonstrate direct UKI to Arch and BootNext consumption.
-- [ ] Reboot guest again; demonstrate normal GRUB path and preserved Boot0000/BootOrder.
-- [ ] If any prerequisite fails, record the exact blocker and leave all unrun checks NOT RUN. Do not claim PASS from fake or firmware readbacks alone.
+- [x] Install BootHop's guest-only binary and fixed publisher in the guest; run setup there, recording the created BootHop entry and the original BootOrder prefix.
+- [x] Set BootNext in guest; reboot guest; demonstrate direct UKI to Arch and BootNext consumption.
+- [x] Reboot guest again; demonstrate normal GRUB path and preserved Boot0000/BootOrder.
+- [x] If any prerequisite fails, record the exact blocker and leave all unrun checks NOT RUN. Do not claim PASS from fake or firmware readbacks alone.
+
+Completed 2026-10-04 after the user-authorized minimal missing-parent metadata
+fix. Earlier failed attempts stopped and were recorded; the post-fix attempt
+passed. See [final acceptance evidence](../../acceptance/minimal-arch-m4-boot-acceptance.md).
 
 ## Completion gate
 
