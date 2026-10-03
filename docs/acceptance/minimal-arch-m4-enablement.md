@@ -85,3 +85,59 @@ No host EFI/NVRAM/ESP, BootOrder, BootNext, GRUB, or mkinitcpio operation and
 no host reboot occurred. The remaining M4 checks require an isolated OVMF
 environment that explicitly reports Secure Boot disabled; preparing that is a
 separate decision, outside this stop-on-failure run.
+
+## 2026-10-04 Secure Boot firmware continuation
+
+**M4: BLOCKED.** Investigation of the missing `SecureBoot` variable identified
+the selected firmware build as the cause. The local `edk2-ovmf-202608-1`
+package's firmware descriptors identify `OVMF_CODE.4m.fd` as the ordinary
+build and `OVMF_CODE.secboot.4m.fd` as the Secure Boot and SMM build. Both
+descriptors name the same `OVMF_VARS.4m.fd` template. The package's OVMF
+README says Secure Boot requires a build with `SECURE_BOOT_ENABLE`; no keys
+are installed by default. The previous launch used the ordinary code image.
+The production backend's absent-variable → `Unknown` → reject behavior was
+left unchanged.
+
+One launch used the already installed guest disk and its existing private
+OVMF variable store, changing only the QEMU firmware code path to the local
+Secure Boot capable image and enabling Q35 SMM/secure pflash. No asset was
+downloaded, and the guest was not rebuilt. Before launch, the private
+variable store's SHA-256 was
+`8cc79b1837204552fd12ed26006ad1902fd92037f02d6091e8d6d1f7b3b49291`;
+an evidence copy of those original bytes was saved as
+`/home/mani/.cache/boothop-m4/ovmf-vars.pre-secboot-evidence.fd` and was
+**not** used for rollback.
+
+The guest booted through `Boot0000 "Arch GRUB"`, displayed GRUB, and reached
+Arch. Inside the guest, the `SecureBoot` efivar bytes were `06 00 00 00 00`
+(attributes 6, payload 0, explicitly disabled). `BootCurrent` remained
+`0000`, and `Boot0000` still had the original SHA-256
+`d4283290d50f8a90927619517c5d6680e1db1d72b55139c766d01e5154fbfbc9`.
+
+The same read-only observation showed an unexpected firmware mutation:
+`BootOrder` was `0000,0001,0002,0003,0004,0005,0006,0007`, whereas its
+pre-switch baseline was `0000,0001,0002,0003,0004,0005,0006,0007,0008`.
+The guest's `efibootmgr -v` output no longer listed `Boot0008`. Its absence
+has not been explained or accepted as safe. Following the stop-on-unknown-
+mutation rule, the guest was immediately powered off. **No guest-only BootHop
+setup or BootNext write was attempted.** The variable store was not restored;
+there was no retry or rollback. After shutdown, the changed private variable
+store's SHA-256 was
+`601bcb1f3f56beca34e1b5041aaa99388cbd1ea3c64aa706c2b855f828e4585d`.
+
+| Check | Result |
+| --- | --- |
+| QEMU/OVMF environment | Secure Boot disabled was read explicitly; original BootOrder preservation BLOCKED by firmware change |
+| Guest-only setup | NOT RUN |
+| BootHop Boot#### created | NOT RUN |
+| Normal boot → GRUB | PASS |
+| BootNext → UKI → Arch | NOT RUN |
+| BootNext consumed | NOT RUN |
+| Next normal boot → GRUB | NOT RUN |
+| Original Boot0000/BootOrder preserved | Boot0000 unchanged; BootOrder changed before setup, so FAIL |
+
+No host EFI/NVRAM/ESP, host Boot####/BootOrder/BootNext, GRUB, or mkinitcpio
+operation occurred. The host was not rebooted. The disposable guest alone
+was shut down. An independent read-only review confirmed that the production
+Secure Boot check still rejects absent, malformed, enabled, and unknown
+values, and that the unexplained BootOrder change requires this M4 stop.

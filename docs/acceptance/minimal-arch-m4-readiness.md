@@ -1,5 +1,17 @@
 # Minimal Arch direct boot: M4 readiness
 
+Decision on 2026-10-04 (Secure Boot firmware continuation): **BLOCKED by an
+unexpected guest BootOrder mutation**. The original OVMF code image does not
+support Secure Boot and exposed no `SecureBoot` variable. Switching to the
+Secure Boot capable code image from the same local package, with the existing
+private guest disk and variable store, exposed `SecureBoot=0` and booted the
+original `Boot0000` GRUB entry. However, the firmware changed the guest
+BootOrder from `0000,0001,0002,0003,0004,0005,0006,0007,0008` to
+`0000,0001,0002,0003,0004,0005,0006,0007` before BootHop setup. The cause
+of the missing `0008` entry is not established. The guest was stopped without
+running setup, setting BootNext, retrying, or restoring the variable store.
+See [the continuation evidence](minimal-arch-m4-enablement.md#2026-10-04-secure-boot-firmware-continuation).
+
 Decision on 2026-10-04: **BLOCKED at guest preflight**. The existing OVMF
 guest has no `SecureBoot` EFI variable. The production setup policy treats
 that as an unknown state and refuses to plan setup. No setup, BootHop Boot####,
