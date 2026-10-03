@@ -1,5 +1,14 @@
 # Minimal Arch direct boot: M4 readiness
 
+Decision on 2026-10-04 (fresh Secure Boot firmware baseline): **Environment
+READY for setup**. Read-only analysis identified the former Boot0008 as the
+OVMF internal shell, separate from Arch GRUB. A new private variable template
+used Secure Boot capable firmware from its first boot, explicitly reported
+`SecureBoot=0`, and preserved all Boot0000–Boot0007 bytes and complete
+BootOrder across two subsequent ordinary GRUB → Arch boots. Neither old
+variable store was adopted as this baseline. BootHop setup and BootNext were
+not run; this is not M4 PASS. See [the new baseline evidence](minimal-arch-m4-secboot-baseline.md).
+
 Decision on 2026-10-04 (Secure Boot firmware continuation): **BLOCKED by an
 unexpected guest BootOrder mutation**. The original OVMF code image does not
 support Secure Boot and exposed no `SecureBoot` variable. Switching to the
