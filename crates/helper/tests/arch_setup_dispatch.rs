@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use boothop_helper::arch_setup_cli::{CliError, SetupArgs, parse_setup_args};
+use boothop_helper::arch_setup_cli::{CliError, SetupArgs, dispatch_setup, parse_setup_args};
 
 #[test]
 fn setup_requires_explicit_apply() {
@@ -31,6 +31,32 @@ fn setup_cli_rejects_non_root_unknown_arguments_and_path_or_id_flavors() {
     ] {
         assert_eq!(parse_setup_args(&args, 0), Err(CliError::Usage), "{args:?}");
     }
+}
+
+#[test]
+fn setup_dispatch_opens_backend_only_after_root_gate_and_strict_arguments() {
+    let valid = ["--kernel".into(), "linux-zen".into(), "--apply".into()];
+    let mut opened = Vec::new();
+    let nonroot = dispatch_setup(&valid, 1000, |setup| opened.push(setup.flavor));
+    assert_eq!(nonroot, Err(CliError::NotRoot));
+    assert!(opened.is_empty());
+
+    let invalid = [
+        "--kernel".into(),
+        "linux-zen".into(),
+        "--apply".into(),
+        "--force".into(),
+    ];
+    let invalid_result = dispatch_setup(&invalid, 0, |setup| opened.push(setup.flavor));
+    assert_eq!(invalid_result, Err(CliError::Usage));
+    assert!(opened.is_empty());
+
+    let valid_result = dispatch_setup(&valid, 0, |setup| {
+        opened.push(setup.flavor);
+        "dispatched"
+    });
+    assert_eq!(valid_result, Ok("dispatched"));
+    assert_eq!(opened, ["linux-zen"]);
 }
 
 #[test]

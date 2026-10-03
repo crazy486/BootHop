@@ -21,6 +21,10 @@ jobs:
         run: packaging/linux/check-isolation.sh
       - name: Isolation checker adversarial fixture
         run: packaging/linux/tests/isolation_checker_fake.sh
+      - name: One-shot production setup authorization tests
+        run: cargo test -p boothop-helper --features one-shot-production-setup --test arch_setup_dispatch --locked
+      - name: One-shot production setup compile check
+        run: cargo build -p boothop-helper --features one-shot-production-setup --bin boothop-production-setup --locked
       - name: Workspace tests
         run: |
           log="$(mktemp)"

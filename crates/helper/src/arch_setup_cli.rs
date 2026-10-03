@@ -29,3 +29,14 @@ pub fn parse_setup_args(args: &[String], euid: u32) -> Result<SetupArgs, CliErro
         flavor: args[1].clone(),
     })
 }
+
+/// Parse and authorize setup arguments before invoking the production backend boundary.
+/// The callback is never called for non-root or malformed requests.
+pub fn dispatch_setup<R>(
+    args: &[String],
+    euid: u32,
+    open_backend: impl FnOnce(SetupArgs) -> R,
+) -> Result<R, CliError> {
+    let setup = parse_setup_args(args, euid)?;
+    Ok(open_backend(setup))
+}

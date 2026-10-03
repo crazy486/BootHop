@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 m4-guest-setup = []
+one-shot-production-setup = []
 
 [dependencies]
 boothop-core = { path = "../core" }
@@ -16,6 +17,11 @@ libc = "0.2"
 name = "boothop-m4-guest-setup"
 path = "src/bin/boothop-m4-guest-setup.rs"
 required-features = ["m4-guest-setup"]
+
+[[bin]]
+name = "boothop-production-setup"
+path = "src/bin/boothop-production-setup.rs"
+required-features = ["one-shot-production-setup"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
