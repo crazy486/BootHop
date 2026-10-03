@@ -77,10 +77,26 @@ fn code(error: std::io::Error) -> i32 {
     error.raw_os_error().unwrap_or(5)
 }
 fn check_parent_chain(path: &Path) -> Result<(), i32> {
-    if !path.is_absolute() {
+    if parent_chain_present(path, &mut |path| fs::symlink_metadata(path).map_err(code))? {
+        Ok(())
+    } else {
+        Err(2)
+    }
+}
+/// Validate every existing ancestor; only ENOENT means the remaining fixed path is absent.
+/// Write callers use the strict wrapper above and still require all parents to exist.
+fn parent_chain_present(
+    path: &Path,
+    metadata: &mut impl FnMut(&Path) -> Result<fs::Metadata, i32>,
+) -> Result<bool, i32> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+    {
         return Err(22);
     }
-    let root = fs::symlink_metadata("/").map_err(code)?;
+    let root = metadata(Path::new("/"))?;
     if !root.is_dir() || root.uid() != 0 || root.gid() != 0 || root.mode() & 0o022 != 0 {
         return Err(1);
     }
@@ -91,7 +107,11 @@ fn check_parent_chain(path: &Path) -> Result<(), i32> {
             Component::Normal(part) => current.push(part),
             _ => return Err(22),
         }
-        let meta = fs::symlink_metadata(&current).map_err(code)?;
+        let meta = match metadata(&current) {
+            Ok(meta) => meta,
+            Err(2) => return Ok(false),
+            Err(error) => return Err(error),
+        };
         if !meta.is_dir()
             || meta.file_type().is_symlink()
             || meta.uid() != 0
@@ -101,15 +121,23 @@ fn check_parent_chain(path: &Path) -> Result<(), i32> {
             return Err(1);
         }
     }
-    Ok(())
+    Ok(true)
 }
 fn file_metadata(path: &Path) -> Result<Option<fs::Metadata>, i32> {
-    check_parent_chain(path)?;
-    match fs::symlink_metadata(path) {
+    file_metadata_with(path, &mut |path| fs::symlink_metadata(path).map_err(code))
+}
+fn file_metadata_with(
+    path: &Path,
+    metadata: &mut impl FnMut(&Path) -> Result<fs::Metadata, i32>,
+) -> Result<Option<fs::Metadata>, i32> {
+    if !parent_chain_present(path, metadata)? {
+        return Ok(None);
+    }
+    match metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(40),
         Ok(meta) => Ok(Some(meta)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(code(error)),
+        Err(2) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 fn meta_snapshot(meta: &fs::Metadata) -> HostMetadata {
@@ -636,6 +664,88 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn metadata_missing_parent_is_absent_after_trusted_ancestors() {
+        let trusted = fs::symlink_metadata("/").unwrap();
+        let mut visited = Vec::new();
+        let result = file_metadata_with(Path::new("/fixture/EFI/BootHop/arch.efi"), &mut |path| {
+            visited.push(path.to_path_buf());
+            if path == Path::new("/fixture/EFI/BootHop") {
+                Err(2)
+            } else {
+                Ok(trusted.clone())
+            }
+        });
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(
+            visited,
+            ["/", "/fixture", "/fixture/EFI", "/fixture/EFI/BootHop"].map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn metadata_existing_trusted_parent_preserves_leaf_metadata() {
+        let trusted = fs::symlink_metadata("/").unwrap();
+        assert!(
+            file_metadata_with(Path::new("/fixture/EFI/BootHop/arch.efi"), &mut |_| {
+                Ok(trusted.clone())
+            })
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn metadata_rejects_unsafe_parent_and_non_absence_errors() {
+        let trusted = fs::symlink_metadata("/").unwrap();
+        let unsafe_parent = fs::symlink_metadata("/tmp").unwrap();
+        assert_eq!((unsafe_parent.uid(), unsafe_parent.gid()), (0, 0));
+        assert_ne!(unsafe_parent.mode() & 0o022, 0);
+        for raw_error in [1, 5, 13, 20, 40] {
+            assert_eq!(
+                file_metadata_with(Path::new("/fixture/EFI/BootHop/arch.efi"), &mut |path| {
+                    if path == Path::new("/fixture/EFI") {
+                        Err(raw_error)
+                    } else {
+                        Ok(trusted.clone())
+                    }
+                })
+                .unwrap_err(),
+                raw_error
+            );
+        }
+        assert_eq!(
+            file_metadata_with(Path::new("/fixture/EFI/BootHop/arch.efi"), &mut |path| {
+                if path == Path::new("/fixture/EFI") {
+                    Ok(unsafe_parent.clone())
+                } else {
+                    Ok(trusted.clone())
+                }
+            })
+            .unwrap_err(),
+            1
+        );
+        let temp = std::env::temp_dir().join(format!(
+            "boothop-metadata-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::os::unix::fs::symlink("missing-target", &temp).unwrap();
+        let link = fs::symlink_metadata(&temp).unwrap();
+        fs::remove_file(&temp).unwrap();
+        assert_eq!(
+            file_metadata_with(Path::new("/fixture/EFI/BootHop/arch.efi"), &mut |path| {
+                if path == Path::new("/fixture/EFI") {
+                    Ok(link.clone())
+                } else {
+                    Ok(trusted.clone())
+                }
+            })
+            .unwrap_err(),
+            1
+        );
+    }
 
     #[test]
     fn gpt_uuid_uses_uefi_field_byte_order_and_rejects_bad_shapes() {
