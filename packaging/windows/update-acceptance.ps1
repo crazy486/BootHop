@@ -116,7 +116,7 @@ function Write-AcceptanceCopy($held, [string]$destination, [string]$hash, [int64
 function Invoke-AcceptanceReplace($entry, $resources, $replaced, [scriptblock]$CheckAcl) {
     & $CheckAcl $entry.Path; & $CheckAcl $entry.Temporary
     Close-Held $entry.Existing
-    [IO.File]::Replace($entry.Temporary,$entry.Path,$null)
+    [IO.File]::Replace($entry.Temporary,$entry.Path,[System.Management.Automation.Language.NullString]::Value)
     $replaced.Add($entry.Name)
     $installed = Add-HeldResource $resources (Open-HeldFileResource $entry.Path 'installed acceptance PE' $entry.Path)
     & $CheckAcl $entry.Path
