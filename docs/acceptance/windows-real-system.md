@@ -64,6 +64,40 @@ independent readback confirms the exact hashes, regular non-reparse files,
 fixed paths, execution-level manifests, protected directory owner/ACL, absence
 of `targets.json`, and absence of every forbidden persistence mechanism.
 
+## Prepared acceptance updater — existing layout only
+
+`packaging/windows/update-acceptance.ps1` is a **NON-PRODUCTION**, one-shot
+updater prepared for the audited commit `1ba55b2c30a8fc8f8783fa60d000b179906aa306`,
+workflow run `37145743889`. Preparation and fixture CI authorize no host changes.
+It is not a fresh installer and stops if either fixed-path executable or the
+protected data directory is absent. The separately authorized operator uses a
+trusted checkout of the script and the complete extracted CI bundle:
+
+```powershell
+# Read-only installed-pair verification; no process stop or file write.
+./packaging/windows/update-acceptance.ps1 -BundlePath 'C:\private\audited-bundle' -VerifyOnly
+# Only after explicit host update authorization, in an already elevated shell:
+./packaging/windows/update-acceptance.ps1 -BundlePath 'C:\private\audited-bundle' -Apply
+```
+
+The updater pins both binary hashes and sizes, commit and run, validates the
+stage with `check-package.ps1`, and checks provenance, architecture, protocol
+and execution levels. The audited binary hashes preserve the CI-checked
+embedded manifests. It requires existing trusted owners and ACLs and rejects
+reparse points; it never changes an ACL. It stops only processes whose retained
+handles identify the exact fixed GUI/helper paths. Unrelated same-name processes
+are untouched; uncertain identity stops the operation.
+
+It preserves `C:\ProgramData\BootHop`, holding its existing files read-only
+and comparing their bytes and ACLs. It prepares and flushes both exclusive
+sibling candidates before replacing the two existing EXEs with `File.Replace`.
+Replacement is atomic **per file**, not for the pair. Keep BootHop closed until
+both installed hashes and ACLs verify. A failure reports completed replacements
+and means **STOP**: no automatic retry, rollback, helper launch, Configure,
+Switch, firmware access, reboot, or security-policy change follows. A separately
+authorized operator can run `-VerifyOnly` for independent readback. These steps
+do not establish W1 success or production installer/recovery readiness.
+
 ## W1 — production Inspect, read-only
 
 W1 validates the production GUI-to-helper Inspect path exactly as implemented.
