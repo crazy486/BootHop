@@ -122,7 +122,7 @@ function Invoke-AcceptanceReplace($entry, $resources, $replaced, [scriptblock]$C
     Close-Held $entry.Existing
     [IO.File]::Replace($entry.Temporary,$entry.Path,[System.Management.Automation.Language.NullString]::Value)
     $replaced.Add($entry.Name)
-    $installed = Add-HeldResource $resources (Open-HeldFileResource $entry.Path 'installed acceptance PE' $entry.Path)
+    $installed = Add-HeldResource $resources (Open-HeldFileResource $entry.Path 'installed acceptance PE' $entry.Path -ParentShareWrite)
     & $CheckAcl $entry.Path
     if ($installed.Held.Stream.Length -ne $entry.Expected.Size -or (Get-HeldHash $installed.Held) -cne $entry.Expected.Hash) { throw "Installed $($entry.Name) readback mismatch" }
 }
@@ -201,7 +201,7 @@ try {
     # Literal existing-layout contract: no environment expansion or install-root override.
     $install = 'C:\Program Files\BootHop'; $data = 'C:\ProgramData\BootHop'
     foreach ($directory in @($install,$data)) {
-        [void](Add-HeldResource $resources (Open-HeldDirectoryPins $directory 'existing acceptance layout' $directory))
+        [void](Add-HeldResource $resources (Open-HeldDirectoryPins $directory 'existing acceptance layout' $directory -ShareWriteOnTarget:($Apply -and $directory -ceq $install)))
     }
     foreach ($ancestor in @('C:\','C:\Program Files','C:\ProgramData')) { Assert-AcceptancePathAcl $ancestor -ParentBoundary }
     Assert-AcceptancePathAcl $install -TrustedInstallerInherited
@@ -209,7 +209,7 @@ try {
     $entries = @()
     foreach ($name in @('gui','helper')) {
         $path = Join-Path $install "boothop-$name.exe"
-        $existing = Open-HeldFileResource $path 'existing acceptance PE' $path; $oldFiles.Add($existing)
+        $existing = Open-HeldFileResource $path 'existing acceptance PE' $path -ParentShareWrite:$Apply; $oldFiles.Add($existing)
         Assert-AcceptancePathAcl $path
         $expected = $identity.Binaries[$name]; $inputFile = $source["Program Files\BootHop\boothop-$name.exe"].Held
         if ($inputFile.Stream.Length -ne $expected.Size -or (Get-HeldHash $inputFile) -cne $expected.Hash) { throw "Pinned $name bytes mismatch" }

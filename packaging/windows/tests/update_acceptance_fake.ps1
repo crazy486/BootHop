@@ -118,6 +118,25 @@ try {
     } finally { Close-Held $entries.Existing; Close-HeldResourceSet $resources }
     Assert ((Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $hash) 'real per-file replacement is verified'
     Assert ([IO.File]::ReadAllText($untouched) -ceq 'preserve') 'sibling protected record remains unchanged'
+
+    $replaceTarget = Join-Path $temp 'held-directory-target.exe'
+    $replaceSource = Join-Path $temp 'held-directory-source.tmp'
+    [IO.File]::WriteAllText($replaceTarget, 'old')
+    [IO.File]::WriteAllText($replaceSource, 'new')
+    $directoryPins = Open-HeldDirectoryPins $temp 'replace fixture directory' $temp
+    try {
+        try { [IO.File]::Replace($replaceSource, $replaceTarget, [System.Management.Automation.Language.NullString]::Value); throw 'FAIL: replace unexpectedly ignored held directory' }
+        catch {
+            if ($_.Exception.Message.StartsWith('FAIL:')) { throw }
+            $errorCode = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$_.Exception.GetBaseException().HResult), 0)
+            Assert ($errorCode.ToString('X8') -ceq '80070497') "held directory reproduces ERROR_UNABLE_TO_REMOVE_REPLACED (got 0x$($errorCode.ToString('X8')))"
+        }
+    } finally { Close-Held $directoryPins }
+    $directoryPins = Open-HeldDirectoryPins $temp 'replace fixture directory' $temp -ShareWriteOnTarget
+    try {
+        [IO.File]::Replace($replaceSource, $replaceTarget, [System.Management.Automation.Language.NullString]::Value)
+        Assert ([IO.File]::ReadAllText($replaceTarget) -ceq 'new') 'File.Replace succeeds while canonical directory pin remains held'
+    } finally { Close-Held $directoryPins }
     $link = Join-Path $temp 'junction'
     New-Item -ItemType Junction -Path $link -Target $temp | Out-Null
     Assert-Fails { Open-HeldDirectoryPins $link 'fixture junction' $link } 'reparse point'

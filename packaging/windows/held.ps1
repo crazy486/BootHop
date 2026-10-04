@@ -1,7 +1,7 @@
-# Shared Windows-only handle helpers for the staging and audit scripts. Handles
-# use FILE_SHARE_READ only, so a held input cannot be replaced, renamed, or
-# modified while its bytes are consumed. The scripts still perform explicit
-# canonical/reparse checks before opening each handle.
+# Shared Windows-only handle helpers for the staging and audit scripts. File
+# handles use FILE_SHARE_READ only. Directory pins do too by default; callers
+# may explicitly share writes on the install directory during replacement.
+# The scripts still perform explicit canonical/reparse checks before opening.
 if ($null -eq ('WindowsFileHandle' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -25,8 +25,9 @@ public static class WindowsFileHandle {
         if (h.IsInvalid) { h.Dispose(); throw new IOException("CreateFileW file failed: " + Marshal.GetLastWin32Error()); }
         return new FileStream(h, FileAccess.Read, 1, false);
     }
-    public static FileStream OpenDirectory(string path) {
-        var h = CreateFileW(path, 0x80000000u, 1u, IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
+    public static FileStream OpenDirectory(string path, bool shareWrite) {
+        var share = shareWrite ? 3u : 1u;
+        var h = CreateFileW(path, 0x80000000u, share, IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
         if (h.IsInvalid) { h.Dispose(); throw new IOException("CreateFileW directory failed: " + Marshal.GetLastWin32Error()); }
         return new FileStream(h, FileAccess.Read, 1, false);
     }
@@ -71,8 +72,8 @@ function Open-HeldRead([string] $path, [string] $label, [string] $expectedCanoni
         return [pscustomobject]@{ Stream=$stream; Identity=$identity; Canonical=$final; Path=$path }
     } catch { $stream.Dispose(); throw }
 }
-function Open-HeldDirectory([string] $path, [string] $label, [string] $expectedCanonical = $null) {
-    try { $stream = [WindowsFileHandle]::OpenDirectory($path) } catch {
+function Open-HeldDirectory([string] $path, [string] $label, [string] $expectedCanonical = $null, [switch] $ShareWrite) {
+    try { $stream = [WindowsFileHandle]::OpenDirectory($path, [bool]$ShareWrite) } catch {
         if ($_.Exception.Message -match 'CreateFileW directory failed:\s*(2|3)(?:\D|$)') { throw "$label is missing or not a directory" }
         throw "Held $label directory open failed: $($_.Exception.Message)"
     }
@@ -94,14 +95,15 @@ function Get-HeldAncestorPaths([string] $path) {
     }
     [array]::Reverse($paths); return @($paths)
 }
-function Open-HeldDirectoryPins([string] $path, [string] $label, [string] $expectedCanonical = $null) {
+function Open-HeldDirectoryPins([string] $path, [string] $label, [string] $expectedCanonical = $null, [switch] $ShareWriteOnTarget) {
     $pins = [Collections.Generic.List[object]]::new()
     try {
         $expected = if ($null -eq $expectedCanonical) { $null } else { [IO.Path]::GetFullPath($expectedCanonical) }
         $target = [IO.Path]::GetFullPath($path)
         foreach ($ancestor in (Get-HeldAncestorPaths $path)) {
             $pinLabel = if ([string]::Equals($ancestor, $target, [StringComparison]::Ordinal)) { $label } else { "$label ancestor $ancestor" }
-            $pin = Open-HeldDirectory $ancestor $pinLabel $ancestor
+            $shareWrite = $ShareWriteOnTarget -and [string]::Equals($ancestor, $target, [StringComparison]::Ordinal)
+            $pin = Open-HeldDirectory $ancestor $pinLabel $ancestor -ShareWrite:$shareWrite
             $pins.Add($pin)
         }
         if ($null -ne $expected -and -not [string]::Equals($target, $expected, [StringComparison]::Ordinal)) { throw "$label canonical path differs" }
@@ -111,10 +113,10 @@ function Open-HeldDirectoryPins([string] $path, [string] $label, [string] $expec
         throw
     }
 }
-function Open-HeldFileResource([string] $path, [string] $label, [string] $expectedCanonical = $null) {
+function Open-HeldFileResource([string] $path, [string] $label, [string] $expectedCanonical = $null, [switch] $ParentShareWrite) {
     if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { throw "$label must be absolute" }
     $path = [IO.Path]::GetFullPath($path); $parent = Split-Path -Path $path -Parent
-    $pins = Open-HeldDirectoryPins $parent "$label parent" $parent
+    $pins = Open-HeldDirectoryPins $parent "$label parent" $parent -ShareWriteOnTarget:$ParentShareWrite
     try { $held = Open-HeldRead $path $label $expectedCanonical; return [pscustomobject]@{ Kind='FileResource'; Held=$held; Pins=$pins } }
     catch { Close-Held $pins; throw }
 }
