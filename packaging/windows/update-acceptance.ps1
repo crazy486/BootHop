@@ -32,10 +32,11 @@ function Assert-AcceptanceProvenance($provenance, $manifest) {
         }
     }
 }
-function Assert-AcceptanceAcl($acl, [string]$label, [switch]$NoOrdinaryAccess, [switch]$ParentBoundary) {
+function Assert-AcceptanceAcl($acl, [string]$label, [switch]$NoOrdinaryAccess, [switch]$ParentBoundary, [switch]$TrustedInstallerInherited) {
     $trusted = @('S-1-5-18','S-1-5-32-544')
+    $trustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
     # Windows owns the existing Program Files ancestor through TrustedInstaller.
-    if ($ParentBoundary) { $trusted += 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' }
+    if ($ParentBoundary) { $trusted += $trustedInstaller }
     if ($null -eq $acl -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted) { throw "$label owner is not trusted" }
     $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
     if ($null -eq $raw.DiscretionaryAcl) { throw "$label has a null DACL" }
@@ -52,6 +53,9 @@ function Assert-AcceptanceAcl($acl, [string]$label, [switch]$NoOrdinaryAccess, [
     }
     foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rule.IdentityReference.Value -in $trusted) { continue }
+        # The existing install directory can inherit TrustedInstaller from
+        # Program Files. An explicit ACE, or any ordinary principal, is not trusted.
+        if ($TrustedInstallerInherited -and $rule.IsInherited -and $rule.IdentityReference.Value -ceq $trustedInstaller) { continue }
         # CREATOR OWNER applies only to descendants, whose actual owner/ACL
         # is checked separately (including both exclusive candidates).
         if ($rule.IdentityReference.Value -ceq 'S-1-3-0' -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
@@ -60,8 +64,8 @@ function Assert-AcceptanceAcl($acl, [string]$label, [switch]$NoOrdinaryAccess, [
         if (([int64]$rule.FileSystemRights -band $writeMask) -ne 0) { throw "$label permits ordinary write" }
     }
 }
-function Assert-AcceptancePathAcl([string]$path, [switch]$NoOrdinaryAccess, [switch]$ParentBoundary) {
-    Assert-AcceptanceAcl (Get-Acl -LiteralPath $path) $path -NoOrdinaryAccess:$NoOrdinaryAccess -ParentBoundary:$ParentBoundary
+function Assert-AcceptancePathAcl([string]$path, [switch]$NoOrdinaryAccess, [switch]$ParentBoundary, [switch]$TrustedInstallerInherited) {
+    Assert-AcceptanceAcl (Get-Acl -LiteralPath $path) $path -NoOrdinaryAccess:$NoOrdinaryAccess -ParentBoundary:$ParentBoundary -TrustedInstallerInherited:$TrustedInstallerInherited
 }
 function Get-AcceptanceProcessDisposition([string]$image, [string[]]$paths) {
     if ([string]::IsNullOrWhiteSpace($image) -or $image -notmatch '^[A-Za-z]:\\' -or $image -match '(?:^|\\)\.\.(?:\\|$)') { throw 'BootHop process identity uncertain; stop without killing any uncertain process' }
@@ -200,7 +204,7 @@ try {
         [void](Add-HeldResource $resources (Open-HeldDirectoryPins $directory 'existing acceptance layout' $directory))
     }
     foreach ($ancestor in @('C:\','C:\Program Files','C:\ProgramData')) { Assert-AcceptancePathAcl $ancestor -ParentBoundary }
-    Assert-AcceptancePathAcl $install
+    Assert-AcceptancePathAcl $install -TrustedInstallerInherited
     $baseline = @(Get-AcceptanceDataBaseline $data $resources)
     $entries = @()
     foreach ($name in @('gui','helper')) {
@@ -233,7 +237,7 @@ try {
         Assert-AcceptanceDataBaseline $baseline
         foreach ($entry in $entries) {
             Assert-AcceptanceProcessesStopped @($entries | ForEach-Object { $_.Path })
-            Assert-AcceptancePathAcl $install
+            Assert-AcceptancePathAcl $install -TrustedInstallerInherited
             Invoke-AcceptanceReplace $entry $resources $replaced { param($path) Assert-AcceptancePathAcl $path }
         }
         Assert-AcceptanceDataBaseline $baseline

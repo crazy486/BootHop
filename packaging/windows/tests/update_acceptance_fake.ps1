@@ -44,6 +44,20 @@ $acl = New-AclFixture
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'), 'DeleteSubdirectoriesAndFiles', 'Allow'))
 Assert-Fails { Assert-AcceptanceAcl $acl 'fixture' -ParentBoundary } 'ordinary write'
 
+# The existing Program Files child inherits TrustedInstaller FullControl, plus
+# an inherit-only GenericAll ACE. Only that inherited Windows service ACE may
+# be trusted at the install directory; ordinary Users Write must still fail.
+$installerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+$installAcl = [Security.AccessControl.DirectorySecurity]::new()
+$installAcl.SetSecurityDescriptorSddlForm("O:BAG:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;$installerSid)(A;CIIOID;GA;;;$installerSid)(A;ID;0x1200a9;;;BU)")
+Assert-Fails { Assert-AcceptanceAcl $installAcl 'install fixture' } 'ordinary write'
+Assert-AcceptanceAcl $installAcl 'install fixture' -TrustedInstallerInherited
+$installAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'), 'Write', 'Allow'))
+Assert-Fails { Assert-AcceptanceAcl $installAcl 'install fixture' -TrustedInstallerInherited } 'ordinary write'
+$explicitInstallerAcl = New-AclFixture
+$explicitInstallerAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($installerSid), 'FullControl', 'Allow'))
+Assert-Fails { Assert-AcceptanceAcl $explicitInstallerAcl 'explicit installer fixture' -TrustedInstallerInherited } 'ordinary write'
+
 $identity = Get-AcceptanceIdentity
 $manifest = [pscustomobject]@{architecture='x86_64-pc-windows-msvc';protocol_version=2;production_status='NON-PRODUCTION';binaries=[pscustomobject]@{}}
 $provenance = [pscustomobject]@{schema_version=1;source_commit=$identity.Commit;workflow_run_id=$identity.Run;architecture=$manifest.architecture;protocol_version=2;production_status='NON-PRODUCTION'}
